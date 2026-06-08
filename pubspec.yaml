@@ -59,7 +59,6 @@ flutter:
   assets:
     - assets/icon.png
     - assets/videos/
-    - assets/service_account.json 
 
 flutter_launcher_icons:
   android: "ic_launcher"

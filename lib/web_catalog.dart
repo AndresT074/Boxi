@@ -4,9 +4,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter/services.dart';
-import 'package:Boxi/screens/servicio_fcm.dart';
 import 'package:flutter/foundation.dart' show kIsWeb; // Nuevo
 import 'package:universal_html/js.dart' as js; 
+import 'package:http/http.dart' as http; // 🔥 NUEVO: Importación que faltaba en el catálogo
 
 class CatalogoWeb extends StatefulWidget {
   final String adminId;
@@ -1038,9 +1038,14 @@ class _CatalogoWebState extends State<CatalogoWeb> {
                       'fecha': ahora.toIso8601String(),
                       'expireAt': Timestamp.fromDate(fechaExpiracion),
                     });
-                    ServicioFCM.enviarNotificacion(
-                      adminId: widget.adminId,
-                      nombreCliente: nC.text.trim(),
+                    //  Pega esto en su lugar (cambia con tu URL de Vercel):
+                    await http.post(
+                      Uri.parse('https://boxi-api.vercel.app/api/notificar'), // 👈 Tu URL de Vercel
+                      headers: {'Content-Type': 'application/json'},
+                      body: jsonEncode({
+                        'adminId': widget.adminId,
+                        'nombreCliente': nC.text.trim(),
+                      }),
                     );
                     Navigator.pop(ctx);
                     
