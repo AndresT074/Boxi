@@ -1,0 +1,2158 @@
+import 'dart:convert';
+import 'package:flutter/material.dart';
+import '../database/db_helper.dart';
+import 'servicio_pdf.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'servicio_nube.dart';
+import 'servicio_anuncios.dart';
+import 'dart:async';
+import 'pantalla_premium.dart';
+
+class PantallaGestionPedidos extends StatefulWidget {
+  const PantallaGestionPedidos({super.key});
+  @override
+  State<PantallaGestionPedidos> createState() => _PantallaGestionPedidosState();
+}
+
+class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
+    with SingleTickerProviderStateMixin {
+  List<Map<String, dynamic>> _pedidos = [];
+  Map<int, bool> _pedidosBloqueados = {};
+  bool _esPremium = false;
+  String _estadoActual = 'Pendiente';
+  final Map<int, bool> _logoToggle = {};
+  final Map<int, List<Map<String, dynamic>>> _detallesCache = {};
+  bool _refrescando = false;
+  late AnimationController _refreshAnim;
+
+  void _invalidarCache(int pedidoId) => _detallesCache.remove(pedidoId);
+
+  // Colores y estilos por estado
+  static const Map<String, Color> _coloresEstado = {
+    'Pendiente': Color(0xFFFF8C00),
+    'Entregado sin Pago': Color(0xFF2196F3),
+    'Completado': Color(0xFF00C853),
+    'Cancelado': Color(0xFFE53935),
+  };
+
+  static const Map<String, IconData> _iconosEstado = {
+    'Pendiente': Icons.hourglass_empty_rounded,
+    'Entregado sin Pago': Icons.local_shipping_rounded,
+    'Completado': Icons.check_circle_rounded,
+    'Cancelado': Icons.cancel_rounded,
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshAnim = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    );
+    _inicializarPantalla();
+  }
+
+  @override
+  void dispose() {
+    _refreshAnim.dispose();
+    super.dispose();
+  }
+
+  Future<void> _inicializarPantalla() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) setState(() => _esPremium = prefs.getBool('es_premium') ?? false);
+    await _cargar();
+  }
+
+  Future<void> _cargar() async {
+    final db = await DBHelper.instance.database;
+    final peds = await db.rawQuery('''
+      SELECT pedidos.*,
+            clientes.nombre_completo as cliente_nombre,
+            clientes.nombre_negocio as negocio_nombre,
+            clientes.direccion as cliente_direccion,
+            clientes.ciudad as cliente_ciudad,
+            clientes.telefono as cliente_telefono,
+            vendedores.nombre as vendedor_nombre,
+            vendedores.telefono as vendedor_telefono
+      FROM pedidos
+      LEFT JOIN clientes ON pedidos.cliente_id = clientes.id
+      LEFT JOIN vendedores ON pedidos.vendedor_id = vendedores.id
+      ORDER BY pedidos.id DESC
+    ''');
+
+    Map<int, bool> bloqueos = {};
+    for (var p in peds) {
+      int id = p['id'] as int;
+      if (p['estado'] != 'Pendiente') {
+        bloqueos[id] = false;
+        continue;
+      }
+      if (!_detallesCache.containsKey(id)) {
+        _detallesCache[id] = await _obtenerDetalles(id);
+      }
+      bloqueos[id] = _detallesCache[id]!.any((d) => d['sin_stock'] == 1);
+    }
+
+    if (mounted) {
+      setState(() {
+        _pedidos = peds;
+        _pedidosBloqueados = bloqueos;
+      });
+    }
+  }
+
+  Future<void> _refrescarDesdeNube() async {
+    if (_refrescando || !_esPremium) return;
+    setState(() => _refrescando = true);
+    _refreshAnim.repeat();
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final uid = prefs.getString('user_uid');
+      if (uid == null || !await ServicioNube.tieneInternet()) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text('Sin conexión a internet'),
+              backgroundColor: Colors.red,
+              behavior: SnackBarBehavior.floating,
+              margin: const EdgeInsets.all(12),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+          );
+        }
+        return;
+      }
+      await ServicioNube.sincronizarBorradosFisicos(uid, 'pedidos');
+      await ServicioNube.sincronizarBorradosFisicos(uid, 'detalle_pedidos');
+      await ServicioNube.descargarSoloModificados(
+          uid, 'pedidos', 'ultima_modificacion');
+      await ServicioNube.descargarSoloModificados(
+          uid, 'detalle_pedidos', 'ultima_modificacion');
+      await ServicioNube.limpiarFantasmasNubeYLocal(uid);
+      _detallesCache.clear();
+      await _cargar();
+
+      if (mounted) {
+        final count = _pedidos.length;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(children: [
+              const Icon(Icons.cloud_done_rounded, color: Colors.white, size: 18),
+              const SizedBox(width: 10),
+              Text('$count pedidos sincronizados',
+                  style: const TextStyle(fontWeight: FontWeight.bold)),
+            ]),
+            backgroundColor: const Color(0xFF00C853),
+            behavior: SnackBarBehavior.floating,
+            margin: const EdgeInsets.all(12),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Error en _refrescarDesdeNube: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error al sincronizar: $e'),
+            backgroundColor: Colors.red,
+            behavior: SnackBarBehavior.floating,
+            margin: const EdgeInsets.all(12),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+        );
+      }
+    } finally {
+      _refreshAnim.stop();
+      _refreshAnim.reset();
+      if (mounted) setState(() => _refrescando = false);
+    }
+  }
+
+  Map<String, List<Map<String, dynamic>>> _agruparPorFecha(
+      List<Map<String, dynamic>> pedidos) {
+    final Map<String, List<Map<String, dynamic>>> grupos = {};
+    for (var p in pedidos) {
+      String fechaHora = p['fecha_hora']?.toString() ?? p['fecha']?.toString() ?? '';
+      String fechaKey = fechaHora.length >= 10 ? fechaHora.substring(0, 10) : 'Sin fecha';
+      grupos.putIfAbsent(fechaKey, () => []).add(p);
+    }
+    return grupos;
+  }
+
+  String _formatearFechaGrupo(String fechaKey) {
+    if (fechaKey == 'Sin fecha') return fechaKey;
+    try {
+      final dt = DateTime.parse(fechaKey);
+      final hoy = DateTime.now();
+      final ayer = hoy.subtract(const Duration(days: 1));
+      if (dt.year == hoy.year && dt.month == hoy.month && dt.day == hoy.day) return 'HOY';
+      if (dt.year == ayer.year && dt.month == ayer.month && dt.day == ayer.day) return 'AYER';
+      const meses = ['', 'ENE', 'FEB', 'MAR', 'ABR', 'MAY', 'JUN', 'JUL', 'AGO', 'SEP', 'OCT', 'NOV', 'DIC'];
+      return '${dt.day} ${meses[dt.month]} ${dt.year}';
+    } catch (_) {
+      return fechaKey;
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _obtenerDetalles(int pedId) async {
+    final db = await DBHelper.instance.database;
+    final resultado = await db.rawQuery('''
+      SELECT d.*,
+            IFNULL(d.nombre_snapshot, IFNULL(p.nombre, "Producto")) as nombre_prod,
+            p.variantes as prod_variantes,
+            p.nombre as prod_nombre_base,
+            p.stock as stock_actual_general
+      FROM detalle_pedidos d
+      LEFT JOIN productos p ON d.producto_id = p.id
+      WHERE d.pedido_id = ?
+    ''', [pedId]);
+
+    List<Map<String, dynamic>> detallesEditables =
+        resultado.map((e) => Map<String, dynamic>.from(e)).toList();
+
+    for (var d in detallesEditables) {
+      d['sin_stock'] = 0;
+      String varStr = d['prod_variantes']?.toString() ?? "";
+      String nombreSnapshot = d['nombre_snapshot']?.toString() ?? "";
+
+      if (varStr.length > 5 && nombreSnapshot.contains(" - ")) {
+        try {
+          List<dynamic> grupos = jsonDecode(varStr);
+          bool encontroVariante = false;
+          for (var g in grupos) {
+            if (!g.containsKey('grupo')) continue;
+            for (var o in g['opciones']) {
+              String nombreVar1 = "${d['prod_nombre_base']} - ${g['grupo']}: ${o['nombre']}";
+              String nombreVar2 = "${d['prod_nombre_base']} - ${o['nombre']}";
+              
+              if (nombreSnapshot == nombreVar1 || nombreSnapshot == nombreVar2) {
+                encontroVariante = true;
+                if ((o['stock'] as int) < 0) d['sin_stock'] = 1;
+                break;
+              }
+            }
+            if (encontroVariante) break;
+          }
+        } catch (e) {
+          debugPrint("Error validando variante: $e");
+        }
+      } else {
+        int stockBase = (d['stock_actual_general'] ?? 0) as int;
+        if (stockBase < 0) d['sin_stock'] = 1;
+      }
+    }
+    return detallesEditables;
+  }
+
+  Future<void> _modificarStockBD(
+      int productoId, int cantidadADescontar, String? nombreSnapshot) async {
+    final db = await DBHelper.instance.database;
+    var pRes = await db.query('productos', where: 'id = ?', whereArgs: [productoId]);
+    if (pRes.isEmpty) return;
+
+    var p = pRes.first;
+    int nuevoStockGeneral = (p['stock'] as int) - cantidadADescontar;
+    String variantesStr = p['variantes']?.toString() ?? "";
+
+    if (variantesStr.length > 5 && nombreSnapshot != null) {
+      try {
+        List<dynamic> grupos = jsonDecode(variantesStr);
+        bool encontrado = false;
+        for (var g in grupos) {
+          if (!g.containsKey('grupo')) continue;
+          for (var o in g['opciones']) {
+            String nombreVar = "${p['nombre']} - ${g['grupo']}: ${o['nombre']}";
+            String nombreAntigua = "${p['nombre']} - ${o['nombre']}";
+            if (nombreVar == nombreSnapshot || nombreAntigua == nombreSnapshot) {
+              o['stock'] = (o['stock'] as int) - cantidadADescontar;
+              encontrado = true;
+              break;
+            }
+          }
+          if (encontrado) break;
+        }
+        int totalPositivos = 0;
+        for (var g in grupos) {
+          for (var o in g['opciones']) {
+            int s = o['stock'] as int;
+            if (s > 0) totalPositivos += s;
+          }
+        }
+        nuevoStockGeneral = totalPositivos;
+        variantesStr = jsonEncode(grupos);
+      } catch (_) {}
+    }
+
+    await db.update(
+        'productos',
+        {
+          'stock': nuevoStockGeneral,
+          'variantes': variantesStr,
+          'ultima_modificacion': DateTime.now().toIso8601String()
+        },
+        where: 'id = ?',
+        whereArgs: [productoId]);
+
+    if (_esPremium) {
+      final pAct = await db.query('productos', where: 'id = ?', whereArgs: [productoId]);
+      if (pAct.isNotEmpty) ServicioNube.guardarProductoNube(Map<String, dynamic>.from(pAct.first));
+    }
+  }
+
+  void _confirmarCambioEstado(int pedidoId, String nuevoEstado) {
+    final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
+    String titulo = "";
+    String mensaje = "";
+    IconData icono = Icons.info;
+    Color color = Colors.blue;
+
+    if (nuevoEstado == 'Entregado sin Pago') {
+      titulo = "Entregado sin Pago";
+      mensaje = "¿Confirmas entrega pendiente de pago?";
+      icono = Icons.local_shipping_rounded;
+      color = Colors.orange;
+    } else if (nuevoEstado == 'Completado') {
+      titulo = "Pedido Completado";
+      mensaje = "¿Confirmas entrega y pago exitoso?";
+      icono = Icons.check_circle_rounded;
+      color = Colors.green;
+    } else if (nuevoEstado == 'Cancelado') {
+      titulo = "Cancelar Pedido";
+      mensaje = "¿Seguro? El stock será devuelto.";
+      icono = Icons.cancel_rounded;
+      color = Colors.red;
+    }
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Theme.of(context).cardColor,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(children: [
+          Icon(icono, color: color, size: 28),
+          const SizedBox(width: 10),
+          Expanded(
+              child: Text(titulo,
+                  style: TextStyle(
+                      color: color, fontWeight: FontWeight.bold, fontSize: 18))),
+        ]),
+        content:
+            Text(mensaje, style: TextStyle(color: isOscuro ? Colors.white70 : Colors.black87)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("VOLVER")),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: color),
+            onPressed: () {
+              Navigator.pop(ctx);
+              _cambiarEstado(pedidoId, nuevoEstado);
+            },
+            child: const Text("ACEPTAR", style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _cambiarEstado(int pedidoId, String nuevoEstado) async {
+    final db = await DBHelper.instance.database;
+    _invalidarCache(pedidoId);
+
+    void ejecutar() async {
+      // 1. Actualiza SQLite local de inmediato
+      await db.update(
+          'pedidos',
+          {'estado': nuevoEstado, 'ultima_modificacion': DateTime.now().toIso8601String()},
+          where: 'id = ?',
+          whereArgs: [pedidoId]);
+
+      if (nuevoEstado == 'Cancelado') {
+        final detalles =
+            await db.query('detalle_pedidos', where: 'pedido_id = ?', whereArgs: [pedidoId]);
+        for (var item in detalles) {
+          if (item['producto_id'] != null) {
+            await _modificarStockBD(item['producto_id'] as int,
+                -(item['cantidad'] as int), item['nombre_snapshot']?.toString());
+          }
+        }
+      }
+
+      // 2. Refresca la interfaz de inmediato para que el cambio se note offline [1.1.2]
+      _cargar();
+
+      // 3. Sincroniza en la nube de fondo protegiendo contra fallos sin conexión [1.1.2]
+      if (_esPremium) {
+        try {
+          await ServicioNube.actualizarEstadoPedidoNube(pedidoId, nuevoEstado);
+        } catch (e) {
+          debugPrint("Error al sincronizar estado offline: $e");
+        }
+      }
+    }
+
+    if (!_esPremium) {
+      ServicioAnuncios.mostrarAnuncioIntersticial(() => ejecutar());
+    } else {
+      ejecutar();
+    }
+  }
+
+  Future<void> _actualizarCantidadDetalle(
+      Map<String, dynamic> item,
+      int pedidoId,
+      int incremento,
+      StateSetter setSt,
+      Function(List<Map<String, dynamic>>) callback) async {
+    _invalidarCache(pedidoId);
+    int nuevaCantidad = (item['cantidad'] as int) + incremento;
+    if (nuevaCantidad < 1) return;
+
+    try {
+      setSt(() {
+        item['cantidad'] = nuevaCantidad;
+        item['subtotal'] = nuevaCantidad * (item['precio_unitario'] as num).toDouble();
+      });
+    } catch (_) {}
+
+    Future.microtask(() async {
+      final db = await DBHelper.instance.database;
+      double nuevoSubtotal = nuevaCantidad * (item['precio_unitario'] as num).toDouble();
+      int detId = item['id'] as int;
+
+      await db.update(
+          'detalle_pedidos',
+          {
+            'cantidad': nuevaCantidad,
+            'subtotal': nuevoSubtotal,
+            'ultima_modificacion': DateTime.now().toIso8601String()
+          },
+          where: 'id = ?',
+          whereArgs: [detId]);
+
+      if (item['producto_id'] != null) {
+        await _modificarStockBD(
+            item['producto_id'] as int, incremento, item['nombre_snapshot']?.toString());
+      }
+
+      if (_esPremium) {
+        var d = await db.query('detalle_pedidos', where: 'id = ?', whereArgs: [detId]);
+        if (d.isNotEmpty) ServicioNube.guardarUnicoDetalleNube(d.first);
+      }
+
+      await _recalcularTotal(pedidoId);
+      List<Map<String, dynamic>> res = await _obtenerDetalles(pedidoId);
+      try {
+        setSt(() => callback(res));
+      } catch (_) {}
+      _cargar();
+    });
+  }
+
+  void _cambiarVariante(Map<String, dynamic> item, int pedId, StateSetter setSt,
+      Function(List<Map<String, dynamic>>) callback) {
+    String varStr = item['prod_variantes']?.toString() ?? "";
+    if (varStr.length < 5) return;
+
+    List<dynamic> grupos;
+    try {
+      grupos = jsonDecode(varStr);
+    } catch (_) {
+      return;
+    }
+
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
+        return AlertDialog(
+          backgroundColor: Theme.of(context).cardColor,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+          title: Text("Reemplazar Variante",
+              style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                  color: isOscuro ? Colors.white : Colors.black)),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: grupos.expand((g) {
+                return (g['opciones'] as List).map((o) {
+                  if (o['activo'] == false) return const SizedBox.shrink();
+                  String nombreNueva =
+                      "${item['prod_nombre_base']} - ${g['grupo']}: ${o['nombre']}";
+                  bool isCurrent = nombreNueva == item['nombre_prod'];
+                  return ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.style,
+                        color: isOscuro ? Colors.cyanAccent : Colors.blueGrey),
+                    title: Text(o['nombre'],
+                        style: TextStyle(
+                            color: isOscuro ? Colors.white : Colors.black87,
+                            fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal)),
+                    subtitle: Text("Stock: ${o['stock']}",
+                        style: TextStyle(
+                            color: isOscuro ? Colors.white54 : Colors.black54)),
+                    trailing: isCurrent
+                        ? const Icon(Icons.check_circle, color: Colors.green)
+                        : const Icon(Icons.swap_horiz, color: Colors.orange),
+                    onTap: isCurrent
+                        ? null
+                        : () async {
+                            int cantidadVendida = item['cantidad'] as int;
+                            await _modificarStockBD(item['producto_id'] as int,
+                                -cantidadVendida, item['nombre_snapshot']?.toString());
+                            await _modificarStockBD(
+                                item['producto_id'] as int, cantidadVendida, nombreNueva);
+
+                            final db = await DBHelper.instance.database;
+                            await db.update(
+                                'detalle_pedidos',
+                                {
+                                  'nombre_snapshot': nombreNueva,
+                                  'ultima_modificacion': DateTime.now().toIso8601String()
+                                },
+                                where: 'id = ?',
+                                whereArgs: [item['id']]);
+
+                            if (_esPremium) {
+                              var d = await db.query('detalle_pedidos',
+                                  where: 'id = ?', whereArgs: [item['id']]);
+                              if (d.isNotEmpty) await ServicioNube.guardarUnicoDetalleNube(d.first);
+                            }
+
+                            _invalidarCache(pedId);
+                            List<Map<String, dynamic>> res = await _obtenerDetalles(pedId);
+                            if (mounted) {
+                              Navigator.pop(ctx);
+                              setSt(() => callback(res));
+                              _cargar();
+                            }
+                          },
+                  );
+                }).toList();
+              }).toList().cast<Widget>(),
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text("CANCELAR", style: TextStyle(color: Colors.grey)))
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _actualizarDescuentoDetalle(
+      Map<String, dynamic> item,
+      int pedidoId,
+      double nuevoDesc,
+      StateSetter setSt,
+      Function(List<Map<String, dynamic>>) callback) async {
+    final db = await DBHelper.instance.database;
+    double precioBase = (item['precio_unitario'] as num).toDouble();
+    int cant = item['cantidad'] as int;
+    double nuevoSubtotal = (precioBase - (precioBase * (nuevoDesc / 100))) * cant;
+
+    await db.update(
+        'detalle_pedidos',
+        {
+          'descuento': nuevoDesc,
+          'subtotal': nuevoSubtotal,
+          'ultima_modificacion': DateTime.now().toIso8601String()
+        },
+        where: 'id = ?',
+        whereArgs: [item['id']]);
+
+    if (_esPremium) {
+      var d = await db.query('detalle_pedidos', where: 'id = ?', whereArgs: [item['id']]);
+      if (d.isNotEmpty) ServicioNube.guardarUnicoDetalleNube(d.first);
+    }
+
+    await _recalcularTotal(pedidoId);
+    _actualizarVistaEditor(pedidoId, setSt, callback);
+  }
+
+  void _abrirEditorPedido(Map<String, dynamic> pedido) async {
+    final int pedId = pedido['id'] as int;
+    List<Map<String, dynamic>> detalles = await _obtenerDetalles(pedId);
+    final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
+
+    String formatearInicial(dynamic val) {
+      double d = (val as num).toDouble();
+      return d == 0 ? "" : d.toString();
+    }
+
+    TextEditingController domiCtrl =
+        TextEditingController(text: formatearInicial(pedido['valor_domicilio'] ?? 0));
+    final Map<int, TextEditingController> descCtrls = {};
+    for (int i = 0; i < detalles.length; i++) {
+      descCtrls[i] =
+          TextEditingController(text: formatearInicial(detalles[i]['descuento'] ?? 0));
+    }
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setSt) {
+          double subtotalProds =
+              detalles.fold(0, (sum, i) => sum + (i['subtotal'] as num).toDouble());
+          double domiActual = double.tryParse(domiCtrl.text) ?? 0;
+
+          return AlertDialog(
+            backgroundColor: Theme.of(context).cardColor,
+            insetPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 20),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(25)),
+            title: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text("Editar Pedido",
+                    style: TextStyle(
+                        color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1),
+                        fontWeight: FontWeight.bold,
+                        fontSize: 20)),
+                IconButton(
+                    icon: const Icon(Icons.add_circle, color: Colors.green, size: 30),
+                    onPressed: () =>
+                        _buscarYAgregar(pedId, setSt, (newList) => detalles = newList))
+              ],
+            ),
+            content: SizedBox(
+              width: MediaQuery.of(context).size.width * 0.9,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextField(
+                      controller: domiCtrl,
+                      keyboardType: TextInputType.number,
+                      style: TextStyle(color: isOscuro ? Colors.white : Colors.black),
+                      decoration: InputDecoration(
+                        labelText: "Costo de Domicilio",
+                        hintText: "0",
+                        labelStyle:
+                            TextStyle(color: isOscuro ? Colors.white60 : Colors.black54),
+                        prefixIcon: const Icon(Icons.motorcycle, color: Colors.blue),
+                        border: const OutlineInputBorder(),
+                      ),
+                      onChanged: (v) => setSt(() {}),
+                    ),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: TextButton.icon(
+                        icon: const Icon(Icons.percent, size: 16, color: Colors.orange),
+                        label: const Text("Aplicar % a todo",
+                            style: TextStyle(
+                                color: Colors.orange, fontWeight: FontWeight.bold)),
+                        onPressed: () => _promptDescuentoGlobal(
+                            pedId, detalles, setSt, (newList) => detalles = newList),
+                      ),
+                    ),
+                    const Divider(height: 30),
+                    ...detalles.asMap().entries.map((entry) {
+                      final idx = entry.key;
+                      final item = entry.value;
+                      if (!descCtrls.containsKey(idx)) {
+                        descCtrls[idx] = TextEditingController(
+                            text: formatearInicial(item['descuento'] ?? 0));
+                      }
+                      final descCtrl = descCtrls[idx]!;
+                      bool tieneVariantes = item['prod_variantes'] != null &&
+                          item['prod_variantes'].toString().length > 5;
+                      double pUnitario = (item['precio_unitario'] as num).toDouble();
+                      double dPct = (item['descuento'] ?? 0).toDouble();
+                      int cant = (item['cantidad'] as int);
+                      double subtotalItem = (pUnitario - (pUnitario * (dPct / 100))) * cant;
+
+                      return Card(
+                        margin: const EdgeInsets.only(bottom: 15),
+                        color: isOscuro
+                            ? Colors.white.withOpacity(0.05)
+                            : Colors.grey.shade50,
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(15),
+                            side: BorderSide(
+                                color: isOscuro ? Colors.white10 : Colors.black12)),
+                        child: Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(item['nombre_prod'],
+                                  style: TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 13,
+                                      color: isOscuro ? Colors.white : Colors.black87)),
+                              const SizedBox(height: 12),
+                              Row(
+                                children: [
+                                  Container(
+                                    decoration: BoxDecoration(
+                                        color: isOscuro ? Colors.white10 : Colors.white,
+                                        borderRadius: BorderRadius.circular(10),
+                                        border: Border.all(
+                                            color: isOscuro
+                                                ? Colors.white10
+                                                : Colors.black12)),
+                                    child: Row(
+                                      children: [
+                                        IconButton(
+                                            icon: const Icon(Icons.remove,
+                                                size: 18, color: Colors.red),
+                                            onPressed: () => _actualizarCantidadDetalle(
+                                                item, pedId, -1, setSt, (l) => detalles = l)),
+                                        Text("${item['cantidad']}",
+                                            style: const TextStyle(
+                                                fontWeight: FontWeight.bold, fontSize: 15)),
+                                        IconButton(
+                                            icon: const Icon(Icons.add,
+                                                size: 18, color: Colors.green),
+                                            onPressed: () => _actualizarCantidadDetalle(
+                                                item, pedId, 1, setSt, (l) => detalles = l)),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: TextField(
+                                      controller: descCtrl,
+                                      keyboardType: TextInputType.number,
+                                      textAlign: TextAlign.center,
+                                      style: TextStyle(
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.bold,
+                                          color: isOscuro ? Colors.white : Colors.black),
+                                      decoration: InputDecoration(
+                                        hintText: "0",
+                                        labelText: "% Desc",
+                                        isDense: true,
+                                        contentPadding:
+                                            const EdgeInsets.symmetric(vertical: 10),
+                                        border: OutlineInputBorder(
+                                            borderRadius: BorderRadius.circular(8)),
+                                      ),
+                                      onChanged: (v) {
+                                        setSt(() {
+                                          item['descuento'] = double.tryParse(v) ?? 0;
+                                          double pU =
+                                              (item['precio_unitario'] as num).toDouble();
+                                          double dP =
+                                              (item['descuento'] as num).toDouble();
+                                          item['subtotal'] =
+                                              (pU - (pU * (dP / 100))) *
+                                                  (item['cantidad'] as int);
+                                        });
+                                      },
+                                      onEditingComplete: () {
+                                        double val =
+                                            double.tryParse(descCtrl.text) ?? 0;
+                                        _actualizarDescuentoDetalle(
+                                            item, pedId, val, setSt, (l) => detalles = l);
+                                        FocusScope.of(context).unfocus();
+                                      },
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      if (tieneVariantes)
+                                        IconButton(
+                                          icon: const Icon(Icons.swap_horiz,
+                                              color: Colors.orange, size: 24),
+                                          onPressed: () => _cambiarVariante(
+                                              item, pedId, setSt, (l) => detalles = l),
+                                        ),
+                                      IconButton(
+                                          icon: const Icon(Icons.delete_outline,
+                                              color: Colors.redAccent, size: 24),
+                                          onPressed: () async {
+                                            if (item['producto_id'] != null) {
+                                              await _modificarStockBD(
+                                                  item['producto_id'] as int,
+                                                  -(item['cantidad'] as int),
+                                                  item['nombre_snapshot']?.toString());
+                                            }
+                                            final db = await DBHelper.instance.database;
+                                            await db.delete('detalle_pedidos',
+                                                where: 'id = ?', whereArgs: [item['id']]);
+                                            if (_esPremium)
+                                              ServicioNube.eliminarDetallePedidoNube(
+                                                  item['id']);
+                                            _recalcularTotal(pedId);
+                                            _actualizarVistaEditor(pedId, setSt, (newList) {
+                                              detalles = newList;
+                                              for (int i = descCtrls.length;
+                                                  i < detalles.length;
+                                                  i++) {
+                                                descCtrls[i] = TextEditingController(
+                                                    text: formatearInicial(
+                                                        detalles[i]['descuento'] ?? 0));
+                                              }
+                                            });
+                                          })
+                                    ],
+                                  )
+                                ],
+                              ),
+                              const SizedBox(height: 10),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 10, vertical: 4),
+                                decoration: BoxDecoration(
+                                    color: isOscuro
+                                        ? Colors.black26
+                                        : Colors.black.withOpacity(0.02),
+                                    borderRadius: BorderRadius.circular(8)),
+                                child: Row(
+                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    Text("Subtotal ítem:",
+                                        style: TextStyle(
+                                            fontSize: 11,
+                                            color: isOscuro
+                                                ? Colors.white38
+                                                : Colors.black54)),
+                                    Text("\$${subtotalItem.toStringAsFixed(0)}",
+                                        style: TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 13,
+                                            color: isOscuro
+                                                ? Colors.greenAccent
+                                                : Colors.green.shade700)),
+                                  ],
+                                ),
+                              )
+                            ],
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              Container(
+                padding: const EdgeInsets.all(15),
+                decoration: BoxDecoration(
+                    color: isOscuro
+                        ? Colors.white.withOpacity(0.05)
+                        : Colors.blue.shade50,
+                    borderRadius: BorderRadius.circular(15)),
+                child: Column(
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text("TOTAL FINAL:",
+                            style: TextStyle(
+                                fontWeight: FontWeight.bold, fontSize: 14)),
+                        Text("\$${(subtotalProds + domiActual).toStringAsFixed(0)}",
+                            style: const TextStyle(
+                                fontSize: 22,
+                                fontWeight: FontWeight.w900,
+                                color: Colors.green)),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF0D47A1),
+                          minimumSize: const Size(double.infinity, 50),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(15))),
+                      onPressed: () {
+                        for (int i = 0; i < detalles.length; i++) {
+                          if (!descCtrls.containsKey(i)) {
+                            descCtrls[i] = TextEditingController(
+                                text: formatearInicial(detalles[i]['descuento'] ?? 0));
+                          }
+                          double descActual =
+                              double.tryParse(descCtrls[i]!.text) ?? 0;
+                          _actualizarDescuentoDetalle(
+                              detalles[i], pedId, descActual, setSt, (l) => detalles = l);
+                        }
+                        double valFinalDomi = double.tryParse(domiCtrl.text) ?? 0;
+                        _actualizarDomicilio(pedId, valFinalDomi);
+                        if (mounted) {
+                          Navigator.pop(ctx);
+                          _cargar();
+                        }
+                      },
+                      child: const Text("GUARDAR CAMBIOS",
+                          style: TextStyle(
+                              color: Colors.white, fontWeight: FontWeight.bold)),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  void _promptDescuentoGlobal(int pedId, List<Map<String, dynamic>> detalles,
+      StateSetter setStEditor, Function(List<Map<String, dynamic>>) callback) {
+    TextEditingController pctCtrl = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Descuento Global"),
+        content: TextField(
+          controller: pctCtrl,
+          keyboardType: TextInputType.number,
+          autofocus: true,
+          decoration: const InputDecoration(
+              labelText: "Porcentaje para todos los productos", suffixText: "%"),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text("CANCELAR")),
+          ElevatedButton(
+            onPressed: () async {
+              double pct = double.tryParse(pctCtrl.text) ?? 0;
+              Navigator.pop(ctx);
+              for (var item in detalles) {
+                await _actualizarDescuentoDetalle(
+                    item, pedId, pct, setStEditor, callback);
+              }
+            },
+            child: const Text("APLICAR"),
+          )
+        ],
+      ),
+    );
+  }
+
+  Future<void> _buscarYAgregar(int pedId, StateSetter setStEditor,
+      Function(List<Map<String, dynamic>>) callback) async {
+    final db = await DBHelper.instance.database;
+    final yaEnPedido = await db.query('detalle_pedidos',
+        columns: ['producto_id', 'nombre_snapshot'],
+        where: 'pedido_id = ?',
+        whereArgs: [pedId]);
+    List<int> idsSimplesOcultos = [];
+    List<String> nombresVariantesOcultas = [];
+    final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
+
+    for (var item in yaEnPedido) {
+      String nombre = item['nombre_snapshot']?.toString() ?? "";
+      if (nombre.contains(" - ")) {
+        nombresVariantesOcultas.add(nombre);
+      } else {
+        idsSimplesOcultos.add(item['producto_id'] as int);
+      }
+    }
+
+    List<Map<String, dynamic>> productosBase =
+        await db.query('productos', where: 'activo = 1');
+    List<Map<String, dynamic>> productosPermitidos = [];
+    for (var p in productosBase) {
+      String varStr = p['variantes']?.toString() ?? "";
+      if (varStr.length < 5 && idsSimplesOcultos.contains(p['id'])) continue;
+      if (varStr.length > 5) {
+        bool tieneOpcionesLibres = false;
+        try {
+          List<dynamic> grps = jsonDecode(varStr);
+          if (grps.isNotEmpty && !grps[0].containsKey('grupo')) {
+            grps = [{'grupo': 'Opciones', 'opciones': grps}];
+          }
+          for (var g in grps) {
+            if (!g.containsKey('grupo')) continue;
+            for (var o in g['opciones']) {
+              if (o['activo'] == false) continue;
+              String nombreVar = "${p['nombre']} - ${g['grupo']}: ${o['nombre']}";
+              String nombreAntigua = "${p['nombre']} - ${o['nombre']}";
+              if (!nombresVariantesOcultas.contains(nombreVar) &&
+                  !nombresVariantesOcultas.contains(nombreAntigua)) {
+                tieneOpcionesLibres = true;
+                break;
+              }
+            }
+            if (tieneOpcionesLibres) break;
+          }
+        } catch (_) {}
+        if (!tieneOpcionesLibres) continue;
+      }
+      productosPermitidos.add(Map<String, dynamic>.from(p));
+    }
+
+    List<Map<String, dynamic>> filtrados = List.from(productosPermitidos);
+    TextEditingController searchCtrl = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setStSearch) => AlertDialog(
+          backgroundColor: Theme.of(context).cardColor,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Expanded(
+                  child: Text("Añadir al pedido",
+                      style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)))),
+              IconButton(
+                  icon: Icon(Icons.close,
+                      color: isOscuro ? Colors.white54 : Colors.grey),
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                  onPressed: () => Navigator.pop(ctx))
+            ],
+          ),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: searchCtrl,
+                  style: TextStyle(color: isOscuro ? Colors.white : Colors.black),
+                  decoration: InputDecoration(
+                      hintText: "Buscar producto...",
+                      hintStyle:
+                          TextStyle(color: isOscuro ? Colors.white38 : Colors.black54),
+                      prefixIcon: Icon(Icons.search,
+                          color: isOscuro ? Colors.cyanAccent : Colors.grey),
+                      filled: true,
+                      fillColor: isOscuro ? Colors.white10 : Colors.grey.shade100,
+                      border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                          borderSide: BorderSide.none)),
+                  onChanged: (v) {
+                    setStSearch(() {
+                      filtrados = productosPermitidos
+                          .where((p) => p['nombre']
+                              .toString()
+                              .toLowerCase()
+                              .contains(v.toLowerCase()))
+                          .toList();
+                    });
+                  },
+                ),
+                const SizedBox(height: 10),
+                Flexible(
+                  child: filtrados.isEmpty
+                      ? Padding(
+                          padding: const EdgeInsets.all(20),
+                          child: Text("Todos los productos ya están en este pedido.",
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                  color: isOscuro ? Colors.white38 : Colors.grey)))
+                      : ListView.builder(
+                          shrinkWrap: true,
+                          itemCount: filtrados.length,
+                          itemBuilder: (c, i) {
+                            var p = filtrados[i];
+                            return ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              title: Text(p['nombre'].toString(),
+                                  style: TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 14,
+                                      color: isOscuro ? Colors.white : Colors.black87)),
+                              subtitle: Text("Stock: ${p['stock']}",
+                                  style: TextStyle(
+                                      fontSize: 12,
+                                      color: isOscuro ? Colors.white54 : Colors.black54)),
+                              trailing: Text("\$${p['precio_venta']}",
+                                  style: TextStyle(
+                                      color: isOscuro ? Colors.greenAccent : Colors.green,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 14)),
+                              onTap: () async {
+                                String varStr = p['variantes']?.toString() ?? "";
+                                List<dynamic> grps = [];
+                                if (varStr.length > 5) {
+                                  try {
+                                    var dec = jsonDecode(varStr);
+                                    if (dec.isNotEmpty && !dec[0].containsKey('grupo')) {
+                                      grps = [{'grupo': 'Opciones', 'opciones': dec}];
+                                    } else {
+                                      grps = dec;
+                                    }
+                                    for (var g in grps) {
+                                      if (!g.containsKey('grupo')) continue;
+                                      g['opciones'] = (g['opciones'] as List)
+                                          .where((o) => o['activo'] != false)
+                                          .toList();
+                                    }
+                                    for (var g in grps) {
+                                      if (!g.containsKey('grupo')) continue;
+                                      g['opciones'] = (g['opciones'] as List).where((o) {
+                                        String nombreVar =
+                                            "${p['nombre']} - ${g['grupo']}: ${o['nombre']}";
+                                        String nombreAntigua =
+                                            "${p['nombre']} - ${o['nombre']}";
+                                        return !nombresVariantesOcultas
+                                                .contains(nombreVar) &&
+                                            !nombresVariantesOcultas
+                                                .contains(nombreAntigua);
+                                      }).toList();
+                                    }
+                                  } catch (_) {}
+                                }
+
+                                if (grps.isNotEmpty) {
+                                  Navigator.pop(ctx);
+                                  showModalBottomSheet(
+                                    context: context,
+                                    isScrollControlled: true,
+                                    backgroundColor: Colors.transparent,
+                                    builder: (_) => _DialogoVariantes(
+                                      producto: p,
+                                      gruposVariantes: grps,
+                                      onAceptar: (cantidades) async {
+                                        int pId = p['id'] as int;
+                                        double pr =
+                                            (p['precio_venta'] as num).toDouble();
+                                        for (var entry in cantidades.entries) {
+                                          if (entry.value > 0) {
+                                            List<String> partes =
+                                                entry.key.split('_');
+                                            int gIndex = int.parse(partes[0]);
+                                            int oIndex = int.parse(partes[1]);
+                                            var g = grps[gIndex];
+                                            var o = g['opciones'][oIndex];
+                                            String nombreVar =
+                                                "${p['nombre']} - ${g['grupo']}: ${o['nombre']}";
+                                            int uniqueId =
+                                                DateTime.now().millisecondsSinceEpoch +
+                                                    entry.key.hashCode;
+                                            await db.insert('detalle_pedidos', {
+                                              'id': uniqueId,
+                                              'pedido_id': pedId,
+                                              'producto_id': pId,
+                                              'cantidad': entry.value,
+                                              'precio_unitario': pr,
+                                              'subtotal': pr * entry.value,
+                                              'nombre_snapshot': nombreVar,
+                                              'ultima_modificacion':
+                                                  DateTime.now().toIso8601String()
+                                            });
+                                            if (_esPremium) {
+                                              ServicioNube.guardarUnicoDetalleNube({
+                                                'id': uniqueId,
+                                                'pedido_id': pedId,
+                                                'producto_id': pId,
+                                                'cantidad': entry.value,
+                                                'precio_unitario': pr,
+                                                'subtotal': pr * entry.value,
+                                                'nombre_snapshot': nombreVar
+                                              });
+                                            }
+                                            await _modificarStockBD(
+                                                pId, entry.value, nombreVar);
+                                          }
+                                        }
+                                        _recalcularTotal(pedId);
+                                        _actualizarVistaEditor(
+                                            pedId, setStEditor, callback);
+                                        _cargar();
+                                      },
+                                    ),
+                                  );
+                                } else {
+                                  int pId = p['id'] as int;
+                                  double pr = (p['precio_venta'] as num).toDouble();
+                                  String nombre = p['nombre'].toString();
+                                  int uniqueId = DateTime.now().millisecondsSinceEpoch;
+                                  await db.insert('detalle_pedidos', {
+                                    'id': uniqueId,
+                                    'pedido_id': pedId,
+                                    'producto_id': pId,
+                                    'cantidad': 1,
+                                    'precio_unitario': pr,
+                                    'subtotal': pr,
+                                    'nombre_snapshot': nombre,
+                                    'ultima_modificacion':
+                                        DateTime.now().toIso8601String()
+                                  });
+                                  if (_esPremium) {
+                                    ServicioNube.guardarUnicoDetalleNube({
+                                      'id': uniqueId,
+                                      'pedido_id': pedId,
+                                      'producto_id': pId,
+                                      'cantidad': 1,
+                                      'precio_unitario': pr,
+                                      'subtotal': pr,
+                                      'nombre_snapshot': nombre
+                                    });
+                                  }
+                                  await _modificarStockBD(pId, 1, nombre);
+                                  _recalcularTotal(pedId);
+                                  Navigator.pop(ctx);
+                                  _actualizarVistaEditor(pedId, setStEditor, callback);
+                                  _cargar();
+                                }
+                              },
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _actualizarDomicilio(int pedidoId, double nuevoVal) async {
+    final db = await DBHelper.instance.database;
+    await db.update(
+        'pedidos',
+        {
+          'valor_domicilio': nuevoVal,
+          'ultima_modificacion': DateTime.now().toIso8601String()
+        },
+        where: 'id = ?',
+        whereArgs: [pedidoId]);
+    await _recalcularTotal(pedidoId);
+    _cargar();
+  }
+
+  Future<void> _recalcularTotal(int pedId) async {
+    final db = await DBHelper.instance.database;
+    var pedData = await db.query('pedidos',
+        columns: ['valor_domicilio'], where: 'id = ?', whereArgs: [pedId]);
+    if (pedData.isEmpty) return;
+    double domVal = (pedData.first['valor_domicilio'] ?? 0.0) as double;
+    var res = await db.rawQuery('''
+      SELECT SUM(subtotal) as total_prods,
+             SUM(subtotal - (cantidad * COALESCE((SELECT precio_compra FROM productos WHERE id = producto_id), 0))) as ganancia
+      FROM detalle_pedidos WHERE pedido_id = $pedId
+    ''');
+    double tProds = (res.first['total_prods'] as num?)?.toDouble() ?? 0.0;
+    double g = (res.first['ganancia'] as num?)?.toDouble() ?? 0.0;
+    double totalFinal = tProds + domVal;
+    await db.update(
+        'pedidos',
+        {
+          'total_venta': totalFinal,
+          'ganancia_total': g,
+          'valor_domicilio': domVal,
+          'ultima_modificacion': DateTime.now().toIso8601String()
+        },
+        where: 'id = ?',
+        whereArgs: [pedId]);
+
+    if (_esPremium) {
+      ServicioNube.actualizarTotalesPedidoNube(pedId, totalFinal, g, domicilio: domVal);
+    }
+  }
+
+  Future<void> _actualizarVistaEditor(int pedId, StateSetter setSt,
+      Function(List<Map<String, dynamic>>) callback) async {
+    List<Map<String, dynamic>> res = await _obtenerDetalles(pedId);
+    try {
+      setSt(() => callback(res));
+    } catch (_) {}
+    _cargar();
+  }
+
+  Widget _buildResumenEstadisticas(bool isOscuro) {
+    final estados = ['Pendiente', 'Entregado sin Pago', 'Completado', 'Cancelado'];
+    return Container(
+      height: 80,
+      margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+      child: Row(
+        children: estados.map((estado) {
+          final count = _pedidos.where((p) => p['estado'] == estado).length;
+          final color = _coloresEstado[estado]!;
+          final icon = _iconosEstado[estado]!;
+          final seleccionado = _estadoActual == estado;
+          return Expanded(
+            child: GestureDetector(
+              onTap: () => setState(() => _estadoActual = estado),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                margin: const EdgeInsets.symmetric(horizontal: 3),
+                decoration: BoxDecoration(
+                  color: seleccionado
+                      ? color.withOpacity(isOscuro ? 0.25 : 0.12)
+                      : (isOscuro ? Colors.white.withOpacity(0.04) : Colors.white),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: seleccionado ? color: isOscuro ? Colors.white12 : Colors.black.withOpacity(0.08),
+                    width: seleccionado ? 1.5 : 1,
+                  ),
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(icon, color: color, size: 20),
+                    const SizedBox(height: 4),
+                    Text(
+                      '$count',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w900,
+                        color: seleccionado
+                            ? color
+                            : (isOscuro ? Colors.white54 : Colors.black45),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  Widget _buildChipsFiltro(bool isOscuro) {
+    final estados = ['Pendiente', 'Entregado sin Pago', 'Completado', 'Cancelado'];
+    final etiquetas = ['Pendientes', 'Sin Pago', 'Completados', 'Cancelados'];
+    return SizedBox(
+      height: 38,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        itemCount: estados.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (_, i) {
+          final seleccionado = _estadoActual == estados[i];
+          final color = _coloresEstado[estados[i]]!;
+          return GestureDetector(
+            onTap: () => setState(() => _estadoActual = estados[i]),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              decoration: BoxDecoration(
+                color: seleccionado
+                    ? color.withOpacity(isOscuro ? 0.3 : 0.15)
+                    : Colors.transparent,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(
+                  color: seleccionado ? color : (isOscuro ? Colors.white12 : Colors.black12),
+                ),
+              ),
+              child: Text(
+                etiquetas[i],
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: seleccionado ? FontWeight.bold : FontWeight.normal,
+                  color: seleccionado
+                      ? color
+                      : (isOscuro ? Colors.white54 : Colors.black54),
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
+    final colorEstado = _coloresEstado[_estadoActual]!;
+    return Scaffold(
+      backgroundColor:
+          isOscuro ? const Color(0xFF0A0A0F) : const Color(0xFFF2F4F7),
+      appBar: AppBar(
+        elevation: 0,
+        backgroundColor:
+            isOscuro ? const Color(0xFF0D1B2A) : const Color(0xFF0D47A1),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Gestión de Pedidos',
+                style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 17)),
+            Text(
+              '${_pedidos.where((p) => p['estado'] == _estadoActual).length} ${_estadoActual.toLowerCase()}',
+              style: TextStyle(
+                  color: colorEstado.withOpacity(0.9),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600),
+            ),
+          ],
+        ),
+        actions: [
+          if (_esPremium)
+            RotationTransition(
+              turns: _refreshAnim,
+              child: IconButton(
+                icon: Icon(
+                  Icons.sync_rounded,
+                  color: _refrescando ? colorEstado : Colors.white70,
+                  size: 24,
+                ),
+                tooltip: 'Sincronizar desde la nube',
+                onPressed: _refrescando ? null : _refrescarDesdeNube,
+              ),
+            )
+          else
+            IconButton(
+              icon: const Icon(Icons.refresh_rounded, color: Colors.white70, size: 22),
+              tooltip: 'Recargar local',
+              onPressed: _cargar,
+            ),
+        ],
+      ),
+      body: Column(
+        children: [
+          const SizedBox(height: 10),
+          _buildResumenEstadisticas(isOscuro),
+          const SizedBox(height: 10),
+          _buildChipsFiltro(isOscuro),
+          const SizedBox(height: 8),
+          Expanded(child: _listaPedidosAgrupada(isOscuro)),
+        ],
+      ),
+    );
+  }
+
+  Widget _listaPedidosAgrupada(bool isOscuro) {
+    final filtrados = _pedidos.where((p) => p['estado'] == _estadoActual).toList();
+    if (filtrados.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              _iconosEstado[_estadoActual]!,
+              size: 64,
+              color: isOscuro ? Colors.white12 : Colors.black12,
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Sin pedidos ${_estadoActual.toLowerCase()}',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+                color: isOscuro ? Colors.white24 : Colors.black26,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final grupos = _agruparPorFecha(filtrados);
+    final fechasOrdenadas = grupos.keys.toList()
+      ..sort((a, b) => b.compareTo(a));
+    return ListView.builder(
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 20),
+      itemCount: fechasOrdenadas.length,
+      itemBuilder: (context, idx) {
+        final fecha = fechasOrdenadas[idx];
+        final pedidosGrupo = grupos[fecha]!;
+        final totalGrupo = pedidosGrupo.fold<double>(
+            0, (sum, p) => sum + (p['total_venta'] as num).toDouble());
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              child: Row(
+                children: [
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: _coloresEstado[_estadoActual]!.withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                          color: _coloresEstado[_estadoActual]!.withOpacity(0.3)),
+                    ),
+                    child: Text(
+                      _formatearFechaGrupo(fecha),
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: _coloresEstado[_estadoActual],
+                        letterSpacing: 0.8,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                      child: Divider(color: isOscuro ? Colors.white10 : Colors.black.withOpacity(0.08))),                  const SizedBox(width: 8),
+                  Text(
+                    '\$${totalGrupo.toStringAsFixed(0)}',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      color: isOscuro ? Colors.white38 : Colors.black38,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            ...pedidosGrupo.map((p) => _buildTarjetaPedido(p, isOscuro)),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildTarjetaPedido(Map<String, dynamic> p, bool isOscuro) {
+    final estado = p['estado'] as String;
+    final colorEst = _coloresEstado[estado]!;
+    final bool hayBloqueo = _pedidosBloqueados[p['id'] as int] ?? false;
+
+    String nombreCliente = p['cliente_nombre'] ?? 'Cliente no deudor';
+    String neg = (p['negocio_nombre'] ?? '').toString().trim();
+    String ciudad = (p['cliente_ciudad'] ?? '').toString().trim();
+    if (ciudad.isEmpty || ciudad == "null") ciudad = '';
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        color: isOscuro ? const Color(0xFF141420) : Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: hayBloqueo
+              ? Colors.red.withOpacity(0.4)
+              : (isOscuro ? Colors.white.withOpacity(0.06) : Colors.black.withOpacity(0.06)),
+        ),
+        boxShadow: isOscuro
+            ? []
+            : [
+                BoxShadow(
+                    color: Colors.black.withOpacity(0.05),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2))
+              ],
+      ),
+      child: Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          tilePadding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+          childrenPadding: EdgeInsets.zero,
+          title: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(2),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: LinearGradient(
+                        colors: isOscuro 
+                            ? [Colors.cyanAccent, Colors.blueAccent] 
+                            : [const Color(0xFF0D47A1), Colors.blue],
+                      ),
+                    ),
+                    child: CircleAvatar(
+                      radius: 20,
+                      backgroundColor: isOscuro ? const Color(0xFF141420) : Colors.white,
+                      child: Icon(
+                        _iconosEstado[estado]!, 
+                        color: colorEst, 
+                        size: 20
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          nombreCliente,
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 14,
+                            color: isOscuro ? Colors.white : Colors.black87,
+                          ),
+                          maxLines: 2,
+                          overflow: TextOverflow.visible, 
+                        ),
+                        if (neg.isNotEmpty && neg != "null" && neg != "N/A") ...[
+                          const SizedBox(height: 2),
+                          Text(
+                            neg,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: isOscuro ? Colors.white30 : Colors.black45,
+                              fontWeight: FontWeight.w500,
+                            ),
+                            maxLines: 2,
+                            overflow: TextOverflow.visible, 
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Divider(
+                  height: 1, 
+                  color: isOscuro ? Colors.white.withOpacity(0.06) : Colors.black.withOpacity(0.06)
+                ),
+              ),
+
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        "TOTAL VENTA", 
+                        style: TextStyle(
+                          fontSize: 9, 
+                          fontWeight: FontWeight.w900, 
+                          color: isOscuro ? Colors.white38 : Colors.grey.shade500,
+                          letterSpacing: 0.5
+                        )
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        '\$${(p['total_venta'] as num).toStringAsFixed(0)}',
+                        style: TextStyle(
+                          color: colorEst,
+                          fontWeight: FontWeight.w900,
+                          fontSize: 18,
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (ciudad.isNotEmpty)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                      decoration: BoxDecoration(
+                        color: isOscuro ? Colors.white.withOpacity(0.03) : Colors.grey.shade100,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: isOscuro ? Colors.white10 : Colors.black12),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.location_on_rounded,
+                              size: 12,
+                              color: isOscuro ? Colors.white30 : Colors.black.withOpacity(0.40)),
+                          const SizedBox(width: 4),
+                          Text(
+                            ciudad,
+                            style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                                color: isOscuro ? Colors.white54 : Colors.black54),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
+          children: [
+            Divider(
+                height: 1,
+                color: isOscuro ? Colors.white.withOpacity(0.06) : Colors.black.withOpacity(0.06)),
+            _buildDetalleItems(
+                p['id'] as int, estado, (p['valor_domicilio'] ?? 0).toDouble(), isOscuro),
+            if (hayBloqueo && estado == 'Pendiente')
+              Container(
+                margin: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.red.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.red.withOpacity(0.3)),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.warning_amber_rounded, color: Colors.redAccent, size: 16),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Producto agotado — actualiza el inventario para procesar',
+                        style: TextStyle(
+                            color: Colors.redAccent,
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            _buildBotonesAccion(p, estado, hayBloqueo, isOscuro),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDetalleItems(int id, String estado, double domi, bool isOscuro) {
+    if (!_detallesCache.containsKey(id)) {
+      _obtenerDetalles(id)
+          .then((det) {if (mounted) setState(() => _detallesCache[id] = det);});
+      return const Padding(
+        padding: EdgeInsets.all(16),
+        child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+      );
+    }
+    final detalles = _detallesCache[id]!;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 4),
+      child: Column(
+        children: [
+          ...detalles.map((d) {
+            bool falta = (estado == 'Pendiente') && (d['sin_stock'] == 1);
+            double base = (d['precio_unitario'] as num).toDouble();
+            double descPct = (d['descuento'] ?? 0).toDouble();
+            double finalP = base - (base * (descPct / 100));
+
+            String formatDesc(double pct) =>
+                pct == pct.roundToDouble() ? pct.toStringAsFixed(0) : pct.toStringAsFixed(1);
+
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 3),
+              child: Row(
+                children: [
+                  if (falta)
+                    const Padding(
+                      padding: EdgeInsets.only(right: 4),
+                      child: Icon(Icons.warning_rounded, color: Colors.red, size: 13),
+                    ),
+                  Expanded(
+                    child: RichText(
+                      text: TextSpan(
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: falta
+                              ? Colors.red
+                              : (isOscuro ? Colors.white70 : Colors.black87),
+                        ),
+                        children: [
+                          TextSpan(text: d['nombre_prod']),
+                          if (descPct > 0)
+                            TextSpan(
+                              text: ' (−${formatDesc(descPct)}%)',
+                              style: const TextStyle(
+                                  color: Colors.orange,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 10),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  Text(
+                    '${d['cantidad']} × \$${finalP.toStringAsFixed(0)}',
+                    style: TextStyle(
+                        fontSize: 12,
+                        color: isOscuro ? Colors.white38 : Colors.black45),
+                  ),
+                ],
+              ),
+            );
+          }),
+          if (domi > 0) ...[
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                Icon(Icons.motorcycle_rounded,
+                    size: 14,
+                    color: isOscuro ? Colors.cyanAccent : Colors.blue),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text('Domicilio / Envío',
+                      style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: isOscuro ? Colors.cyanAccent : Colors.blue)),
+                ),
+                Text('\$${domi.toStringAsFixed(0)}',
+                    style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                        color: isOscuro ? Colors.cyanAccent : Colors.blue)),
+              ],
+            ),
+          ],
+          const SizedBox(height: 8),
+          Divider(color: isOscuro ? Colors.white.withOpacity(0.08) : Colors.black.withOpacity(0.06)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBotonesAccion(
+      Map<String, dynamic> p, String estado, bool bloq, bool isOscuro) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 14),
+      child: Column(
+        children: [
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              // 🔥 CAMBIADO: Botón PDF ahora llama a compartirFactura() para abrir apps recomendadas (WhatsApp, Gmail, etc.)
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: isOscuro ? Colors.white70 : Colors.black54,
+                  side: BorderSide(
+                      color: isOscuro ? Colors.white12 : Colors.black12),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10)),
+                ),
+                icon: const Icon(Icons.share_rounded, size: 16), // Ícono de compartir para ser coherente
+                label: const Text('PDF', style: TextStyle(fontSize: 12)),
+                onPressed: () async {
+                  final d = await _obtenerDetalles(p['id'] as int);
+                  final prefs = await SharedPreferences.getInstance();
+                  Map<String, dynamic> pedParaPdf = Map.from(p);
+                  pedParaPdf['valor_domicilio'] =
+                      (p['valor_domicilio'] ?? 0).toDouble();
+                  List<Map<String, dynamic>> dPdf = d
+                      .map((i) => {...Map<String, dynamic>.from(i), 'nombre': i['nombre_prod']})
+                      .toList();
+                  
+                  // 🔥 CAMBIADO: Llama al nuevo método compartirFactura()
+                  await ServicioPdf.compartirFactura(
+                    pedido: pedParaPdf,
+                    detalles: dPdf,
+                    nombreNegocio:
+                        prefs.getString('nombre_negocio') ?? "Mi Negocio",
+                    logoPath: prefs.getString('logo_path'),
+                    mostrarLogo:
+                        _esPremium ? (_logoToggle[p['id']] ?? true) : false,
+                  );
+                },
+              ),
+              if (estado == 'Pendiente') ...[
+                OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: isOscuro ? Colors.cyanAccent : Colors.indigo,
+                    side: BorderSide(
+                        color: isOscuro
+                            ? Colors.cyanAccent.withOpacity(0.4)
+                            : Colors.indigo.withOpacity(0.4)),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10)),
+                  ),
+                  icon: const Icon(Icons.edit_rounded, size: 16),
+                  label: const Text('Editar', style: TextStyle(fontSize: 12)),
+                  onPressed: () => _abrirEditorPedido(p),
+                ),
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.orange,
+                    foregroundColor: Colors.white,
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10)),
+                    elevation: 0,
+                  ),
+                  icon: const Icon(Icons.local_shipping_rounded, size: 16),
+                  label:
+                      const Text('Entregar', style: TextStyle(fontSize: 12)),
+                  onPressed: bloq
+                      ? null
+                      : () => _confirmarCambioEstado(
+                          p['id'] as int, 'Entregado sin Pago'),
+                ),
+              ],
+              if (estado == 'Pendiente' || estado == 'Entregado sin Pago')
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF00C853),
+                    foregroundColor: Colors.white,
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10)),
+                    elevation: 0,
+                  ),
+                  icon: const Icon(Icons.check_circle_rounded, size: 16),
+                  label: const Text('Pagado', style: TextStyle(fontSize: 12)),
+                  onPressed: bloq
+                      ? null
+                      : () =>
+                          _confirmarCambioEstado(p['id'] as int, 'Completado'),
+                ),
+              if (estado != 'Cancelado' && estado != 'Completado')
+                TextButton(
+                  style: TextButton.styleFrom(
+                    foregroundColor: Colors.redAccent,
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                  ),
+                  onPressed: () =>
+                      _confirmarCambioEstado(p['id'] as int, 'Cancelado'),
+                  child: const Text('Cancelar',
+                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                ),
+            ],
+          ),
+          if (_esPremium)
+            CheckboxListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: Text('Logo en PDF',
+                  style: TextStyle(
+                      fontSize: 11,
+                      color: isOscuro ? Colors.white38 : Colors.black38)),
+              value: _logoToggle[p['id']] ?? true,
+              activeColor:
+                  isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1),
+              onChanged: (v) => setState(() => _logoToggle[p['id']] = v!),
+              controlAffinity: ListTileControlAffinity.leading,
+            )
+          else
+            TextButton.icon(
+              onPressed: () => Navigator.push(context,
+                  MaterialPageRoute(builder: (_) => const PantallaPremium())),
+              icon: const Icon(Icons.workspace_premium,
+                  size: 14, color: Colors.orange),
+              label: const Text('Premium para logo en PDF',
+                  style: TextStyle(
+                      fontSize: 11,
+                      color: Colors.orange,
+                      fontWeight: FontWeight.bold)),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DialogoVariantes extends StatefulWidget {
+  final Map<String, dynamic> producto;
+  final List<dynamic> gruposVariantes;
+  final Function(Map<String, int>) onAceptar;
+  const _DialogoVariantes(
+      {required this.producto,
+      required this.gruposVariantes,
+      required this.onAceptar});
+  @override
+  State<_DialogoVariantes> createState() => _DialogoVariantesState();
+}
+
+class _DialogoVariantesState extends State<_DialogoVariantes> {
+  final Map<String, int> _cantidades = {};
+  final Map<String, TextEditingController> _controllers = {};
+
+  @override
+  void initState() {
+    super.initState();
+    for (int g = 0; g < widget.gruposVariantes.length; g++) {
+      var opciones = widget.gruposVariantes[g]['opciones'] ?? [];
+      for (int o = 0; o < opciones.length; o++) {
+        String key = "${g}_$o";
+        _cantidades[key] = 0;
+        _controllers[key] = TextEditingController(text: "0");
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    for (var ctrl in _controllers.values) ctrl.dispose();
+    super.dispose();
+  }
+
+  void _actualizarCant(String key, int nuevaCant) {
+    if (nuevaCant < 0) nuevaCant = 0;
+    setState(() {
+      _cantidades[key] = nuevaCant;
+      _controllers[key]!.text = nuevaCant.toString();
+      _controllers[key]!.selection = TextSelection.fromPosition(
+          TextPosition(offset: _controllers[key]!.text.length));
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
+    return Container(
+      decoration: BoxDecoration(
+          color: Theme.of(context).cardColor,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(20))),
+      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      child: SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 20, 20, 10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text("Seleccionar Variantes",
+                      style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: isOscuro
+                              ? Colors.cyanAccent
+                              : const Color(0xFF0D47A1))),
+                  Text(widget.producto['nombre'],
+                      style: TextStyle(
+                          color: isOscuro ? Colors.white60 : Colors.grey,
+                          fontSize: 13)),
+                ],
+              ),
+            ),
+            Divider(height: 1, color: isOscuro ? Colors.white10 : Colors.black12),
+            Flexible(
+              child: ListView.builder(
+                shrinkWrap: true,
+                padding: const EdgeInsets.symmetric(vertical: 10),
+                itemCount: widget.gruposVariantes.length,
+                itemBuilder: (context, gIndex) {
+                  var grupo = widget.gruposVariantes[gIndex];
+                  List<dynamic> opciones = grupo['opciones'] ?? [];
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 20, vertical: 8),
+                        child: Text(grupo['grupo'].toString().toUpperCase(),
+                            style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                color: isOscuro ? Colors.white54 : Colors.blueGrey,
+                                fontSize: 12)),
+                      ),
+                      ...opciones.asMap().entries
+                          .where((entry) => entry.value['activo'] != false)
+                          .map((entry) {
+                        int oIndex = entry.key;
+                        var o = entry.value;
+                        String key = "${gIndex}_$oIndex";
+                        int stock = o['stock'] ?? 0;
+                        return ListTile(
+                          contentPadding:
+                              const EdgeInsets.symmetric(horizontal: 20),
+                          leading: Icon(Icons.inventory_2,
+                              color: isOscuro ? Colors.white24 : Colors.grey),
+                          title: Text(o['nombre'],
+                              style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 14,
+                                  color: isOscuro ? Colors.white : Colors.black87)),
+                          subtitle: Text("Stock: $stock",
+                              style: TextStyle(
+                                  fontSize: 11,
+                                  color: stock <= 0
+                                      ? Colors.redAccent
+                                      : Colors.green)),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                  padding: EdgeInsets.zero,
+                                  constraints: const BoxConstraints(),
+                                  icon: const Icon(Icons.remove_circle_outline,
+                                      color: Colors.red, size: 28),
+                                  onPressed: () =>
+                                      _actualizarCant(key, _cantidades[key]! - 1)),
+                              SizedBox(
+                                width: 45,
+                                child: TextField(
+                                  controller: _controllers[key],
+                                  keyboardType: TextInputType.number,
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 16,
+                                      color: isOscuro ? Colors.white : Colors.black),
+                                  decoration: const InputDecoration(
+                                      border: InputBorder.none, isDense: true),
+                                  onChanged: (val) =>
+                                      _cantidades[key] = int.tryParse(val) ?? 0,
+                                ),
+                              ),
+                              IconButton(
+                                  padding: EdgeInsets.zero,
+                                  constraints: const BoxConstraints(),
+                                  icon: const Icon(Icons.add_circle_outline,
+                                      color: Colors.green, size: 28),
+                                  onPressed: () =>
+                                      _actualizarCant(key, _cantidades[key]! + 1)),
+                            ],
+                          ),
+                        );
+                      }),
+                      Divider(
+                          indent: 20,
+                          endIndent: 20,
+                          color: isOscuro ? Colors.white10 : Colors.black12),
+                    ],
+                  );
+                },
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10)),
+                        side: BorderSide(
+                            color: isOscuro ? Colors.white24 : Colors.grey),
+                      ),
+                      onPressed: () => Navigator.pop(context),
+                      child: Text("CANCELAR",
+                          style: TextStyle(
+                              color: isOscuro ? Colors.white54 : Colors.grey,
+                              fontWeight: FontWeight.bold)),
+                    ),
+                  ),
+                  const SizedBox(width: 15),
+                  Expanded(
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: isOscuro
+                            ? Colors.cyanAccent.shade700
+                            : const Color(0xFF0D47A1),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10)),
+                      ),
+                      onPressed: () {
+                        widget.onAceptar(_cantidades);
+                        Navigator.pop(context);
+                      },
+                      child: Text("AÑADIR",
+                          style: TextStyle(
+                              color: isOscuro ? Colors.black : Colors.white,
+                              fontWeight: FontWeight.bold)),
+                    ),
+                  )
+                ],
+              ),
+            )
+          ],
+        ),
+      ),
+    );
+  }
+}

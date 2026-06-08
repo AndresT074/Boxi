@@ -1,0 +1,15 @@
+{
+  "projects": {
+    "default": "boxi-4a68c"
+  },
+  "targets": {
+    "boxi-4a68c": {
+      "hosting": {
+        "prod": [
+          "boxi-catalogo"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}

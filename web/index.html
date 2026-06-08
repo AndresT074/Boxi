@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <base href="/">
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=Edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+
+  <link rel="icon" type="image/png" href="favicon.png"/>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:ital,wght@0,400;0,500;0,700;1,400&display=swap" rel="stylesheet">
+  
+  <title>Catálogo</title>
+  
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root { --blue-deep: #0A1628; --blue-mid: #0D47A1; --blue-bright: #1E88E5; --gold: #F0B429; --white: #FFFFFF; }
+    
+    /* 🔥 MANTENEMOS EL OVERFLOW HIDDEN PARA QUE FLUTTER NO DESAPAREZCA */
+    body { background: var(--blue-deep); font-family: 'DM Sans', sans-serif; overflow: hidden; height: 100vh; width: 100vw; }
+    
+    #loading {
+      position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+      background: var(--blue-deep); z-index: 9999;
+      transition: opacity 0.4s ease-out, transform 0.4s ease-out; overflow: hidden;
+    }
+    #loading::before {
+      content: ''; position: absolute; inset: 0; pointer-events: none;
+      background: radial-gradient(ellipse 70% 60% at 20% 10%, rgba(13,71,161,.55) 0%, transparent 60%),
+                  radial-gradient(ellipse 55% 50% at 80% 85%, rgba(30,136,229,.4) 0%, transparent 55%),
+                  radial-gradient(ellipse 40% 40% at 55% 45%, rgba(240,180,41,.08) 0%, transparent 60%);
+    }
+    #loading::after {
+      content: ''; position: absolute; inset: 0; pointer-events: none; background-size: 52px 52px;
+      background-image: linear-gradient(rgba(255,255,255,.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.03) 1px, transparent 1px);
+    }
+    .load-content { position: relative; z-index: 10; display: flex; flex-direction: column; align-items: center; }
+    .logo-wrap {
+      width: 88px; height: 88px; border-radius: 24px; background: rgba(255,255,255,.10); border: 1px solid rgba(255,255,255,.18);
+      display: flex; align-items: center; justify-content: center; margin-bottom: 32px;
+      box-shadow: 0 0 0 1px rgba(30,136,229,.35), 0 24px 48px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.22);
+      animation: logoFloat 3.2s ease-in-out infinite; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    }
+    .logo-wrap img { width: 52px; height: 52px; border-radius: 10px; }
+    @keyframes logoFloat { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-9px); } }
+    .brand { font-family: 'DM Serif Display', serif; font-size: 42px; color: var(--white); margin-bottom: 6px; }
+    .brand em { font-style: italic; color: var(--gold); }
+    .tagline { font-size: 11px; font-weight: 500; letter-spacing: 3.5px; text-transform: uppercase; color: rgba(255,255,255,.38); margin-bottom: 52px; }
+    .progress-wrap { width: 240px; height: 2px; background: rgba(255,255,255,.1); border-radius: 99px; overflow: hidden; margin-bottom: 18px; }
+    .progress-fill { height: 100%; border-radius: 99px; animation: progressFill 2.6s cubic-bezier(.4,0,.2,1) forwards; background: linear-gradient(90deg, var(--blue-mid), var(--blue-bright), var(--gold)); box-shadow: 0 0 10px rgba(240,180,41,.5); }
+    @keyframes progressFill { 0% { width: 0%; } 30% { width: 42%; } 65% { width: 74%; } 85% { width: 91%; } 100% { width: 98%; } }
+    
+    .status-row { display: flex; align-items: center; gap: 9px; }
+    .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--gold); animation: dotPulse 1.4s ease-in-out infinite; }
+    .status-txt { font-size: 12px; color: rgba(255,255,255,.42); transition: opacity .25s; }
+    @keyframes dotPulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.55); } }
+  </style>
+  <script src="/flutter.js" defer></script> 
+</head>
+<body>
+
+<div id="loading">
+  <div class="load-content">
+    <div class="logo-wrap">
+      <img src="/assets/assets/icon.png" onerror="this.outerHTML='<span style=\'font-size:44px\'>📦</span>'">
+    </div>
+    <div class="brand">Catálogo <em>Boxi</em></div>
+    <div class="tagline">Tienda digital · Pedidos en línea</div>
+    <div class="progress-wrap"><div class="progress-fill"></div></div>
+    <div class="status-row">
+      <div class="status-dot"></div>
+      <div class="status-txt" id="statusTxt">Iniciando sistema...</div>
+    </div>
+  </div>
+  <div style="position: absolute; bottom: 20px; font-size: 10px; color: rgba(255,255,255,0.3); font-weight: bold;">V 5.2.9</div>
+</div>
+
+<script>
+  // 1. Mensajes normales (primeros 10 segundos)
+  const normalMsgs = [
+    "Sincronizando datos...",
+    "Preparando tu catálogo...",
+    "¿Sabías que con Boxi puedes organizar tu negocio?",
+    "Lleva el control de tus ventas e ingresos...",
+    "Descarga Boxi gratis en la Play Store..."
+  ];
+
+  // 2. Mensajes de internet lento (después de 10 segundos)
+  const slowMsgs = [
+    "Esto está tardando más de lo normal...",
+    "Tu conexión a internet parece estar un poco lenta.",
+    "No cierres la ventana, seguimos intentando...",
+    "Asegúrate de tener buena señal o estar en WiFi..."
+  ];
+
+  let mIdx = 0;
+  let elapsedSeconds = 0;
+  const statusEl = document.getElementById('statusTxt');
+
+  const interval = setInterval(() => {
+    elapsedSeconds += 2; // El intervalo corre cada 2 segundos
+    
+    // Si han pasado 10 segundos o más, combinamos ambas listas de mensajes
+    let currentArray = elapsedSeconds >= 10 
+      ? normalMsgs.concat(slowMsgs) 
+      : normalMsgs;
+
+    // Quitamos la línea que reiniciaba el índice a 0 para mantener la fluidez
+    mIdx = (mIdx + 1) % currentArray.length;
+
+    if (statusEl) {
+      statusEl.style.opacity = '0';
+      setTimeout(() => { 
+        statusEl.textContent = currentArray[mIdx]; 
+        statusEl.style.opacity = '1'; 
+      }, 180);
+    }
+  }, 2000);
+
+  const loader = document.getElementById('loading');
+  let loaderEliminado = false;
+  
+  window.quitarLoader = function() {
+    if (loaderEliminado) return;
+    loaderEliminado = true;
+    clearInterval(interval);
+    
+    if (loader) {
+      loader.style.opacity = '0';
+      loader.style.transform = 'scale(1.05)';
+      setTimeout(() => {
+        if (loader.parentNode) loader.remove();
+      }, 400);
+    }
+  }
+
+   window.addEventListener('load', function() {
+    _flutter.loader.loadEntrypoint({
+      onEntrypointLoaded: async function(engineInit) {
+        const appRunner = await engineInit.initializeEngine({
+          renderer: 'html', 
+        });
+        
+        await appRunner.runApp(); 
+      }
+    });
+  });
+</script>
+</body>
+</html>
