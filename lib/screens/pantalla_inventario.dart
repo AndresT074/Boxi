@@ -161,7 +161,6 @@ class _PantallaInventarioState extends State<PantallaInventario> {
   Future<void> _cargar() async {
     final db = await DBHelper.instance.database;
     final prefs = await SharedPreferences.getInstance();
-    // 🔥 AÑADIDA LA COLUMNA "variantes" AL SELECT
     final data = await db.rawQuery('''
       SELECT id, nombre, precio_compra, precio_venta, descuento, stock, descripcion, orden, activo, ultima_modificacion, variantes 
       FROM productos 
