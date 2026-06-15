@@ -12,6 +12,8 @@ import 'dart:async';
 import 'dart:ui' as ui;           // Para ui.Codec, ui.FrameInfo, etc.
 import 'dart:typed_data';       // Para Uint8List y ByteData
 
+final Map<String, Uint8List> _inventarioImageCache = {};
+
 class PantallaInventario extends StatefulWidget {
   const PantallaInventario({super.key});
   @override
@@ -159,8 +161,9 @@ class _PantallaInventarioState extends State<PantallaInventario> {
   Future<void> _cargar() async {
     final db = await DBHelper.instance.database;
     final prefs = await SharedPreferences.getInstance();
+    // 🔥 AÑADIDA LA COLUMNA "variantes" AL SELECT
     final data = await db.rawQuery('''
-      SELECT id, nombre, precio_compra, precio_venta, descuento, stock, descripcion, orden, activo, ultima_modificacion 
+      SELECT id, nombre, precio_compra, precio_venta, descuento, stock, descripcion, orden, activo, ultima_modificacion, variantes 
       FROM productos 
       ORDER BY activo DESC, orden ASC, id DESC
     ''');
@@ -258,29 +261,41 @@ class _PantallaInventarioState extends State<PantallaInventario> {
         final p = _filtrados[i];
         bool estaInactivo = (p['activo'] ?? 1) == 0;
 
-        bool tieneNegativo = false;
-        String variantesData = p['variantes']?.toString() ?? ""; // 🔥 PROTECCIÓN AQUÍ
+        bool tieneNegativoOCero = false;
+        bool tieneVariantes = false; // 🔥 Nuevo verificador
+        String variantesData = p['variantes']?.toString() ?? ""; 
         
+        // 🔥 LÓGICA BLINDADA Y AISLADA
         if (variantesData.length > 5) {
           try {
             var dec = jsonDecode(variantesData);
-            if (dec.isNotEmpty && !dec[0].containsKey('grupo')) {
-              for (var o in dec) {
-                if ((o['stock'] as int) <= 0) { tieneNegativo = true; break; }
-              }
-            } else {
+            if (dec is List && dec.isNotEmpty) {
+              tieneVariantes = true; // Confirmamos que trabaja con variantes
               for (var g in dec) {
-                for (var o in g['opciones']) {
-                  if ((o['stock'] as int) <= 0) { tieneNegativo = true; break; }
+                if (g is Map) {
+                  // Soporta tanto formato con grupos como formato viejo (lista plana)
+                  List opciones = g.containsKey('opciones') && g['opciones'] is List ? g['opciones'] : [g];
+                  
+                  for (var o in opciones) {
+                    if (o is Map) {
+                      bool esActivo = o['activo']?.toString() != 'false';
+                      if (esActivo) { 
+                        int st = int.tryParse(o['stock']?.toString() ?? '0') ?? 0;
+                        if (st <= 0) { tieneNegativoOCero = true; break; }
+                      }
+                    }
+                  }
                 }
-                if (tieneNegativo) break;
+                if (tieneNegativoOCero) break;
               }
             }
-          } catch (e) {}
+          } catch (_) {}
         }
 
-        bool sinStock = (p['stock'] ?? 0) <= 0;
-        bool mostrarAlerta = sinStock || tieneNegativo;
+        bool sinStockGlobal = (int.tryParse(p['stock']?.toString() ?? '0') ?? 0) <= 0;
+        
+        // 🔥 SI TIENE VARIANTES, EL BORDE ROJO DEPENDE DE ELLAS. SI NO, DEL GLOBAL.
+        bool mostrarAlerta = tieneVariantes ? tieneNegativoOCero : sinStockGlobal;
 
         double descuentoPct = (p['descuento'] ?? 0).toDouble();
         double precioCompra = (p['precio_compra'] ?? 0).toDouble();
@@ -299,9 +314,11 @@ class _PantallaInventarioState extends State<PantallaInventario> {
                   estaInactivo 
                     ? ColorFiltered(
                         colorFilter: const ColorFilter.mode(Colors.grey, BlendMode.saturation),
-                        child: _foto(p['id']), // ✅ PASAR EL 'id'
+                        // 🔥 KEY AGREGADA PARA EVITAR CAOS DE RECICLAJE
+                        child: ImagenInventario(key: ValueKey('img_${p['id']}'), id: p['id']), 
                       )
-                    : _foto(p['id']), // ✅ PASAR EL 'id'
+                    // 🔥 KEY AGREGADA
+                    : ImagenInventario(key: ValueKey('img_${p['id']}'), id: p['id']), 
                   if (estaInactivo)
                     Center(
                       child: Container(
@@ -521,30 +538,6 @@ class _PantallaInventarioState extends State<PantallaInventario> {
     );
   }
 
-  Widget _foto(int id) {
-    return FutureBuilder<List<Map<String, dynamic>>>(
-      // Consulta la foto individualmente para no saturar el CursorWindow
-      future: DBHelper.instance.database.then((db) => db.query('productos', columns: ['foto_path'], where: 'id = ?', whereArgs: [id])),
-      builder: (context, snapshot) {
-        if (!snapshot.hasData || snapshot.data!.isEmpty) {
-          return const Icon(Icons.image, color: Colors.grey, size: 30);
-        }
-        String data = snapshot.data!.first['foto_path'] ?? "";
-        
-        if (data.isEmpty) return Container(color: Colors.grey[200], child: const Icon(Icons.image, color: Colors.grey, size: 30));
-        
-        try {
-          if (data.length > 500) {
-            return Image.memory(base64Decode(data), fit: BoxFit.cover, width: double.infinity, height: double.infinity, gaplessPlayback: true, errorBuilder: (c,e,s) => const Icon(Icons.broken_image));
-          }
-          return Image.file(File(data), fit: BoxFit.cover, width: double.infinity, height: double.infinity, gaplessPlayback: true, errorBuilder: (c,e,s) => const Icon(Icons.broken_image));
-        } catch (e) {
-          return const Icon(Icons.broken_image, color: Colors.red);
-        }
-      }
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     bool superoLimite = !_esPremium && _prods.length >= 50;
@@ -703,7 +696,7 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
       }
       _cargarFotosVariantes(); 
     } else {
-      _sC.text = ""; _pCC.text = ""; _pVC.text = ""; _descPctC.text = "";
+      _sC.text = "0"; _pCC.text = ""; _pVC.text = ""; _descPctC.text = "";
     }
   }
 
@@ -917,137 +910,211 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
     double precioFinal = pV - (pV * (descPct / 100));
     bool generaPerdida = pV > 0 && precioFinal < pC;
 
+    // 🔥 Helper de diseño moderno para inputs (sin overscroll)
+    InputDecoration _decoModerno(String label, IconData icon) {
+      return InputDecoration(
+        labelText: label,
+        labelStyle: TextStyle(color: isOscuro ? Colors.white60 : Colors.black54, fontSize: 14),
+        prefixIcon: Icon(icon, size: 20, color: isOscuro ? Colors.cyanAccent : Colors.blueAccent),
+        filled: true,
+        fillColor: isOscuro ? Colors.white.withOpacity(0.05) : Colors.grey.shade50,
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none),
+        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide(color: isOscuro ? Colors.white10 : Colors.grey.shade300)),
+        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: const BorderSide(color: Colors.blueAccent, width: 2)),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 15, vertical: 16)
+      );
+    }
+
     return Scaffold(
-      appBar: AppBar(title: Text(widget.producto == null ? 'Nuevo Producto' : 'Editar Producto'), backgroundColor: const Color(0xFF0D47A1), foregroundColor: Colors.white),
+      backgroundColor: isOscuro ? const Color(0xFF0A0A0F) : const Color(0xFFF2F4F7),
+      appBar: AppBar(
+        title: Text(widget.producto == null ? 'Nuevo Producto' : 'Editar Producto', style: const TextStyle(fontWeight: FontWeight.bold)), 
+        backgroundColor: isOscuro ? const Color(0xFF0D1B2A) : const Color(0xFF0D47A1), 
+        foregroundColor: Colors.white,
+        elevation: 0,
+      ),
       body: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
+        padding: const EdgeInsets.all(16), // Ligeramente reducido para pantallas estrechas
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children:[
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text("Producto Activo", style: TextStyle(fontWeight: FontWeight.bold)),
-              subtitle: const Text("Si lo apagas, se oculta en ventas y en la web."),
-              value: _estaActivo,
-              activeColor: Colors.green,
-              onChanged: (v) => setState(() => _estaActivo = v),
-            ),
-            TextField(controller: _nC, decoration: const InputDecoration(labelText: 'Nombre *', filled: true)),
-            const SizedBox(height: 10),
-            TextField(controller: _descC, maxLines: 2, decoration: const InputDecoration(labelText: 'Descripción (Opcional)', filled: true)),
-            const SizedBox(height: 15),
             
+            // FOTO PRINCIPAL
+            InkWell(
+              borderRadius: BorderRadius.circular(20),
+              onTap: _estaGuardando ? null : () => showModalBottomSheet(context: context, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))), builder: (c) => SafeArea(
+                child: Column(mainAxisSize: MainAxisSize.min, children:[
+                  ListTile(leading: const Icon(Icons.camera_alt, color: Colors.blue), title: const Text("Tomar Foto"), onTap: () async {
+                    Navigator.pop(context);
+                    String res = await _capturarImagenBase64(ImageSource.camera);
+                    if(res.isNotEmpty && res != "error_size") setState(() => _imgData = res);
+                  }),
+                  ListTile(leading: const Icon(Icons.photo_library, color: Colors.blue), title: const Text("Elegir de Galería"), onTap: () async {
+                    Navigator.pop(context);
+                    String res = await _capturarImagenBase64(ImageSource.gallery);
+                    if(res.isNotEmpty && res != "error_size") setState(() => _imgData = res);
+                  }),
+                  if (_imgData.isNotEmpty)
+                    ListTile(leading: const Icon(Icons.delete_forever, color: Colors.red), title: const Text("Eliminar Foto", style: TextStyle(color: Colors.red)), onTap: () { setState(() => _imgData = ""); Navigator.pop(context); }),
+                ]),
+              )),
+              child: Container(
+                height: 200, width: double.infinity, 
+                decoration: BoxDecoration(
+                  color: isOscuro ? Colors.white.withOpacity(0.05) : Colors.white, 
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: isOscuro ? Colors.white24 : Colors.blue.withOpacity(0.3), width: 2, style: BorderStyle.solid),
+                  image: _imgData.isEmpty ? null : DecorationImage(
+                    image: _imgData.length > 500 ? MemoryImage(base64Decode(_imgData)) : FileImage(File(_imgData)) as ImageProvider, fit: BoxFit.cover
+                  ),
+                  boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 10, offset: const Offset(0, 5))]
+                ),
+                child: _imgData.isEmpty 
+                  ? Column(mainAxisAlignment: MainAxisAlignment.center, children:[
+                      Icon(Icons.add_a_photo_rounded, size: 45, color: isOscuro ? Colors.white38 : Colors.blueAccent), 
+                      const SizedBox(height: 12), 
+                      Text("Añadir Foto Principal", style: TextStyle(color: isOscuro ? Colors.white38 : Colors.blueAccent, fontWeight: FontWeight.bold))
+                    ])
+                  : const SizedBox(),
+              ),
+            ),
+            const SizedBox(height: 20),
+
+            // INFORMACIÓN BÁSICA
+            Text("Información General", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16, color: isOscuro ? Colors.white : Colors.black87)),
+            const SizedBox(height: 12),
+            TextField(controller: _nC, decoration: _decoModerno('Nombre del Producto *', Icons.label_outline)),
+            const SizedBox(height: 12),
+            TextField(controller: _descC, maxLines: 2, decoration: _decoModerno('Descripción (Opcional)', Icons.notes_rounded)),
+            const SizedBox(height: 20),
+
+            // PRECIOS
+            Text("Precios y Descuentos", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16, color: isOscuro ? Colors.white : Colors.black87)),
+            const SizedBox(height: 12),
             Row(
               children:[
-                Expanded(child: TextField(controller: _pCC, onChanged: (v)=>setState((){}), keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Costo Compra \$', hintText: '0', filled: true))),
+                Expanded(child: TextField(controller: _pCC, onChanged: (v)=>setState((){}), keyboardType: TextInputType.number, decoration: _decoModerno('Costo', Icons.monetization_on_outlined))),
                 const SizedBox(width: 10),
-                Expanded(child: TextField(controller: _pVC, onChanged: (v)=>setState((){}), keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Precio Venta \$', hintText: '0', filled: true))),
+                Expanded(child: TextField(controller: _pVC, onChanged: (v)=>setState((){}), keyboardType: TextInputType.number, decoration: _decoModerno('Venta', Icons.sell_outlined))),
               ],
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 12),
             Row(
               children: [
-                Expanded(child: TextField(controller: _descPctC, onChanged: (v)=>setState((){}), keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Descuento (%)', hintText: 'Ej: 10', filled: true, prefixIcon: Icon(Icons.percent, size: 18)))),
+                Expanded(child: TextField(controller: _descPctC, onChanged: (v)=>setState((){}), keyboardType: TextInputType.number, decoration: _decoModerno('Desc %', Icons.percent_rounded))),
                 const SizedBox(width: 10),
                 Expanded(
                   child: Container(
-                    padding: const EdgeInsets.all(12),
+                    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 10),
                     decoration: BoxDecoration(
-                      color: generaPerdida ? Colors.red.shade100 : (descPct > 0 ? Colors.green.shade100 : Colors.grey.shade200),
-                      borderRadius: BorderRadius.circular(5)
+                      color: generaPerdida ? Colors.red.withOpacity(0.15) : (descPct > 0 ? Colors.green.withOpacity(0.15) : (isOscuro ? Colors.white10 : Colors.grey.shade200)),
+                      borderRadius: BorderRadius.circular(15),
+                      border: Border.all(color: generaPerdida ? Colors.red : (descPct > 0 ? Colors.green : Colors.transparent))
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        const Text("Precio Final:", style: TextStyle(fontSize: 10, color: Colors.black54)),
-                        Text("\$$precioFinal", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: generaPerdida ? Colors.red.shade900 : Colors.black87)),
+                        Text("Precio Final:", style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: isOscuro ? Colors.white54 : Colors.black54)),
+                        // FittedBox previene la cinta de policia si el número es enorme
+                        FittedBox(child: Text("\$${precioFinal.toStringAsFixed(0)}", style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: generaPerdida ? Colors.redAccent : (isOscuro ? Colors.white : Colors.black87)))),
                       ],
                     ),
                   )
                 )
               ],
             ),
-            
             if (generaPerdida)
-              const Padding(
-                padding: EdgeInsets.only(top: 8),
+              Padding(
+                padding: const EdgeInsets.only(top: 10),
                 child: Row(
                   children: [
-                    Icon(Icons.warning_amber_rounded, color: Colors.red, size: 20),
-                    SizedBox(width: 5),
-                    Expanded(child: Text("¡Cuidado! El descuento genera un precio de venta inferior al costo de compra (Pérdidas).", style: TextStyle(color: Colors.red, fontSize: 12, fontWeight: FontWeight.bold))),
+                    const Icon(Icons.warning_amber_rounded, color: Colors.redAccent, size: 20),
+                    const SizedBox(width: 8),
+                    Expanded(child: Text("El descuento genera pérdidas.", style: TextStyle(color: Colors.redAccent.shade100, fontSize: 12, fontWeight: FontWeight.bold))),
                   ],
                 ),
               ),
 
             const SizedBox(height: 25),
             
-            Text("Inventario General", 
-              style: TextStyle(
-                fontWeight: FontWeight.bold, 
-                fontSize: 16, 
-                color: isOscuro ? Colors.white : Colors.black // ✅ Adaptativo
-              )
+            // INVENTARIO BÁSICO
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Theme.of(context).cardColor,
+                borderRadius: BorderRadius.circular(20),
+                boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 10, offset: const Offset(0, 4))]
+              ),
+              child: Column(
+                children: [
+                  Text("Stock Global", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16, color: isOscuro ? Colors.white : Colors.black87)),
+                  const SizedBox(height: 15),
+                  Row(mainAxisAlignment: MainAxisAlignment.center, children:[
+                    Container(
+                      decoration: BoxDecoration(color: tieneVariantes ? Colors.grey.withOpacity(0.1) : Colors.red.withOpacity(0.1), shape: BoxShape.circle),
+                      child: IconButton(
+                        icon: Icon(Icons.remove, color: tieneVariantes ? Colors.grey : Colors.red, size: 25), 
+                        onPressed: tieneVariantes ? null : () {
+                          int val = int.tryParse(_sC.text) ?? 0;
+                          setState(() => _sC.text = (val - 1).toString());
+                        }
+                      ),
+                    ),
+                    Flexible( // Flexible previene overscroll
+                      child: Container(
+                        width: 90, 
+                        margin: const EdgeInsets.symmetric(horizontal: 10),
+                        child: TextField(
+                          controller: _sC, 
+                          readOnly: tieneVariantes, 
+                          textAlign: TextAlign.center, 
+                          keyboardType: const TextInputType.numberWithOptions(signed: true), 
+                          style: TextStyle(
+                            fontSize: 26, 
+                            fontWeight: FontWeight.w900,
+                            color: tieneVariantes ? (isOscuro ? Colors.white38 : Colors.grey) : (isOscuro ? Colors.white : Colors.black), 
+                          ),
+                          decoration: const InputDecoration(border: InputBorder.none, isDense: true),
+                        )
+                      ),
+                    ),
+                    Container(
+                      decoration: BoxDecoration(color: tieneVariantes ? Colors.grey.withOpacity(0.1) : Colors.green.withOpacity(0.1), shape: BoxShape.circle),
+                      child: IconButton(
+                        icon: Icon(Icons.add, color: tieneVariantes ? Colors.grey : Colors.green, size: 25), 
+                        onPressed: tieneVariantes ? null : () => setState(() => _sC.text = ((int.tryParse(_sC.text) ?? 0) + 1).toString())
+                      ),
+                    ),
+                  ]),
+                  if(tieneVariantes)
+                    const Padding(padding: EdgeInsets.only(top: 10), child: Text("Bloqueado: El stock se calcula sumando las variantes.", style: TextStyle(fontSize: 11, color: Colors.blueGrey), textAlign: TextAlign.center)),
+                ],
+              ),
             ),
-            const SizedBox(height: 10),
-            Row(mainAxisAlignment: MainAxisAlignment.center, children:[
-              IconButton(
-                icon: Icon(Icons.remove_circle, color: tieneVariantes ? Colors.grey : Colors.red, size: 40), 
-                onPressed: tieneVariantes ? null : () {
-                  int val = int.tryParse(_sC.text) ?? 0;
-                  setState(() => _sC.text = (val - 1).toString());
-                }
-              ),
-              SizedBox(
-                width: 80, 
-                child: TextField(
-                  controller: _sC, 
-                  readOnly: tieneVariantes, 
-                  textAlign: TextAlign.center, 
-                  keyboardType: const TextInputType.numberWithOptions(signed: true), 
-                  style: TextStyle(
-                    fontSize: 22, 
-                    fontWeight: FontWeight.bold,
-                    color: tieneVariantes 
-                        ? (isOscuro ? Colors.white24 : Colors.grey) 
-                        : (isOscuro ? Colors.white : Colors.black), 
-                  ),
-                  decoration: InputDecoration(
-                    hintText: '0',
-                    hintStyle: TextStyle(color: isOscuro ? Colors.white24 : Colors.black26),
-                    border: InputBorder.none, 
-                  ),
-                )
-              ),
-              IconButton(
-                icon: Icon(Icons.add_circle, color: tieneVariantes ? Colors.grey : Colors.green, size: 40), 
-                onPressed: tieneVariantes ? null : () => setState(() => _sC.text = ((int.tryParse(_sC.text) ?? 0) + 1).toString())
-              ),
-            ]),
-            if(tieneVariantes)
-              const Center(
-                child: Padding(
-                  padding: EdgeInsets.only(top: 5),
-                  child: Text("Sumatoria calculada ignorando negativos", style: TextStyle(fontSize: 10, color: Colors.blueGrey)),
-                ),
-              ),
             
-            CheckboxListTile(
-              title: Text("¿Es reinversión?", 
-                style: TextStyle(color: isOscuro ? Colors.white : Colors.black)),
-              subtitle: Text("Descuenta del capital global disponible.", 
-                style: TextStyle(color: isOscuro ? Colors.white60 : Colors.black54)),
-              value: _esReinversion, 
-              onChanged: (v) => setState(() => _esReinversion = v!)
+            const SizedBox(height: 15),
+            Card(
+              elevation: 0,
+              color: isOscuro ? Colors.white.withOpacity(0.05) : Colors.grey.shade100,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+              child: CheckboxListTile(
+                title: Text("¿Es compra de reinversión?", style: TextStyle(fontWeight: FontWeight.bold, color: isOscuro ? Colors.white : Colors.black87, fontSize: 14)),
+                subtitle: Text("Descuenta el dinero del capital", style: TextStyle(color: isOscuro ? Colors.white54 : Colors.black54, fontSize: 12)),
+                value: _esReinversion, 
+                activeColor: Colors.blueAccent,
+                onChanged: (v) => setState(() => _esReinversion = v!)
+              ),
             ),
-            const Divider(height: 40, thickness: 2),
+            const SizedBox(height: 25),
 
+            // VARIANTES
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children:[
-                const Text("Variantes (Opcional)", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                Text("Variantes", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16, color: isOscuro ? Colors.white : Colors.black87)),
                 ElevatedButton.icon(
-                  style: ElevatedButton.styleFrom(backgroundColor: Colors.blue.shade50, foregroundColor: Colors.blue.shade900),
+                  style: ElevatedButton.styleFrom(backgroundColor: isOscuro ? Colors.blue.withOpacity(0.2) : Colors.blue.shade50, foregroundColor: isOscuro ? Colors.cyanAccent : Colors.blue.shade900, elevation: 0, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
                   onPressed: () {
                     setState(() {
                       _gruposVariantes.add({
@@ -1059,15 +1126,11 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
                       _recalcularStockGlobal();
                     });
                   },
-                  icon: const Icon(Icons.add), label: const Text("Crear Grupo")
+                  icon: const Icon(Icons.add, size: 18), label: const Text("Añadir Grupo")
                 )
               ],
             ),
-            if (tieneVariantes)
-              const Padding(
-                padding: EdgeInsets.only(bottom: 10, top: 4),
-                child: Text("Crea grupos (ej. Color) y añade sus opciones (ej. Rosa).", style: TextStyle(fontSize: 11, color: Colors.orange)),
-              ),
+            const SizedBox(height: 10),
             
             ListView.builder(
               shrinkWrap: true,
@@ -1078,79 +1141,36 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
                 List opciones = grupo['opciones'];
 
                 return Card(
-                  elevation: 3,
+                  elevation: 2,
                   margin: const EdgeInsets.only(bottom: 20),
                   clipBehavior: Clip.antiAlias,
-                  color: isOscuro ? const Color(0xFF1E1E26) : Colors.white,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    side: BorderSide(color: isOscuro ? Colors.white10 : Colors.transparent)
-                  ),
+                  color: Theme.of(context).cardColor,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: isOscuro ? Colors.white10 : Colors.transparent)),
                   child: Column(
                     children: [
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                        decoration: BoxDecoration(color: isOscuro ? Colors.blue.withOpacity(0.1) : Colors.blue.shade50),
+                        decoration: BoxDecoration(color: isOscuro ? Colors.cyanAccent.withOpacity(0.1) : Colors.blue.withOpacity(0.08)),
                         child: Row(
                           children: [
-                            Icon(Icons.category, color: isOscuro ? Colors.cyanAccent : Colors.blue, size: 20),
-                            const SizedBox(width: 10),
+                            Icon(Icons.category_rounded, color: isOscuro ? Colors.cyanAccent : Colors.blue, size: 20),
+                            const SizedBox(width: 8),
                             Expanded(
                               child: TextFormField(
                                 initialValue: grupo['grupo'],
-                                style: TextStyle(fontWeight: FontWeight.bold, color: isOscuro ? Colors.white : Colors.black87),
-                                decoration: InputDecoration(
-                                  hintText: "Nombre aquí (Color, Talla...)",
-                                  hintStyle: TextStyle(color: isOscuro ? Colors.white24 : Colors.grey),
-                                  border: InputBorder.none,
-                                  isDense: true,
-                                ),
+                                style: TextStyle(fontWeight: FontWeight.w900, fontSize: 14, color: isOscuro ? Colors.white : Colors.blue.shade900),
+                                decoration: InputDecoration(hintText: "Ej: Color, Talla...", hintStyle: TextStyle(color: isOscuro ? Colors.white38 : Colors.blue.shade200), border: InputBorder.none, isDense: true),
                                 onChanged: (val) => grupo['grupo'] = val,
                               ),
                             ),
                             IconButton(
-                              icon: const Icon(Icons.delete, color: Colors.redAccent),
+                              icon: const Icon(Icons.delete_outline_rounded, color: Colors.redAccent),
                               onPressed: () {
-                                showDialog(
-                                  context: context,
-                                  builder: (ctx) => AlertDialog(
-                                    title: const Text('⚠️ Borrar Grupo'),
-                                    content: Text('¿Eliminar el grupo "${grupo['grupo']}" y TODAS sus variantes?'),
-                                    actions: [
-                                      TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('CANCELAR')),
-                                      ElevatedButton(
-                                        style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-                                        onPressed: () async {
-                                          Navigator.pop(ctx);
-                                          
-                                          // Si el producto ya existía, borramos las fotos de este grupo de la BD
-                                          if (widget.producto != null) {
-                                            final db = await DBHelper.instance.database;
-                                            await db.delete('fotos_variantes', 
-                                              where: 'producto_id = ? AND grupo_index = ?', 
-                                              whereArgs: [widget.producto!['id'], gIndex]);
-                                            
-                                            final prefs = await SharedPreferences.getInstance();
-                                            if (prefs.getBool('es_premium') == true) {
-                                              // Firebase no permite borrar por query fácilmente desde el cliente, 
-                                              // así que borramos documento por documento.
-                                              for (int i = 0; i < opciones.length; i++) {
-                                                ServicioNube.eliminarFotoVarianteNube(widget.producto!['id'], gIndex, i);
-                                              }
-                                            }
-                                          }
-
-                                          setState(() { 
-                                            _gruposVariantes.removeAt(gIndex); 
-                                            _fotosVariantes.removeWhere((key, value) => key.startsWith("${gIndex}_"));
-                                            _recalcularStockGlobal(); 
-                                          });
-                                        },
-                                        child: const Text('ELIMINAR', style: TextStyle(color: Colors.white)),
-                                      ),
-                                    ],
-                                  ),
-                                );
+                                setState(() { 
+                                  _gruposVariantes.removeAt(gIndex); 
+                                  _fotosVariantes.removeWhere((key, value) => key.startsWith("${gIndex}_"));
+                                  _recalcularStockGlobal(); 
+                                });
                               }
                             )
                           ],
@@ -1158,7 +1178,7 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
                       ),
                       
                       Padding(
-                        padding: const EdgeInsets.all(10.0),
+                        padding: const EdgeInsets.all(12.0),
                         child: Column(
                           children: [
                             ...opciones.asMap().entries.map((entry) {
@@ -1167,195 +1187,144 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
                               String key = "${gIndex}_$oIndex";
                               String fotoBase64 = _fotosVariantes[key] ?? '';
                               _stockCtrls.putIfAbsent(key, () => TextEditingController(text: "${o['stock']}"));
-                              return Padding(
-                                padding: const EdgeInsets.only(bottom: 15),
+                              
+                              // 🔥 VERIFICADOR DE VARIANTE AGOTADA
+                              bool varianteAgotada = (o['stock'] as int? ?? 0) <= 0;
+                              
+                              return Container(
+                                padding: const EdgeInsets.all(10),
+                                margin: const EdgeInsets.only(bottom: 12),
+                                decoration: BoxDecoration(
+                                  // 🔥 FONDO Y BORDES ROJOS SI ESTÁ AGOTADA
+                                  color: varianteAgotada ? Colors.red.withOpacity(0.05) : (isOscuro ? Colors.white.withOpacity(0.03) : Colors.grey.shade50), 
+                                  borderRadius: BorderRadius.circular(15), 
+                                  border: Border.all(
+                                    color: varianteAgotada ? Colors.red : (isOscuro ? Colors.white10 : Colors.grey.shade200),
+                                    width: varianteAgotada ? 1.5 : 1.0 // Un poco más grueso si está en 0
+                                  )
+                                ),
                                 child: Row(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  crossAxisAlignment: CrossAxisAlignment.center,
                                   children: [
                                     InkWell(
                                       onTap: () async {
                                         showModalBottomSheet(
                                           context: context,
-                                          builder: (c) => Column(mainAxisSize: MainAxisSize.min, children: [
-                                            ListTile(
-                                              leading: const Icon(Icons.camera_alt),
-                                              title: const Text("Cámara"),
-                                              onTap: () async {
+                                          builder: (c) => SafeArea(
+                                            child: Column(mainAxisSize: MainAxisSize.min, children: [
+                                              ListTile(leading: const Icon(Icons.camera_alt), title: const Text("Cámara"), onTap: () async {
                                                 Navigator.pop(context);
                                                 String res = await _capturarImagenBase64(ImageSource.camera);
-                                                if (res == "error_size" && mounted) {
-                                                  ScaffoldMessenger.of(context).showSnackBar(
-                                                      const SnackBar(content: Text("Imagen pesada")));
-                                                } else if (res.isNotEmpty) {
-                                                  setState(() => _fotosVariantes[key] = res); 
-                                                }
-                                              },
-                                            ),
-                                            ListTile(
-                                              leading: const Icon(Icons.photo_library),
-                                              title: const Text("Galería"),
-                                              onTap: () async {
+                                                if (res.isNotEmpty && res != "error_size") setState(() => _fotosVariantes[key] = res); 
+                                              }),
+                                              ListTile(leading: const Icon(Icons.photo_library), title: const Text("Galería"), onTap: () async {
                                                 Navigator.pop(context);
                                                 String res = await _capturarImagenBase64(ImageSource.gallery);
-                                                if (res == "error_size" && mounted) {
-                                                  ScaffoldMessenger.of(context).showSnackBar(
-                                                      const SnackBar(content: Text("Imagen pesada")));
-                                                } else if (res.isNotEmpty) {
-                                                  setState(() => _fotosVariantes[key] = res); 
-                                                }
-                                              },
-                                            ),
-                                            if (fotoBase64.isNotEmpty)
-                                              ListTile(
-                                                leading: const Icon(Icons.delete_forever, color: Colors.red),
-                                                title: const Text("Eliminar foto",
-                                                    style: TextStyle(color: Colors.red)),
-                                                onTap: () async {
-                                                  setState(() => _fotosVariantes[key] = ''); 
-                                                  if (widget.producto != null) {
-                                                    final db = await DBHelper.instance.database;
-                                                    await db.delete('fotos_variantes',
-                                                      where: 'producto_id = ? AND grupo_index = ? AND opcion_index = ?',
-                                                      whereArgs: [widget.producto!['id'], gIndex, oIndex]);
-                                                    final prefs = await SharedPreferences.getInstance();
-                                                    if (prefs.getBool('es_premium') == true) {
-                                                      ServicioNube.eliminarFotoVarianteNube(widget.producto!['id'], gIndex, oIndex);
-                                                    }
-                                                  }
-                                                  if (mounted) Navigator.pop(context);
-                                                },
-                                              ),
-                                          ]),
+                                                if (res.isNotEmpty && res != "error_size") setState(() => _fotosVariantes[key] = res); 
+                                              }),
+                                              if (fotoBase64.isNotEmpty)
+                                                ListTile(leading: const Icon(Icons.delete_forever, color: Colors.red), title: const Text("Eliminar foto", style: TextStyle(color: Colors.red)), onTap: () { setState(() => _fotosVariantes[key] = ''); Navigator.pop(context); }),
+                                            ]),
+                                          ),
                                         );
                                       },
                                       child: Container(
-                                        width: 55,
-                                        height: 55,
-                                        decoration: BoxDecoration(
-                                            color: Colors.grey.shade200,
-                                            borderRadius: BorderRadius.circular(8)),
+                                        width: 55, height: 55,
+                                        decoration: BoxDecoration(color: isOscuro ? Colors.black26 : Colors.white, borderRadius: BorderRadius.circular(10), border: Border.all(color: isOscuro ? Colors.white12 : Colors.grey.shade300)),
+                                        clipBehavior: Clip.antiAlias,
                                         child: fotoBase64.isEmpty
-                                            ? const Icon(Icons.add_a_photo, color: Colors.grey, size: 20)
-                                            : Image.memory(base64Decode(fotoBase64), fit: BoxFit.cover),
+                                            ? Icon(Icons.add_a_photo_rounded, color: isOscuro ? Colors.white38 : Colors.grey, size: 24)
+                                            // 🔥 USO INTELIGENTE DEL CACHÉ PARA EVITAR PARPADEO
+                                            : Builder(
+                                                builder: (context) {
+                                                  Uint8List bytes;
+                                                  if (_inventarioImageCache.containsKey(fotoBase64)) {
+                                                    bytes = _inventarioImageCache[fotoBase64]!;
+                                                  } else {
+                                                    bytes = base64Decode(fotoBase64);
+                                                    if (_inventarioImageCache.length > 200) _inventarioImageCache.clear();
+                                                    _inventarioImageCache[fotoBase64] = bytes;
+                                                  }
+                                                  return Image.memory(
+                                                    bytes, 
+                                                    fit: BoxFit.cover,
+                                                    gaplessPlayback: true, // Crucial anti-parpadeo
+                                                  );
+                                                }
+                                              ),
                                       ),
                                     ),
                                     const SizedBox(width: 10),
                                     
+                                    // EXPANDED PARA EVITAR OVERFLOW CINTA DE POLICIA
                                     Expanded(
                                       child: Column(
                                         children: [
                                           TextFormField(
                                             initialValue: o['nombre'],
-                                            decoration: const InputDecoration(hintText: "Ej: Rosa, XL...", isDense: true),
+                                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                                            decoration: InputDecoration(
+                                              hintText: "Ej: Rojo", 
+                                              isDense: true, 
+                                              contentPadding: const EdgeInsets.symmetric(vertical: 5),
+                                              border: const UnderlineInputBorder(),
+                                              errorText: varianteAgotada ? 'Sin stock' : null,
+                                              errorStyle: const TextStyle(height: 0.5, fontSize: 10)
+                                            ),
                                             onChanged: (val) => o['nombre'] = val,
                                           ),
-                                          const SizedBox(height: 5),
+                                          const SizedBox(height: 8),
                                           Row(
+                                            mainAxisAlignment: MainAxisAlignment.start,
                                             children: [
-                                              IconButton(
-                                                icon: const Icon(Icons.remove_circle_outline, color: Colors.red, size: 22),
-                                                constraints: const BoxConstraints(),
-                                                padding: EdgeInsets.zero,
-                                                onPressed: () {
-                                                  setState(() {
-                                                    o['stock']--;
-                                                    _stockCtrls[key]?.text = "${o['stock']}";
-                                                    _recalcularStockGlobal();
-                                                  });
-                                                }
+                                              Container(
+                                                decoration: BoxDecoration(color: Colors.red.withOpacity(0.1), borderRadius: BorderRadius.circular(8)),
+                                                child: IconButton(icon: const Icon(Icons.remove, color: Colors.red, size: 18), constraints: const BoxConstraints(), padding: const EdgeInsets.all(4), onPressed: () {
+                                                  setState(() { o['stock']--; _stockCtrls[key]?.text = "${o['stock']}"; _recalcularStockGlobal(); });
+                                                }),
                                               ),
-                                              SizedBox(
-                                                width: 50,
-                                                child: TextField(
-                                                  controller: _stockCtrls[key],
-                                                  keyboardType: const TextInputType.numberWithOptions(signed: true),
-                                                  textAlign: TextAlign.center,
-                                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                                                  decoration: const InputDecoration(border: InputBorder.none, isDense: true),
-                                                  onChanged: (val) {
-                                                    o['stock'] = int.tryParse(val) ?? 0;
-                                                    _recalcularStockGlobal();
-                                                  },
+                                              // FLEXIBLE PARA EVITAR CINTA DE POLICIA
+                                              Flexible(
+                                                child: ConstrainedBox(
+                                                  constraints: const BoxConstraints(maxWidth: 50, minWidth: 30),
+                                                  child: TextField(
+                                                    controller: _stockCtrls[key],
+                                                    keyboardType: const TextInputType.numberWithOptions(signed: true),
+                                                    textAlign: TextAlign.center,
+                                                    style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16, color: varianteAgotada ? Colors.red : null),
+                                                    decoration: const InputDecoration(border: InputBorder.none, isDense: true, contentPadding: EdgeInsets.zero),
+                                                    onChanged: (val) { o['stock'] = int.tryParse(val) ?? 0; _recalcularStockGlobal(); },
+                                                  ),
                                                 ),
                                               ),
-                                              IconButton(
-                                                icon: const Icon(Icons.add_circle_outline, color: Colors.green, size: 22),
-                                                constraints: const BoxConstraints(),
-                                                padding: EdgeInsets.zero,
-                                                onPressed: () {
-                                                  setState(() {
-                                                    o['stock']++;
-                                                    _stockCtrls[key]?.text = "${o['stock']}";
-                                                    _recalcularStockGlobal();
-                                                  });
-                                                }
+                                              Container(
+                                                decoration: BoxDecoration(color: Colors.green.withOpacity(0.1), borderRadius: BorderRadius.circular(8)),
+                                                child: IconButton(icon: const Icon(Icons.add, color: Colors.green, size: 18), constraints: const BoxConstraints(), padding: const EdgeInsets.all(4), onPressed: () {
+                                                  setState(() { o['stock']++; _stockCtrls[key]?.text = "${o['stock']}"; _recalcularStockGlobal(); });
+                                                }),
                                               ),
                                             ],
                                           )
                                         ],
                                       ),
                                     ),
+                                    const SizedBox(width: 5),
                                     
                                     Column(
+                                      mainAxisSize: MainAxisSize.min,
                                       children: [
                                         IconButton(
-                                          icon: Icon(
-                                            (o['activo'] ?? true) ? Icons.visibility : Icons.visibility_off,
-                                            color: (o['activo'] ?? true) ? Colors.blue : Colors.grey,
-                                            size: 20,
-                                          ),
-                                          tooltip: "Ocultar en web",
-                                          constraints: const BoxConstraints(),
+                                          icon: Icon((o['activo'] ?? true) ? Icons.visibility : Icons.visibility_off, color: (o['activo'] ?? true) ? Colors.blue : Colors.grey, size: 20),
                                           padding: const EdgeInsets.only(bottom: 5),
-                                          onPressed: () {
-                                            setState(() {
-                                              o['activo'] = !(o['activo'] ?? true);
-                                            });
-                                          }
+                                          constraints: const BoxConstraints(),
+                                          onPressed: () => setState(() => o['activo'] = !(o['activo'] ?? true))
                                         ),
                                         IconButton(
-                                          icon: const Icon(Icons.close, color: Colors.grey, size: 20), 
-                                          constraints: const BoxConstraints(),
+                                          icon: const Icon(Icons.close_rounded, color: Colors.grey, size: 20), 
                                           padding: EdgeInsets.zero,
+                                          constraints: const BoxConstraints(),
                                           onPressed: () {
-                                            showDialog(
-                                              context: context,
-                                              builder: (ctx) => AlertDialog(
-                                                title: const Text('⚠️ Borrar Variante'),
-                                                content: Text('¿Seguro que deseas eliminar la variante "${o['nombre']}"?'),
-                                                actions: [
-                                                  TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('CANCELAR')),
-                                                  ElevatedButton(
-                                                    style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-                                                    onPressed: () async {
-                                                      Navigator.pop(ctx);
-                                                      String key = "${gIndex}_$oIndex";
-                                                      
-                                                      // 1. Borrar de base de datos local y Firebase si la foto existía
-                                                      if (_fotosVariantes.containsKey(key) && widget.producto != null) {
-                                                        final db = await DBHelper.instance.database;
-                                                        await db.delete('fotos_variantes', 
-                                                          where: 'producto_id = ? AND grupo_index = ? AND opcion_index = ?', 
-                                                          whereArgs: [widget.producto!['id'], gIndex, oIndex]);
-                                                        
-                                                        final prefs = await SharedPreferences.getInstance();
-                                                        if (prefs.getBool('es_premium') == true) {
-                                                          ServicioNube.eliminarFotoVarianteNube(widget.producto!['id'], gIndex, oIndex);
-                                                        }
-                                                      }
-
-                                                      // 2. Limpiamos la memoria del formulario
-                                                      setState(() { 
-                                                        opciones.removeAt(oIndex);
-                                                        _fotosVariantes[key] = ''; 
-                                                        _recalcularStockGlobal(); 
-                                                      });
-                                                    },
-                                                    child: const Text('ELIMINAR', style: TextStyle(color: Colors.white)),
-                                                  ),
-                                                ],
-                                              ),
-                                            );
+                                            setState(() { opciones.removeAt(oIndex); _fotosVariantes[key] = ''; _recalcularStockGlobal(); });
                                           }
                                         ),
                                       ],
@@ -1365,18 +1334,16 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
                               );
                             }),
 
-                            Align(
-                              alignment: Alignment.centerLeft,
-                              child: TextButton.icon(
-                                onPressed: () {
-                                  setState(() {
-                                    opciones.add(<String, dynamic>{'nombre': '', 'stock': 1, 'foto_path': '', 'activo': true});
-                                    _recalcularStockGlobal();
-                                  });
-                                },
-                                icon: const Icon(Icons.add_circle, size: 18),
-                                label: const Text("Añadir Opción"),
-                              ),
+                            TextButton.icon(
+                              style: TextButton.styleFrom(foregroundColor: isOscuro ? Colors.cyanAccent : Colors.blue),
+                              onPressed: () {
+                                setState(() {
+                                  opciones.add(<String, dynamic>{'nombre': '', 'stock': 1, 'foto_path': '', 'activo': true});
+                                  _recalcularStockGlobal();
+                                });
+                              },
+                              icon: const Icon(Icons.add_circle_outline, size: 20),
+                              label: const Text("Añadir Opción", style: TextStyle(fontWeight: FontWeight.bold)),
                             )
                           ],
                         ),
@@ -1386,48 +1353,37 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
                 );
               },
             ),
-            const Divider(height: 40, thickness: 2),
-
-            InkWell(
-              onTap: _estaGuardando ? null : () => showModalBottomSheet(context: context, builder: (c) => Column(mainAxisSize: MainAxisSize.min, children:[
-                ListTile(leading: const Icon(Icons.camera_alt), title: const Text("Cámara"), onTap: () async {
-                  Navigator.pop(context);
-                  String res = await _capturarImagenBase64(ImageSource.camera);
-                  if(res.isNotEmpty && res != "error_size") {
-                    setState(() => _imgData = res);
-                  } else if(res == "error_size" && mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Imagen pesada")));
-                }),
-                ListTile(leading: const Icon(Icons.photo_library), title: const Text("Galería"), onTap: () async {
-                  Navigator.pop(context);
-                  String res = await _capturarImagenBase64(ImageSource.gallery);
-                  if(res.isNotEmpty && res != "error_size") {
-                    setState(() => _imgData = res);
-                  } else if(res == "error_size" && mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Imagen pesada")));
-                }),
-                if (_imgData.isNotEmpty)
-                  ListTile(leading: const Icon(Icons.delete_forever, color: Colors.red), title: const Text("Eliminar Foto", style: TextStyle(color: Colors.red)), onTap: () { setState(() => _imgData = ""); Navigator.pop(context); }),
-              ])),
-              child: Container(
-                height: 180, width: double.infinity, 
-                decoration: BoxDecoration(
-                  color: Colors.grey[100], border: Border.all(color: Colors.grey[400]!), borderRadius: BorderRadius.circular(15),
-                  image: _imgData.isEmpty ? null : DecorationImage(
-                    image: _imgData.length > 500 ? MemoryImage(base64Decode(_imgData)) : FileImage(File(_imgData)) as ImageProvider, fit: BoxFit.cover
-                  )
-                ),
-                child: _imgData.isEmpty 
-                  ? const Column(mainAxisAlignment: MainAxisAlignment.center, children:[Icon(Icons.add_a_photo, size: 40, color: Colors.grey), SizedBox(height: 8), Text("Foto Principal", style: TextStyle(color: Colors.grey))])
-                  : const SizedBox(),
-              ),
+            
+            SwitchListTile(
+              contentPadding: const EdgeInsets.symmetric(horizontal: 5, vertical: 10),
+              title: const Text("Producto Activo", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              subtitle: const Text("Mostrar en catálogo web y listado de ventas."),
+              value: _estaActivo,
+              activeColor: Colors.greenAccent.shade700,
+              onChanged: (v) => setState(() => _estaActivo = v),
             ),
-            const SizedBox(height: 25),
+            
+            const SizedBox(height: 10),
             ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: generaPerdida ? Colors.red : const Color(0xFF0D47A1), minimumSize: const Size(double.infinity, 50), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))), 
+              style: ElevatedButton.styleFrom(
+                backgroundColor: generaPerdida ? Colors.redAccent : const Color(0xFF00C853), 
+                minimumSize: const Size(double.infinity, 60), 
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+                elevation: 4
+              ), 
               onPressed: _estaGuardando ? null : _guardar,
               child: _estaGuardando 
                 ? const CircularProgressIndicator(color: Colors.white)
-                : Text(generaPerdida ? "GUARDAR CON PÉRDIDAS" : "GUARDAR CAMBIOS", style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                : Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(generaPerdida ? Icons.warning_amber_rounded : Icons.save_rounded, color: Colors.white),
+                      const SizedBox(width: 10),
+                      Text(generaPerdida ? "GUARDAR CON PÉRDIDAS" : "GUARDAR CAMBIOS", style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w900, letterSpacing: 1)),
+                    ],
+                  ),
             ),
+            const SizedBox(height: 40),
           ],
         ),
       ),
@@ -1741,5 +1697,60 @@ class _PantallaDetalleProductoState extends State<PantallaDetalleProducto> {
     } catch (e) {
       return Container(color: Colors.red[100], child: const Icon(Icons.broken_image, size: 100));
     }
+  }
+}
+
+class ImagenInventario extends StatefulWidget {
+  final int id;
+  const ImagenInventario({super.key, required this.id});
+
+  @override
+  State<ImagenInventario> createState() => _ImagenInventarioState();
+}
+
+class _ImagenInventarioState extends State<ImagenInventario> {
+  Future<String?>? _fotoFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _fotoFuture = _cargarFoto();
+  }
+
+  Future<String?> _cargarFoto() async {
+    final db = await DBHelper.instance.database;
+    final res = await db.query('productos', columns: ['foto_path'], where: 'id = ?', whereArgs: [widget.id]);
+    if (res.isNotEmpty) return res.first['foto_path']?.toString();
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<String?>(
+      future: _fotoFuture,
+      builder: (context, snapshot) {
+        if (!snapshot.hasData || snapshot.data!.isEmpty) {
+          return Container(color: Colors.grey.shade200, child: const Icon(Icons.image, color: Colors.grey, size: 30));
+        }
+
+        String data = snapshot.data!;
+        try {
+          if (data.length > 500) {
+            Uint8List bytes;
+            if (_inventarioImageCache.containsKey(data)) {
+              bytes = _inventarioImageCache[data]!;
+            } else {
+              bytes = base64Decode(data);
+              if (_inventarioImageCache.length > 200) _inventarioImageCache.clear();
+              _inventarioImageCache[data] = bytes;
+            }
+            return Image.memory(bytes, fit: BoxFit.cover, width: double.infinity, height: double.infinity, gaplessPlayback: true, errorBuilder: (c,e,s) => const Icon(Icons.broken_image));
+          }
+          return Image.file(File(data), fit: BoxFit.cover, width: double.infinity, height: double.infinity, gaplessPlayback: true, errorBuilder: (c,e,s) => const Icon(Icons.broken_image));
+        } catch (e) {
+          return const Icon(Icons.broken_image, color: Colors.red);
+        }
+      }
+    );
   }
 }
