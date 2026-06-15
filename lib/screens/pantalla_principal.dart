@@ -295,7 +295,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       
       if (!userDoc.exists) return;
       final data = userDoc.data() as Map<String, dynamic>;
-
       final Timestamp? ultimaMod = data['ultima_mod_productos'] as Timestamp?;
       final String? ultimaModLocal = prefs.getString('ultima_mod_productos_local_${user.uid}');
       String? ultimaModStr = ultimaMod?.microsecondsSinceEpoch.toString(); 
@@ -307,12 +306,19 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       final Timestamp? ultimaModAjust = data['ultima_mod_ajustes'] as Timestamp?;
       final String? ultimaModAjustLocal = prefs.getString('ultima_mod_ajustes_local_${user.uid}');
       String? ultimaModAjustStr = ultimaModAjust?.microsecondsSinceEpoch.toString();
+
+      final Timestamp? ultimaModCat = data['ultima_mod_categorias'] as Timestamp?;
+      final String? ultimaModCatLocal = prefs.getString('ultima_mod_categorias_local_${user.uid}');
+      String? ultimaModCatStr = ultimaModCat?.microsecondsSinceEpoch.toString();
       
+      // 2. Luego se declaran TODOS los booleanos de cambio (¡Esto corrige el error!)
       bool cambioAjust = ultimaModAjustStr != null && ultimaModAjustStr != ultimaModAjustLocal;
       bool cambioProd = ultimaModStr != null && ultimaModStr != ultimaModLocal;
       bool cambioPed = ultimaModPedStr != null && ultimaModPedStr != ultimaModPedLocal;
+      bool cambioCat = ultimaModCatStr != null && ultimaModCatStr != ultimaModCatLocal;
 
-      if (!cambioProd && !cambioPed && !cambioAjust) {
+      // 3. Por último se hace la evaluación en el IF
+      if (!cambioProd && !cambioPed && !cambioAjust && !cambioCat) {
         debugPrint("☁️ Nube al día. 0 lecturas consumidas.");
         return; 
       }
@@ -341,6 +347,11 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         debugPrint("💰 Capital de reinversión sincronizado.");
       }
 
+      if (cambioCat) {
+        await ServicioNube.sincronizarBorradosFisicos(user.uid, 'categorias');
+        await ServicioNube.descargarSoloModificados(user.uid, 'categorias', 'ultima_modificacion');
+        await prefs.setString('ultima_mod_categorias_local_${user.uid}', ultimaModCatStr);
+      }
       _cargar();
     } catch (e) {
       debugPrint("Error de sincronización: $e");
@@ -526,14 +537,22 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     String indicativo = prefs.getString('whatsapp_admin_indicativo') ?? "";
     String numero = prefs.getString('whatsapp_admin_numero') ?? "";
 
+    // 🔥 REEMPLAZA ESTE BLOQUE:
     if (indicativo.isEmpty && numero.isEmpty && savedFull.isNotEmpty) {
-      if (savedFull.startsWith('57') && savedFull.length > 2) {
-        indicativo = '57'; numero = savedFull.substring(2);
-      } else if (savedFull.startsWith('52') && savedFull.length > 2) {
-        indicativo = '52'; numero = savedFull.substring(2);
-      } else if (savedFull.startsWith('34') && savedFull.length > 2) {
-        indicativo = '34'; numero = savedFull.substring(2);
+      if (savedFull.startsWith('1') && savedFull.length == 11) {
+        // 🇺🇸/🇨🇦 USA y Canadá (Indicativo de 1 dígito + 10 de celular)
+        indicativo = '1';
+        numero = savedFull.substring(1);
+      } else if (savedFull.length >= 12) {
+        // 🇲🇽/🇨🇴 Mayoría de Latam (Indicativo de 2 o 3 dígitos + 10 de celular)
+        indicativo = savedFull.substring(0, savedFull.length - 10);
+        numero = savedFull.substring(savedFull.length - 10);
+      } else if (savedFull.length == 11) {
+        // 🇪🇸/🇵🇪/🇨🇱 España, Perú, Chile, etc. (Indicativo de 2 dígitos + 9 de celular)
+        indicativo = savedFull.substring(0, 2);
+        numero = savedFull.substring(2);
       } else {
+        // Fallback para números que no cumplan las longitudes estándar
         numero = savedFull;
       }
     }
@@ -1092,8 +1111,10 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
           final data = userDoc.data() as Map<String, dynamic>;
           final modProd = (data['ultima_mod_productos'] as Timestamp?)?.microsecondsSinceEpoch.toString();
           final modPed = (data['ultima_mod_pedidos'] as Timestamp?)?.microsecondsSinceEpoch.toString();
+          final modCat = (data['ultima_mod_categorias'] as Timestamp?)?.microsecondsSinceEpoch.toString();
           if (modProd != null) await prefs.setString('ultima_mod_productos_local_${user.uid}', modProd);
           if (modPed != null) await prefs.setString('ultima_mod_pedidos_local_${user.uid}', modPed);
+          if (modCat != null) await prefs.setString('ultima_mod_categorias_local_${user.uid}', modCat);
         }
         await _cargar();
       } catch (e) {
@@ -3248,24 +3269,26 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  // 🔥 BANNER DE CATEGORÍA REDISEÑADO (Evita recortes de texto)
                   // 🔥 BANNER DE CATEGORÍA ULTRA COMPACTO (Da prioridad al texto)
                   Container(
                     margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                     decoration: BoxDecoration(
-                      color: isOscuro ? const Color(0xFF1E2230) : Colors.white,
+                      // 🔥 Cambiado de Colors.white a un tono azul-grisáceo suave en modo claro
+                      color: isOscuro ? const Color.fromARGB(255, 33, 40, 63) : const Color.fromARGB(84, 168, 209, 251), 
                       borderRadius: BorderRadius.circular(16),
-                      boxShadow: [if (!isOscuro) BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 10, offset: const Offset(0, 4))],
-                      border: Border.all(color: isOscuro ? Colors.white10 : Colors.grey.shade200),
+                      boxShadow: [
+                        if (!isOscuro) 
+                          BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 8, offset: const Offset(0, 3))
+                      ],
+                      // 🔥 Borde celeste fino en modo claro para enmarcar el banner perfectamente
+                      border: Border.all(color: isOscuro ? const Color.fromARGB(213, 49, 162, 227) : const Color.fromARGB(255, 103, 153, 234)), 
                     ),
                     child: Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
                       child: Row(
                         children: [
                           Icon(isExpanded ? Icons.folder_open_rounded : Icons.folder_rounded, color: isActivo ? (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)) : Colors.grey, size: 26),
-                          const SizedBox(width: 8), // Menos separación izquierda
-                          
-                          // 🔥 EL TEXTO AHORA TIENE TODO EL ESPACIO
+                          const SizedBox(width: 8),
                           Expanded(
                             child: Text(
                               nombre, 
@@ -3274,10 +3297,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                               overflow: TextOverflow.ellipsis,
                             ),
                           ),
-                          
                           const SizedBox(width: 4),
-                          
-                          // 🔥 ICONOS COMPACTADOS (Sin márgenes invisibles)
                           Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
@@ -3429,8 +3449,9 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                     padding: const EdgeInsets.symmetric(horizontal: 14),
                     child: Divider(
                       height: 1, 
-                      thickness: 1, 
-                      color: isOscuro ? Colors.white.withOpacity(0.08) : Colors.grey.shade200
+                      thickness: 1.5, // 👈 Grosor aumentado para mayor presencia
+                      // 🔥 Colores ajustados para que contrasten perfectamente
+                      color: isOscuro ? Colors.white24 : Colors.grey.shade400, 
                     ),
                   ),
                   const SizedBox(height: 15),

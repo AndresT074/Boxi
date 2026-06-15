@@ -24,7 +24,6 @@ class ServicioAuth {
         'es_premium': false,
         'nombre_negocio': nombreActual, 
         'fecha_registro': DateTime.now().toIso8601String(),
-        'plan': 'Gratis'
       });
       
       return userCredential.user;
@@ -45,7 +44,7 @@ class ServicioAuth {
         PackageInfo packageInfo = await PackageInfo.fromPlatform();
         String versionActual = '${packageInfo.version}+${packageInfo.buildNumber}';
         await _db.collection('usuarios').doc(uid).set({
-          'fecha_ultimo_ingreso': DateTime.now().toIso8601String(),
+          'ultima_actividad': FieldValue.serverTimestamp(),
           'version_app': versionActual,
         }, SetOptions(merge: true));
         final prefs = await SharedPreferences.getInstance();
@@ -91,9 +90,8 @@ class ServicioAuth {
             'es_premium': false,
             'nombre_negocio': nombreActual,
             'fecha_registro': DateTime.now().toIso8601String(),
-            'fecha_ultimo_ingreso': DateTime.now().toIso8601String(),
+            'ultima_actividad': FieldValue.serverTimestamp(),
             'version_app': versionActual,
-            'plan': 'Gratis'
           });
         } else {
           // ES LOGIN (YA EXISTÍA)

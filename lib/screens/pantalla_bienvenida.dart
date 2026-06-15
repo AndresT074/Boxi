@@ -248,8 +248,11 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
       if (mounted) setState(() => _cargandoDatos = true);
       await _cargarConfig();
       await _sincronizacionSilenciosa(user);
-      // Sincronizar contraseña admin desde nube
       await ServicioContrasenaAdmin.sincronizarDesdeNube(user.uid);
+      
+      // 🔥 NUEVO: Forzar actualización de actividad inmediatamente al conectarse
+      await _registrarIngresoYVerificarActualizacion();
+      
       if (mounted) setState(() => _cargandoDatos = false);
     }
   }
@@ -270,7 +273,11 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
         await _cargarConfig();
       }
       _esPremium = prefs.getBool('es_premium') ?? false;
-
+      await FirebaseFirestore.instance.collection('usuarios').doc(user.uid).update({
+        'plan': FieldValue.delete(),
+        'fecha_ultimo_ingreso': FieldValue.delete(),
+        'ultima_modificacion': FieldValue.delete(),
+      });
       if (_esPremium) {
         String llaveDescarga = "descarga_completa_${user.uid}";
         bool yaDescargoTodo = prefs.getBool(llaveDescarga) ?? false;
@@ -403,21 +410,26 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
       PackageInfo packageInfo = await PackageInfo.fromPlatform();
       String versionActual =
           '${packageInfo.version}+${packageInfo.buildNumber}';
+      
       bool necesitaActualizarDia = (ultimoRegistro != hoy);
       bool necesitaActualizarVersion = (versionGuardada != versionActual);
+      
       if (necesitaActualizarDia || necesitaActualizarVersion) {
         Map<String, dynamic> datosAEnviar = {};
+        
         if (necesitaActualizarDia) {
-          datosAEnviar['fecha_ultimo_ingreso'] =
-              DateTime.now().toIso8601String();
+          // 🔥 Solo guardamos la última actividad real diaria
+          datosAEnviar['ultima_actividad'] = FieldValue.serverTimestamp();
         }
         if (necesitaActualizarVersion) {
           datosAEnviar['version_app'] = versionActual;
         }
+        
         await FirebaseFirestore.instance
             .collection('usuarios')
             .doc(user.uid)
             .set(datosAEnviar, SetOptions(merge: true));
+            
         if (necesitaActualizarDia) {
           await prefs.setString('ultimo_registro_firestore', hoy);
         }
@@ -1158,15 +1170,24 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
             onPressed: () async {
               if (await ServicioContrasenaAdmin.validarPassword(passCtrl.text.trim(), user.uid)) {
                 Navigator.pop(ctx);
-                if (mounted) {
-                  Navigator.pushReplacement(context,
-                      MaterialPageRoute(
-                          builder: (_) => const PantallaPrincipal(esAdmin: true)));
+                
+                // 🔥 NUEVO: Lógica de recomendación de seguridad
+                final prefs = await SharedPreferences.getInstance();
+                bool biometriaActiva = prefs.getBool('admin_biometria_activa') ?? false;
+                bool noRecordar = prefs.getBool('no_preguntar_biometria') ?? false;
+
+                if (!biometriaActiva && !noRecordar) {
+                  _mostrarSugerenciaBiometriaDesdeIngreso();
+                } else {
+                  _navegarAPrincipal();
                 }
               } else {
-                ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(
-                    content: Text("❌ Contraseña incorrecta"),
-                    backgroundColor: Colors.red));
+                _mostrarMensajeAlerta(
+                  ctx, 
+                  "ERROR", 
+                  "La contraseña ingresada es incorrecta.", 
+                  esError: true
+                );
               }
             },
             child: const Text("ENTRAR",
@@ -1176,6 +1197,172 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
         ],
       ),
     );
+  }
+
+  Future<void> _mostrarSugerenciaBiometriaDesdeIngreso() async {
+    bool puedeHuella = false;
+    try { puedeHuella = await _localAuth.canCheckBiometrics; } catch (_) {}
+    if (!puedeHuella) {
+      _navegarAPrincipal();
+      return;
+    }
+
+    bool noRecordarCheckbox = false;
+
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setSt) => AlertDialog(
+          backgroundColor: const Color(0xFF0D1B2A),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: const BorderSide(color: Colors.greenAccent, width: 1)),
+          title: const Row(children: [
+            Icon(Icons.fingerprint, color: Colors.greenAccent),
+            SizedBox(width: 10),
+            Text("¿Activar Huella o PIN?", style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold)),
+          ]),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                "Puedes entrar de forma segura y más rápida la próxima vez usando tu huella dactilar o el PIN de tu dispositivo.",
+                style: TextStyle(color: Colors.white70, fontSize: 12),
+              ),
+              const SizedBox(height: 15),
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text("No volver a recordarme", style: TextStyle(color: Colors.white54, fontSize: 11)),
+                value: noRecordarCheckbox,
+                activeColor: Colors.greenAccent,
+                controlAffinity: ListTileControlAffinity.leading,
+                onChanged: (val) {
+                  setSt(() => noRecordarCheckbox = val ?? false);
+                },
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () async {
+                final prefs = await SharedPreferences.getInstance();
+                if (noRecordarCheckbox) {
+                  await prefs.setBool('no_preguntar_biometria', true);
+                }
+                Navigator.pop(ctx);
+                _navegarAPrincipal();
+              },
+              child: const Text("AHORA NO", style: TextStyle(color: Colors.white38)),
+            ),
+            ElevatedButton(
+                        style: ElevatedButton.styleFrom(backgroundColor: Colors.greenAccent),
+                        onPressed: () async {
+                          final prefs = await SharedPreferences.getInstance();
+                          
+                          try {
+                            // 🔥 NUEVO: Forzamos la autenticación biométrica real para verificarla antes de dar acceso
+                            bool autenticado = await _localAuth.authenticate(
+                              localizedReason: 'Confirmar activación de seguridad',
+                              options: const AuthenticationOptions(
+                                biometricOnly: false,
+                                stickyAuth: true,
+                                useErrorDialogs: true,
+                              ),
+                            );
+
+                            if (autenticado) {
+                              await ServicioContrasenaAdmin.actualizarBiometria(true);
+                              if (noRecordarCheckbox) {
+                                await prefs.setBool('no_preguntar_biometria', true);
+                              }
+                              Navigator.pop(ctx); // Cierra diálogo de recomendación
+                              
+                              // Muestra diálogo de éxito centrado
+                              _mostrarMensajeAlerta(
+                                context, 
+                                "¡ÉXITO!", 
+                                "La seguridad biométrica ha sido registrada y activada con éxito."
+                              );
+                              
+                              // Navegamos tras un pequeño delay
+                              Future.delayed(const Duration(seconds: 2), () {
+                                _navegarAPrincipal();
+                              });
+                            } else {
+                              _mostrarMensajeAlerta(
+                                ctx, 
+                                "AUTENTICACIÓN REQUERIDA", 
+                                "Debes colocar tu huella dactilar o PIN para activar la biometría.",
+                                esError: true
+                              );
+                            }
+                          } catch (e) {
+                            debugPrint("Error activando biometría: $e");
+                            _mostrarMensajeAlerta(
+                              ctx, 
+                              "ERROR", 
+                              "Tu dispositivo no admite o no tiene configurada la huella/PIN.",
+                              esError: true
+                            );
+                          }
+                        },
+                        child: const Text("ACTIVAR", style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+                      ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _mostrarMensajeAlerta(BuildContext context, String titulo, String mensaje, {bool esError = false}) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF0D1B2A),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+          side: BorderSide(color: esError ? Colors.redAccent : Colors.greenAccent, width: 1),
+        ),
+        title: Row(
+          children: [
+            Icon(
+              esError ? Icons.error_outline_rounded : Icons.check_circle_outline_rounded,
+              color: esError ? Colors.redAccent : Colors.greenAccent,
+              size: 24,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                titulo,
+                style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        ),
+        content: Text(
+          mensaje,
+          style: const TextStyle(color: Colors.white70, fontSize: 12),
+        ),
+        actions: [
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: esError ? Colors.redAccent : Colors.greenAccent,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(
+              "ACEPTAR",
+              style: TextStyle(color: esError ? Colors.white : Colors.black, fontWeight: FontWeight.bold, fontSize: 11),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _navegarAPrincipal() {
+    if (mounted) {
+      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const PantallaPrincipal(esAdmin: true)));
+    }
   }
 
   Widget _buildModalNombre() {
@@ -1741,6 +1928,52 @@ class _PanelSeguridadSheet extends StatefulWidget {
 class _PanelSeguridadSheetState extends State<_PanelSeguridadSheet> {
   late bool _biometriaActiva;
 
+  void _mostrarMensajeAlertaLocal(BuildContext context, String titulo, String mensaje, {bool esError = false}) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF0D1B2A),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+          side: BorderSide(color: esError ? Colors.redAccent : Colors.greenAccent, width: 1),
+        ),
+        title: Row(
+          children: [
+            Icon(
+              esError ? Icons.error_outline_rounded : Icons.check_circle_outline_rounded,
+              color: esError ? Colors.redAccent : Colors.greenAccent,
+              size: 24,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                titulo,
+                style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        ),
+        content: Text(
+          mensaje,
+          style: const TextStyle(color: Colors.white70, fontSize: 12),
+        ),
+        actions: [
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: esError ? Colors.redAccent : Colors.greenAccent,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(
+              "ACEPTAR",
+              style: TextStyle(color: esError ? Colors.white : Colors.black, fontWeight: FontWeight.bold, fontSize: 11),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -1849,31 +2082,68 @@ class _PanelSeguridadSheetState extends State<_PanelSeguridadSheet> {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return false;
 
+    final ocultoNotifier = ValueNotifier<bool>(true);
+
     bool exito = await showDialog(
       context: context,
+      barrierDismissible: false,
       builder: (ctx) => AlertDialog(
-        title: const Text("Confirmar identidad"),
-        content: TextField(
-          controller: passCtrl,
-          obscureText: true,
-          decoration: const InputDecoration(hintText: "Ingresa tu contraseña actual"),
+        backgroundColor: const Color(0xFF0D1B2A),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: const BorderSide(color: Colors.greenAccent, width: 0.5)),
+        title: const Text("🔑 VERIFICAR CONTRASEÑA", style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold)),
+        content: ValueListenableBuilder<bool>(
+          valueListenable: ocultoNotifier,
+          builder: (_, oculto, __) => TextField(
+            controller: passCtrl,
+            obscureText: oculto,
+            style: const TextStyle(color: Colors.white, fontSize: 13),
+            decoration: InputDecoration(
+              isDense: true,
+              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+              hintText: "Ingresa tu contraseña actual",
+              hintStyle: const TextStyle(color: Colors.white38, fontSize: 11),
+              prefixIcon: const Icon(Icons.lock, color: Colors.white38, size: 18),
+              suffixIcon: IconButton(
+                icon: Icon(oculto ? Icons.visibility_off : Icons.visibility, color: Colors.white38, size: 16),
+                onPressed: () => ocultoNotifier.value = !ocultoNotifier.value,
+              ),
+              filled: true,
+              fillColor: Colors.white.withOpacity(0.05),
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+            ),
+          ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Cancelar")),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false), 
+              child: const Text("CANCELAR", style: TextStyle(color: Colors.white38, fontSize: 11))
+          ),
           ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.greenAccent),
             onPressed: () async {
-              // 🔥 AQUÍ USAMOS LA FUNCIÓN DE VALIDACIÓN QUE YA TIENE HASH
               if (await ServicioContrasenaAdmin.validarPassword(passCtrl.text.trim(), user.uid)) {
                 Navigator.pop(ctx, true);
               } else {
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Contraseña incorrecta")));
+                Navigator.pop(ctx, false);
+                // 🔥 Alerta de error local
+                _mostrarMensajeAlertaLocal(context, "ERROR", "La contraseña es incorrecta.", esError: true);
               }
             },
-            child: const Text("Validar"),
+            child: const Text("VALIDAR", style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 11)),
           )
         ],
       ),
     ) ?? false;
+
+    // 🔥 Alerta de éxito local (Se mostrará centrada en pantalla al activarse correctamente)
+    if (exito && mounted) {
+      _mostrarMensajeAlertaLocal(
+        context, 
+        "¡ÉXITO!", 
+        "La seguridad biométrica ha sido registrada y activada con éxito."
+      );
+    }
+
     return exito;
   }
 

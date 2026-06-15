@@ -552,6 +552,39 @@ class ServicioNube {
       if (data.containsKey('logo_base64')) {
         await prefs.setString('logo_path', data['logo_base64']);
       }
+      if (data.containsKey('nombre_negocio')) {
+        await prefs.setString('nombre_negocio', data['nombre_negocio']);
+      }
+      if (data.containsKey('logo_base64')) {
+        await prefs.setString('logo_path', data['logo_base64']);
+      }
+
+      // 🔥 NUEVO: Cargar el número de WhatsApp únicamente al iniciar sesión / descargar perfil (UNIVERSAL)
+      if (data.containsKey('whatsapp_admin')) {
+        String wa = data['whatsapp_admin'].toString();
+        await prefs.setString('whatsapp_admin', wa);
+        
+        String indicativo = "";
+        String numeroLocal = wa;
+
+        if (wa.startsWith('1') && wa.length == 11) {
+          // 🇺🇸/🇨🇦 USA y Canadá (Indicativo de 1 dígito + 10 de celular)
+          indicativo = '1';
+          numeroLocal = wa.substring(1);
+        } else if (wa.length >= 12) {
+          // 🇲🇽/🇨🇴 Mayoría de Latam (Indicativo de 2 o 3 dígitos + 10 de celular)
+          indicativo = wa.substring(0, wa.length - 10);
+          numeroLocal = wa.substring(wa.length - 10);
+        } else if (wa.length == 11) {
+          // 🇪🇸/🇵🇪/🇨🇱 España, Perú, Chile, etc. (Indicativo de 2 dígitos + 9 de celular)
+          indicativo = wa.substring(0, 2);
+          numeroLocal = wa.substring(2);
+        }
+
+        // Guardamos los datos desglosados listos para los campos del perfil
+        await prefs.setString('whatsapp_admin_indicativo', indicativo);
+        await prefs.setString('whatsapp_admin_numero', numeroLocal);
+      }
     } catch (e) {
       debugPrint('Error cargando perfil: $e');
     }
