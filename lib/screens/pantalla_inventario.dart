@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:permission_handler/permission_handler.dart'; 
+import 'package:google_mobile_ads/google_mobile_ads.dart';
 import '../database/db_helper.dart';
 import 'servicio_nube.dart';    
 import 'servicio_anuncios.dart'; 
@@ -629,6 +630,8 @@ class _PantallaInventarioState extends State<PantallaInventario> {
             ),
           ),
           Expanded(child: _construirVistaProductos(_esCuadricula ? 5 : 1)),
+          if (!_esPremium)
+            const AnuncioNativoWidget(key: ValueKey('admob_inventario_ad')),
         ],
       ),
     );
@@ -1750,6 +1753,122 @@ class _ImagenInventarioState extends State<ImagenInventario> {
           return const Icon(Icons.broken_image, color: Colors.red);
         }
       }
+    );
+  }
+}
+
+class AnuncioNativoWidget extends StatefulWidget {
+  const AnuncioNativoWidget({super.key});
+
+  @override
+  State<AnuncioNativoWidget> createState() => _AnuncioNativoWidgetState();
+}
+
+class _AnuncioNativoWidgetState extends State<AnuncioNativoWidget> {
+  BannerAd? _bannerAd;
+  bool _isLoaded = false;
+
+  final String _adUnitId = Platform.isAndroid
+      ? 'ca-app-pub-2754846263403564/3464101852' 
+      : 'ca-app-pub-3940256099942544/2934735716';
+
+  @override
+  void initState() {
+    super.initState();
+    _cargarAnuncio();
+  }
+
+  void _cargarAnuncio() {
+    _bannerAd = BannerAd(
+      adUnitId: _adUnitId,
+      request: const AdRequest(),
+      size: AdSize.largeBanner, 
+      listener: BannerAdListener(
+        onAdLoaded: (ad) {
+          if (mounted) setState(() => _isLoaded = true);
+        },
+        onAdFailedToLoad: (ad, error) {
+          debugPrint('Error cargando banner: ${error.message}');
+          ad.dispose();
+        },
+      ),
+    )..load();
+  }
+
+  @override
+  void dispose() {
+    _bannerAd?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isOscuro = Theme.of(context).brightness == Brightness.dark;
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
+      decoration: BoxDecoration(
+        color: isOscuro ? const Color(0xFF1E2230) : Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: isOscuro ? Colors.white10 : Colors.grey.shade300),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 14),
+            color: isOscuro ? Colors.white.withOpacity(0.05) : Colors.grey.shade50,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text("Publicidad Recomendada", style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: isOscuro ? Colors.white54 : Colors.grey.shade600)),
+                Icon(Icons.info_outline, size: 12, color: isOscuro ? Colors.white54 : Colors.grey.shade400)
+              ],
+            ),
+          ),
+          Container(
+            height: 120,
+            alignment: Alignment.center,
+            color: isOscuro ? Colors.black26 : Colors.grey.shade50,
+            child: _isLoaded && _bannerAd != null
+                ? AdWidget(ad: _bannerAd!)
+                : InkWell(
+                    onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PantallaPremium())),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.stars, color: Colors.amber.shade700, size: 24),
+                        const SizedBox(width: 12),
+                        const Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text("¿Respaldar base de datos?", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                            Text("Sincroniza tus productos en tiempo real.", style: TextStyle(color: Colors.grey, fontSize: 10)),
+                          ],
+                        )
+                      ],
+                    ),
+                  ),
+          ),
+          InkWell(
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PantallaPremium())),
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              decoration: BoxDecoration(border: Border(top: BorderSide(color: isOscuro ? Colors.white10 : Colors.black12))),
+              child: const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.workspace_premium, size: 16, color: Colors.orange),
+                  SizedBox(width: 8),
+                  Text("QUITAR PUBLICIDAD (HAZTE PRO)", style: TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: Colors.orange)),
+                ],
+              ),
+            ),
+          )
+        ],
+      ),
     );
   }
 }

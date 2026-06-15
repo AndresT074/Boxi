@@ -3476,10 +3476,10 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
             ),
             
           // 🔥 ANUNCIO DE VIDEO SILENCIADO (Nativo) - Solo para usuarios gratuitos
-          if (!_esPremium)
+          if (!_esPremium && widget.esAdmin)
             const AnuncioNativoWidget(key: ValueKey('admob_native_ad_key')), // <-- Clave añadida
 
-          const SizedBox(key: ValueKey('spacer_end'), height: 100),
+            const SizedBox(key: ValueKey('spacer_end'), height: 100),
         ],
       ),
     );

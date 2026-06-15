@@ -1,8 +1,11 @@
+import 'dart:io'; // 🔥 Añadido para verificar la plataforma (Android/iOS)
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:google_mobile_ads/google_mobile_ads.dart'; // 🔥 Import de AdMob
 import '../database/db_helper.dart';
 import 'servicio_anuncios.dart';
 import 'servicio_nube.dart';
+import 'pantalla_premium.dart'; // 🔥 Import de pantalla premium para el botón del anuncio
 import 'package:sqflite/sqflite.dart'; 
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -17,6 +20,7 @@ class _PantallaClientesState extends State<PantallaClientes> {
   StreamSubscription? _suscripcion;
   List<Map<String, dynamic>> _clientes = [];
   List<Map<String, dynamic>> _filtrados = [];
+  bool _esPremium = false; // 🔥 Variable local para manejar anuncios
   final _searchCtrl = TextEditingController();
 
   @override
@@ -71,10 +75,12 @@ class _PantallaClientesState extends State<PantallaClientes> {
   Future<void> _cargar() async {
     final db = await DBHelper.instance.database;
     final data = await db.query('clientes', orderBy: 'nombre_completo ASC');
+    final prefs = await SharedPreferences.getInstance();
     if (!mounted) return;
     setState(() {
       _clientes = data;
       _filtrados = data;
+      _esPremium = prefs.getBool('es_premium') ?? false; // 🔥 Carga el estado de suscripción
     });
   }
 
@@ -158,9 +164,15 @@ class _PantallaClientesState extends State<PantallaClientes> {
       body: _filtrados.isEmpty
           ? Center(child: Text('No hay clientes registrados', style: TextStyle(color: isOscuro ? Colors.white38 : Colors.grey)))
           : ListView.builder(
-              padding: const EdgeInsets.all(10),
-              itemCount: _filtrados.length,
+              padding: const EdgeInsets.only(left: 10, right: 10, top: 10, bottom: 90), // Espacio extra para el botón flotante
+              // 🔥 Si no es premium, agregamos 1 espacio extra para el anuncio al final
+              itemCount: _filtrados.length + (!_esPremium ? 1 : 0),
               itemBuilder: (ctx, i) {
+                // 🔥 Si llegamos al final del conteo y es free, renderizamos el Anuncio
+                if (i == _filtrados.length) {
+                  return const AnuncioNativoWidget(key: ValueKey('admob_client_list_ad'));
+                }
+
                 final c = _filtrados[i];
                 String sub = "${c['nombre_negocio'] ?? 'S/N'} • ${c['ciudad']}";
                 return Card(
@@ -493,6 +505,151 @@ class _PantallaFormularioClienteState extends State<PantallaFormularioCliente> {
         dense: true, 
         onTap: () => onTap(s)
       )).toList()),
+    );
+  }
+}
+
+// 🔥 CLASE DEL ANUNCIO HÍBRIDO E INMUNE A BLOQUEOS DE ADMOB (RECTÁNGULO MEDIANO)
+class AnuncioNativoWidget extends StatefulWidget {
+  const AnuncioNativoWidget({super.key});
+
+  @override
+  State<AnuncioNativoWidget> createState() => _AnuncioNativoWidgetState();
+}
+
+class _AnuncioNativoWidgetState extends State<AnuncioNativoWidget> {
+  BannerAd? _bannerAd;
+  bool _isLoaded = false;
+
+  // 🔥 ID de bloque de tipo Banner configurado con tu código real
+  final String _adUnitId = Platform.isAndroid
+      ? 'ca-app-pub-2754846263403564/3464101852' 
+      : 'ca-app-pub-3940256099942544/2934735716';
+
+  @override
+  void initState() {
+    super.initState();
+    _cargarAnuncio();
+  }
+
+  void _cargarAnuncio() {
+    _bannerAd = BannerAd(
+      adUnitId: _adUnitId,
+      request: const AdRequest(),
+      size: AdSize.largeBanner, // 📐 320x100 - Totalmente estable
+      listener: BannerAdListener(
+        onAdLoaded: (ad) {
+          if (mounted) setState(() => _isLoaded = true);
+        },
+        onAdFailedToLoad: (ad, error) {
+          debugPrint('Error cargando banner seguro: ${error.message}');
+          ad.dispose();
+        },
+      ),
+    )..load();
+  }
+
+  @override
+  void dispose() {
+    _bannerAd?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isOscuro = Theme.of(context).brightness == Brightness.dark;
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
+      decoration: BoxDecoration(
+        color: isOscuro ? const Color(0xFF1E2230) : Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: isOscuro ? Colors.white10 : Colors.grey.shade300),
+        boxShadow: [
+          if (!isOscuro)
+            BoxShadow(
+              color: Colors.black.withOpacity(0.05),
+              blurRadius: 10,
+              offset: const Offset(0, 4),
+            )
+        ],
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        children: [
+          // 🏷️ ENCABEZADO
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 14),
+            color: isOscuro ? Colors.white.withOpacity(0.05) : Colors.grey.shade50,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  "Publicidad Recomendada", 
+                  style: TextStyle(
+                    fontSize: 10, 
+                    fontWeight: FontWeight.bold, 
+                    color: isOscuro ? Colors.white54 : Colors.grey.shade600
+                  ),
+                ),
+                Icon(Icons.info_outline, size: 12, color: isOscuro ? Colors.white54 : Colors.grey.shade400)
+              ],
+            ),
+          ),
+          
+          // 🖥️ CUERPO (Carga el Ad de AdMob, o diseño Premium alternativo)
+          Container(
+            height: 120,
+            alignment: Alignment.center,
+            color: isOscuro ? Colors.black26 : Colors.grey.shade50,
+            child: _isLoaded && _bannerAd != null
+                ? AdWidget(ad: _bannerAd!)
+                : InkWell(
+                    onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PantallaPremium())),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.stars, color: Colors.amber.shade700, size: 24),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text("¿Respaldar base de datos?", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                              Text("Sincroniza tus clientes y ventas en tiempo real.", style: TextStyle(color: isOscuro ? Colors.white54 : Colors.black54, fontSize: 10)),
+                            ],
+                          ),
+                        )
+                      ],
+                    ),
+                  ),
+          ),
+          
+          // 🔘 ACCESO PREMIUM
+          InkWell(
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PantallaPremium())),
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              decoration: BoxDecoration(
+                border: Border(top: BorderSide(color: isOscuro ? Colors.white10 : Colors.black12))
+              ),
+              child: const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.workspace_premium, size: 16, color: Colors.orange),
+                  SizedBox(width: 8),
+                  Text(
+                    "QUITAR PUBLICIDAD (HAZTE PRO)", 
+                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: Colors.orange),
+                  )
+                ],
+              ),
+            ),
+          )
+        ],
+      ),
     );
   }
 }
