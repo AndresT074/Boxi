@@ -656,7 +656,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                             {'whatsapp_admin': numeroCompleto}, SetOptions(merge: true)
                           );
                           String link = "https://boxi-catalogo.web.app/catalogo/?id=${user.uid}";
-                          Share.share("📦 ¡Hola! Te comparto mi catálogo. Haz tus pedidos aquí:\n $link");
+                          Share.share("📦 ¡Hola! Te comparto mi catálogo. Haz tus pedidos aquí:\n\n$link");
                         }
                       },
                       icon: Icon(_esPremium ? Icons.public : Icons.stars, size: 18),
@@ -1381,7 +1381,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     if (res.isEmpty || !mounted) return;
     final p = res.first; // Tenemos el producto completo con su foto gigante
 
-    // ✅ CORRECCIÓN DE TIPO: Asignamos valores por defecto a los campos numéricos
     double precioOriginal = (p['precio_venta'] as num?)?.toDouble() ?? 0.0;
     double costo = (p['precio_compra'] as num?)?.toDouble() ?? 0.0;
     double descPct = (p['descuento'] as num?)?.toDouble() ?? 0.0;
@@ -1389,7 +1388,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     bool generaPerdida = descPct > 0 && precioFinal < costo;
     final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
 
-    // ✅ CORRECCIÓN DE TIPO: Extraemos strings seguros
     String fotoPath = p['foto_path']?.toString() ?? "";
     String nombreProd = p['nombre']?.toString() ?? "Producto sin nombre";
     String descProd = p['descripcion']?.toString() ?? "";
@@ -1438,7 +1436,19 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Expanded(
-                          child: Text(nombreProd, style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: isOscuro ? Colors.white : Colors.black)),
+                          // 🔥 TOQUE PARA COPIAR TÍTULO
+                          child: GestureDetector(
+                            onTap: () {
+                              Clipboard.setData(ClipboardData(text: nombreProd));
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text("Nombre del producto copiado 📋"), duration: Duration(seconds: 1)),
+                              );
+                            },
+                            child: Tooltip(
+                              message: "Toca para copiar",
+                              child: Text(nombreProd, style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: isOscuro ? Colors.white : Colors.black)),
+                            ),
+                          ),
                         ),
                         IconButton(
                           icon: Icon(Icons.share, size: 28, color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)),
@@ -1492,13 +1502,27 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                         ),
                       ),
                     const SizedBox(height: 25),
-                    Text("Descripción:", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: isOscuro ? Colors.blue.shade200 : Colors.blueGrey)),
+                    Text("Descripción (Toca para copiar):", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: isOscuro ? Colors.blue.shade200 : Colors.blueGrey)),
                     const SizedBox(height: 8),
-                    Text(
-                      descProd.trim().isNotEmpty 
-                          ? descProd 
-                          : "No hay descripción disponible.",
-                      style: TextStyle(fontSize: 15, color: isOscuro ? Colors.white70 : Colors.black87, height: 1.4),
+                    // 🔥 TOQUE PARA COPIAR DESCRIPCIÓN
+                    GestureDetector(
+                      onTap: () {
+                        if (descProd.trim().isNotEmpty) {
+                          Clipboard.setData(ClipboardData(text: descProd));
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text("Descripción copiada 📋"), duration: Duration(seconds: 1)),
+                          );
+                        }
+                      },
+                      child: Tooltip(
+                        message: "Toca para copiar",
+                        child: Text(
+                          descProd.trim().isNotEmpty 
+                              ? descProd 
+                              : "No hay descripción disponible.",
+                          style: TextStyle(fontSize: 15, color: isOscuro ? Colors.white70 : Colors.black87, height: 1.4),
+                        ),
+                      ),
                     ),
                   ],
                 ),
@@ -1545,17 +1569,154 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         text += "\n💰 *Precio: \$${precioFinal.toStringAsFixed(0)}*";
       }
 
-      List<XFile> files = [];
+      final db = await DBHelper.instance.database;
+      final List<Map<String, dynamic>> fotosDb = await db.query(
+        'fotos_variantes',
+        where: 'producto_id = ?',
+        whereArgs: [p['id']],
+      );
 
-      if (imgData.isNotEmpty) {
-        if (imgData.length > 500) {
-          final bytes = base64Decode(imgData);
-          final tempDir = Directory.systemTemp; 
-          final file = File('${tempDir.path}/prod_share_${p['id']}.png');
-          await file.writeAsBytes(bytes);
-          files.add(XFile(file.path));
-        } else if (File(imgData).existsSync()) {
-          files.add(XFile(imgData));
+      List<String> fotosSeleccionadasBase64 = [];
+      bool procederACompartir = true;
+      bool? compartirSeleccion;
+
+      if (fotosDb.isNotEmpty && mounted) {
+        // 1. FILTRAR DUPLICADOS EN MEMORIA PARA EVITAR REPETIDOS
+        final Set<String> seenPhotos = {};
+        final List<Map<String, dynamic>> fotosFiltradas = [];
+        for (var f in fotosDb) {
+          final String base64Str = f['foto_base64'] as String? ?? '';
+          if (base64Str.isNotEmpty && !seenPhotos.contains(base64Str)) {
+            seenPhotos.add(base64Str);
+            fotosFiltradas.add(f);
+          }
+        }
+
+        // 2. PRE-DECODIFICAR IMÁGENES UNA SOLA VEZ PARA ELIMINAR EL PARPADEO COMPLETAMENTE
+        final List<Uint8List> decodedBytesList = [];
+        for (var f in fotosFiltradas) {
+          decodedBytesList.add(base64Decode(f['foto_base64'] as String));
+        }
+
+        final Map<int, bool> seleccionadas = {};
+        for (int i = 0; i < fotosFiltradas.length; i++) {
+          seleccionadas[i] = true; // Todo seleccionado por defecto
+        }
+
+        // Diálogo refinado
+        compartirSeleccion = await showDialog<bool?>(
+          context: context,
+          barrierDismissible: false,
+          builder: (ctx) => StatefulBuilder(
+            builder: (context, setSt) {
+              final isOscuro = Theme.of(context).brightness == Brightness.dark;
+              return AlertDialog(
+                backgroundColor: Theme.of(context).cardColor,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                title: const Text("Compartir fotos de variantes", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                content: SizedBox(
+                  width: double.maxFinite,
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: fotosFiltradas.length,
+                    itemBuilder: (c, idx) {
+                      final f = fotosFiltradas[idx];
+                      final String nombreVar = f['variante_nombre']?.toString() ?? 'Variante';
+                      return CheckboxListTile(
+                        activeColor: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1),
+                        secondary: Container(
+                          width: 40, height: 40,
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(5),
+                            border: Border.all(color: Colors.grey.shade300),
+                          ),
+                          clipBehavior: Clip.antiAlias,
+                          child: Image.memory(
+                            decodedBytesList[idx], // USA EL LOGOTIPO PRE-DECODIFICADO (Cero parpadeos)
+                            fit: BoxFit.cover,
+                            gaplessPlayback: true,
+                          ),
+                        ),
+                        title: Text(nombreVar, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+                        value: seleccionadas[idx] ?? false,
+                        onChanged: (val) {
+                          setSt(() => seleccionadas[idx] = val ?? false);
+                        },
+                      );
+                    },
+                  ),
+                ),
+                actions: [
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: isOscuro ? Colors.cyanAccent.shade700 : const Color(0xFF0D47A1),
+                          shape: const StadiumBorder(),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                        ),
+                        onPressed: () => Navigator.pop(ctx, true), // Compartir selección
+                        child: Text("COMPARTIR CON VARIANTES", style: TextStyle(color: isOscuro ? Colors.black : Colors.white, fontWeight: FontWeight.bold)),
+                      ),
+                      const SizedBox(height: 8),
+                      TextButton(
+                        onPressed: () => Navigator.pop(ctx, false), // Sólo foto principal
+                        child: const Text("SÓLO FOTO PRINCIPAL", style: TextStyle(fontWeight: FontWeight.bold)),
+                      ),
+                      TextButton(
+                        onPressed: () => Navigator.pop(ctx, null), // CANCELA TODO EL FLUJO
+                        child: const Text("CANCELAR", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold)),
+                      ),
+                    ],
+                  )
+                ],
+              );
+            },
+          ),
+        );
+
+        if (compartirSeleccion == null) {
+          // El usuario presionó CANCELAR, abortamos todo de inmediato.
+          procederACompartir = false;
+        } else if (compartirSeleccion == true) {
+          seleccionadas.forEach((idx, seleccionado) {
+            if (seleccionado) {
+              fotosSeleccionadasBase64.add(fotosFiltradas[idx]['foto_base64'] as String);
+            }
+          });
+        }
+      }
+
+      if (!procederACompartir) return; // Detiene la ejecución si se canceló
+
+      List<XFile> files = [];
+      final tempDir = Directory.systemTemp; 
+
+      // 🔥 EXCLUSIÓN ESTRICTA: Separamos la compilación de archivos según la selección del usuario
+      if (compartirSeleccion == false) {
+        // Opción A: Solo compartimos la foto principal
+        if (imgData.isNotEmpty) {
+          if (imgData.length > 500) {
+            final bytes = base64Decode(imgData);
+            final file = File('${tempDir.path}/prod_share_${p['id']}.png');
+            await file.writeAsBytes(bytes);
+            files.add(XFile(file.path));
+          } else if (File(imgData).existsSync()) {
+            files.add(XFile(imgData));
+          }
+        }
+      } else {
+        // Opción B: Compartimos exclusivamente las variantes seleccionadas (sin la principal)
+        for (int i = 0; i < fotosSeleccionadasBase64.length; i++) {
+          try {
+            final bytes = base64Decode(fotosSeleccionadasBase64[i]);
+            final file = File('${tempDir.path}/var_share_${p['id']}_$i.png');
+            await file.writeAsBytes(bytes);
+            files.add(XFile(file.path));
+          } catch (e) {
+            debugPrint("Error escribiendo foto variante temporal: $e");
+          }
         }
       }
 
@@ -2163,7 +2324,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                 shape: const StadiumBorder(),
               ),
               icon: const Icon(Icons.motorcycle, size: 14), 
-              label: const Text("Domicilio", style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold)), 
+              label: const Text("Domicilio/envío", style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold)), 
               onPressed: () => _mostrarDialogoDomicilio()
             ),
           ),
@@ -2190,80 +2351,136 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
 
   void _mostrarDialogoDomicilio() {
     TextEditingController domCtrl = TextEditingController();
-    final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: Theme.of(context).cardColor,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(20),
-          side: BorderSide(color: isOscuro ? Colors.white10 : Colors.transparent),
-        ),
-        title: Row(children: [
-          Icon(Icons.motorcycle, color: isOscuro ? Colors.cyanAccent : Colors.blue),
-          const SizedBox(width: 8),
-          Text("Añadir Domicilio", style: TextStyle(color: isOscuro ? Colors.white : Colors.black)),
-        ]),
-        content: SingleChildScrollView( // 🔥 EVITA EL OVERFLOW DENTRO DEL DIÁLOGO
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const SizedBox(height: 10),
-              TextField(
-                controller: domCtrl,
-                keyboardType: TextInputType.number,
-                autofocus: true, // Abre el teclado automáticamente
-                style: TextStyle(color: isOscuro ? Colors.white : Colors.black),
-                decoration: InputDecoration(
-                  labelText: "Valor del domicilio",
-                  labelStyle: TextStyle(color: isOscuro ? Colors.white60 : Colors.black54),
-                  prefixText: "\$ ",
-                  prefixStyle: TextStyle(color: isOscuro ? Colors.white : Colors.black, fontWeight: FontWeight.bold),
-                  border: const OutlineInputBorder(),
-                  focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: isOscuro ? Colors.cyanAccent : Colors.blue)),
+      barrierDismissible: false,
+      builder: (ctx) {
+        final isOscuro =
+            Theme.of(ctx).brightness == Brightness.dark;
+
+        return AnimatedPadding(
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+          padding: MediaQuery.of(ctx).viewInsets +
+              const EdgeInsets.all(20),
+          child: Center(
+            child: Material(
+              color: Theme.of(ctx).cardColor,
+              borderRadius: BorderRadius.circular(20),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(
+                  maxWidth: 450,
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(20),
+                  child: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+
+                        /// TITULO
+                        Row(
+                          children: [
+                            Icon(
+                              Icons.motorcycle,
+                              color: isOscuro
+                                  ? Colors.cyanAccent
+                                  : Colors.blue,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                "Añadir Domicilio/envío",
+                                style: TextStyle(
+                                  fontSize: 28,
+                                  color: isOscuro
+                                      ? Colors.white
+                                      : Colors.black,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+
+                        const SizedBox(height: 25),
+
+                        /// CAMPO
+                        TextField(
+                          controller: domCtrl,
+                          autofocus: true,
+                          keyboardType: TextInputType.number,
+                          decoration: InputDecoration(
+                            labelText: "Valor del domicilio",
+                            prefixText: "\$ ",
+                            border: OutlineInputBorder(
+                              borderRadius:
+                                  BorderRadius.circular(10),
+                            ),
+                          ),
+                        ),
+
+                        const SizedBox(height: 25),
+
+                        /// BOTONES
+                        Row(
+                          mainAxisAlignment:
+                              MainAxisAlignment.end,
+                          children: [
+                            TextButton(
+                              onPressed: () {
+                                Navigator.pop(ctx);
+                              },
+                              child: const Text("CANCELAR"),
+                            ),
+                            const SizedBox(width: 10),
+                            ElevatedButton(
+                              onPressed: () {
+                                double val =
+                                    double.tryParse(
+                                            domCtrl.text) ??
+                                        0;
+
+                                if (val > 0) {
+                                  setState(() {
+                                    carrito.removeWhere(
+                                        (i) =>
+                                            i['es_domicilio'] ==
+                                            true);
+
+                                    carrito.add({
+                                      'id': -1,
+                                      'cart_id':
+                                          'domicilio',
+                                      'nombre':
+                                          'Domicilio',
+                                      'precio_venta':
+                                          val,
+                                      'cantidad': 1,
+                                      'es_domicilio':
+                                          true,
+                                      'descuento':
+                                          0.0,
+                                    });
+                                  });
+                                }
+
+                                Navigator.pop(ctx);
+                              },
+                              child: const Text("AÑADIR"),
+                            ),
+                          ],
+                        )
+                      ],
+                    ),
+                  ),
                 ),
               ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx), 
-            child: Text("CANCELAR", style: TextStyle(color: isOscuro ? Colors.white38 : Colors.grey))
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: isOscuro ? Colors.cyanAccent.shade700 : Colors.blue,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
             ),
-            onPressed: () {
-              double val = double.tryParse(domCtrl.text) ?? 0;
-              if (val > 0) {
-                setState(() {
-                  carrito.removeWhere((i) => i['es_domicilio'] == true);
-                  carrito.add({
-                    'id': -1,
-                    'cart_id': 'domicilio',
-                    'nombre': 'Domicilio',
-                    'precio_venta': val,
-                    'cantidad': 1,
-                    'es_domicilio': true,
-                    'descuento': 0.0,
-                  });
-                });
-              }
-              Navigator.pop(ctx);
-            },
-            child: Text(
-              "AÑADIR", 
-              style: TextStyle(color: isOscuro ? Colors.black : Colors.white, fontWeight: FontWeight.bold)
-            ),
-          )
-        ]
-      )
+          ),
+        );
+      },
     );
   }
-
   void _mostrarDialogoDescuento() {
     showModalBottomSheet(
       context: context,
@@ -2344,6 +2561,58 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   }
 
   Widget _construirVistaProductos(int columnas, bool esHorizontal) {
+    final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
+
+    // 🔥 MENSAJE AMIGABLE DE INVENTARIO VACÍO CON BOTÓN DE REDIRECCIÓN
+    if (productos.isEmpty) {
+      return Center(
+        child: SingleChildScrollView(
+          child: Padding(
+            padding: const EdgeInsets.all(25.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  Icons.inventory_2_rounded, 
+                  size: 75, 
+                  color: isOscuro ? Colors.white24 : Colors.blueGrey.withOpacity(0.3)
+                ),
+                const SizedBox(height: 20),
+                Text(
+                  "¡Hola! Empieza a crear tus productos desde la sección de inventario",
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: isOscuro ? Colors.white70 : Colors.black54,
+                    height: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: isOscuro ? Colors.cyanAccent.shade700 : const Color(0xFF0D47A1),
+                    foregroundColor: isOscuro ? Colors.black : Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 14),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+                    elevation: 3,
+                  ),
+                  onPressed: () {
+                    Navigator.push(
+                      context, 
+                      MaterialPageRoute(builder: (_) => const PantallaInventario())
+                    ).then((_) => _cargar());
+                  },
+                  icon: const Icon(Icons.add_shopping_cart_rounded, size: 20),
+                  label: const Text("IR A INVENTARIO", style: TextStyle(fontWeight: FontWeight.w900, letterSpacing: 0.5)),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     if (filtrados.isEmpty) {
       return const Center(child: Text('Sin productos'));
     }
@@ -2419,19 +2688,19 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                 }
               },
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch, // 👈 Ajustado aquí para la imagen
+                crossAxisAlignment: CrossAxisAlignment.stretch, 
                 children: [
-                  Expanded(child: _construirFotoConEtiqueta(p, columnas)), // ✅ Corregido
+                  Expanded(child: _construirFotoConEtiqueta(p, columnas)), 
                   Padding(
                     padding: const EdgeInsets.all(4.0),
                     child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch, // 👈 Ajustado aquí para los textos y precios
+                      crossAxisAlignment: CrossAxisAlignment.stretch, 
                       children: [
                         Text(
                           p['nombre'],
                           style: TextStyle(
                             fontWeight: FontWeight.bold,
-                            fontSize: columnas >= 5 ? 9 : 12, // ✅ Corregido
+                            fontSize: columnas >= 5 ? 9 : 12, 
                             color: Theme.of(context).textTheme.bodyLarge?.color,
                           ),
                           maxLines: 3,
@@ -2453,7 +2722,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                                 ? (isOscuro ? Colors.greenAccent : Colors.green)
                                 : (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)),
                             fontWeight: FontWeight.bold,
-                            fontSize: columnas >= 5 ? 9 : 13, // ✅ Corregido
+                            fontSize: columnas >= 5 ? 9 : 13, 
                           ),
                         ),
                       ],
@@ -2539,7 +2808,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     );
   }
 
-  // 🔥 Nueva función _foto asíncrona para no saturar memoria
   Widget _foto(int id) {
     final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
     return FutureBuilder<List<Map<String, dynamic>>>(
