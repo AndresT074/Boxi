@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import '../database/db_helper.dart';
 import 'servicio_pdf.dart';
@@ -7,6 +8,66 @@ import 'servicio_nube.dart';
 import 'servicio_anuncios.dart';
 import 'dart:async';
 import 'pantalla_premium.dart';
+
+final Map<String, Uint8List> _imageCache = {};
+
+Widget _construirMiniatura(String? base64Str, bool isOscuro) {
+  if (base64Str == null || base64Str.trim().isEmpty || base64Str == 'null') {
+    return Container(
+      width: 45, height: 45,
+      decoration: BoxDecoration(
+        color: isOscuro ? Colors.white10 : Colors.grey.shade200,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Icon(Icons.image_not_supported,
+          size: 20, color: isOscuro ? Colors.white38 : Colors.black26),
+    );
+  }
+
+  try {
+    String cleanBase64 = base64Str;
+    if (cleanBase64.contains(',')) cleanBase64 = cleanBase64.split(',').last;
+    cleanBase64 = cleanBase64.replaceAll(RegExp(r'\s+'), '');
+
+    // 🔥 1. Revisamos si la foto ya fue procesada previamente
+    Uint8List bytes;
+    if (_imageCache.containsKey(cleanBase64)) {
+      bytes = _imageCache[cleanBase64]!;
+    } else {
+      bytes = base64Decode(cleanBase64);
+      if (_imageCache.length > 200) _imageCache.clear(); // Control de memoria
+      _imageCache[cleanBase64] = bytes;
+    }
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: Image.memory(
+        bytes, // Usamos la foto del caché
+        width: 45, height: 45, fit: BoxFit.cover,
+        gaplessPlayback: true, // 🔥 CLAVE ANTI-PARPADEO: Mantiene la foto vieja mientras actualiza
+        errorBuilder: (context, error, stackTrace) => Container(
+          width: 45, height: 45,
+          decoration: BoxDecoration(
+            color: isOscuro ? Colors.white10 : Colors.grey.shade200,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Icon(Icons.broken_image,
+              size: 20, color: isOscuro ? Colors.white38 : Colors.black26),
+        ),
+      ),
+    );
+  } catch (e) {
+    return Container(
+      width: 45, height: 45,
+      decoration: BoxDecoration(
+        color: isOscuro ? Colors.white10 : Colors.grey.shade200,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Icon(Icons.error_outline,
+          size: 20, color: Colors.redAccent.withOpacity(0.5)),
+    );
+  }
+}
 
 class PantallaGestionPedidos extends StatefulWidget {
   const PantallaGestionPedidos({super.key});
@@ -244,8 +305,50 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
         int stockBase = (d['stock_actual_general'] ?? 0) as int;
         if (stockBase < 0) d['sin_stock'] = 1;
       }
+
+      // 🔥 PRE-CARGA DE FOTOS: Se guardan directamente en el mapa para evitar parpadeos
+      d['foto_data'] = await _obtenerFotoDetalleEstatico(db, d['producto_id'] as int, d['nombre_prod']?.toString() ?? '');
     }
     return detallesEditables;
+  }
+
+  // Consulta de SQLite rápida y estática para las imágenes
+  Future<String?> _obtenerFotoDetalleEstatico(dynamic db, int productoId, String nombreSnapshot) async {
+    try {
+      if (nombreSnapshot.contains(" - ")) {
+        String nombreOpcion = nombreSnapshot;
+        if (nombreSnapshot.contains(': ')) {
+          nombreOpcion = nombreSnapshot.split(': ').last.trim();
+        } else {
+          nombreOpcion = nombreSnapshot.split(' - ').last.trim();
+        }
+
+        final fotos = await db.query(
+          'fotos_variantes',
+          columns: ['foto_base64'],
+          where: 'producto_id = ? AND (variante_nombre = ? OR variante_nombre LIKE ?)',
+          whereArgs: [productoId, nombreOpcion, '%$nombreOpcion%'],
+          limit: 1,
+        );
+
+        if (fotos.isNotEmpty) {
+          return fotos.first['foto_base64'] as String?;
+        }
+      }
+
+      final prod = await db.query(
+        'productos',
+        columns: ['foto_path'],
+        where: 'id = ?',
+        whereArgs: [productoId],
+        limit: 1,
+      );
+
+      if (prod.isNotEmpty) {
+        return prod.first['foto_path'] as String?;
+      }
+    } catch (_) {}
+    return null;
   }
 
   Future<void> _modificarStockBD(
@@ -410,6 +513,7 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     int nuevaCantidad = (item['cantidad'] as int) + incremento;
     if (nuevaCantidad < 1) return;
 
+    // 🔥 1. Actualización visual ultrarrápida (sin recargar desde BD)
     try {
       setSt(() {
         item['cantidad'] = nuevaCantidad;
@@ -417,6 +521,7 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
       });
     } catch (_) {}
 
+    // 🔥 2. Tarea asíncrona silenciosa para guardar en Base de Datos y Nube
     Future.microtask(() async {
       final db = await DBHelper.instance.database;
       double nuevoSubtotal = nuevaCantidad * (item['precio_unitario'] as num).toDouble();
@@ -443,51 +548,63 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
       }
 
       await _recalcularTotal(pedidoId);
-      List<Map<String, dynamic>> res = await _obtenerDetalles(pedidoId);
-      try {
-        setSt(() => callback(res));
-      } catch (_) {}
-      _cargar();
+      _cargar(); // Solo actualiza la pantalla principal atrás
     });
   }
 
-  void _cambiarVariante(Map<String, dynamic> item, int pedId, StateSetter setSt,
-      Function(List<Map<String, dynamic>>) callback) {
+  Future<Map<String, dynamic>?> _cambiarVariante(Map<String, dynamic> item, int pedId) async {
     String varStr = item['prod_variantes']?.toString() ?? "";
-    if (varStr.length < 5) return;
+    if (varStr.length < 5) return null;
 
     List<dynamic> grupos;
     try {
       grupos = jsonDecode(varStr);
     } catch (_) {
-      return;
+      return null;
     }
 
-    showDialog(
+    final db = await DBHelper.instance.database;
+    final fotosVariantes = await db.query(
+      'fotos_variantes',
+      where: 'producto_id = ?',
+      whereArgs: [item['producto_id']],
+    );
+
+    if (!mounted) return null;
+
+    return showDialog<Map<String, dynamic>>(
       context: context,
       builder: (ctx) {
         final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
+
         return AlertDialog(
           backgroundColor: Theme.of(context).cardColor,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-          title: Text("Reemplazar Variante",
-              style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 16,
-                  color: isOscuro ? Colors.white : Colors.black)),
+          title: const Text("Reemplazar Variante", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
-              children: grupos.expand((g) {
-                return (g['opciones'] as List).map((o) {
+              children: grupos.asMap().entries.expand((gEntry) {
+                int gIndex = gEntry.key;
+                var g = gEntry.value;
+
+                return (g['opciones'] as List).asMap().entries.map((oEntry) {
+                  int oIndex = oEntry.key;
+                  var o = oEntry.value;
+
                   if (o['activo'] == false) return const SizedBox.shrink();
                   String nombreNueva =
                       "${item['prod_nombre_base']} - ${g['grupo']}: ${o['nombre']}";
                   bool isCurrent = nombreNueva == item['nombre_prod'];
+
+                  var fotoMatch = fotosVariantes.where((f) => 
+                    f['grupo_index'] == gIndex && f['opcion_index'] == oIndex
+                  );
+                  String? fotoBase64 = fotoMatch.isNotEmpty ? fotoMatch.first['foto_base64'] as String? : null;
+
                   return ListTile(
                     contentPadding: EdgeInsets.zero,
-                    leading: Icon(Icons.style,
-                        color: isOscuro ? Colors.cyanAccent : Colors.blueGrey),
+                    leading: _construirMiniatura(fotoBase64, isOscuro),
                     title: Text(o['nombre'],
                         style: TextStyle(
                             color: isOscuro ? Colors.white : Colors.black87,
@@ -500,36 +617,17 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                         : const Icon(Icons.swap_horiz, color: Colors.orange),
                     onTap: isCurrent
                         ? null
-                        : () async {
-                            int cantidadVendida = item['cantidad'] as int;
-                            await _modificarStockBD(item['producto_id'] as int,
-                                -cantidadVendida, item['nombre_snapshot']?.toString());
-                            await _modificarStockBD(
-                                item['producto_id'] as int, cantidadVendida, nombreNueva);
-
-                            final db = await DBHelper.instance.database;
-                            await db.update(
-                                'detalle_pedidos',
-                                {
-                                  'nombre_snapshot': nombreNueva,
-                                  'ultima_modificacion': DateTime.now().toIso8601String()
-                                },
-                                where: 'id = ?',
-                                whereArgs: [item['id']]);
-
-                            if (_esPremium) {
-                              var d = await db.query('detalle_pedidos',
-                                  where: 'id = ?', whereArgs: [item['id']]);
-                              if (d.isNotEmpty) await ServicioNube.guardarUnicoDetalleNube(d.first);
-                            }
-
-                            _invalidarCache(pedId);
-                            List<Map<String, dynamic>> res = await _obtenerDetalles(pedId);
-                            if (mounted) {
-                              Navigator.pop(ctx);
-                              setSt(() => callback(res));
-                              _cargar();
-                            }
+                        : () {
+                            // 🔥 Guardamos todos los datos planos antes de cerrar
+                            final result = {
+                              'nombreNueva': nombreNueva,
+                              'fotoBase64': fotoBase64,
+                              'nombreViejo': item['nombre_snapshot']?.toString() ?? "",
+                              'cantidad': item['cantidad'] as int,
+                              'productoId': item['producto_id'] as int,
+                              'detalleId': item['id'] as int
+                            };
+                            Navigator.pop(ctx, result);
                           },
                   );
                 }).toList();
@@ -546,6 +644,34 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     );
   }
 
+  // Guardado asíncrono silencioso en segundo plano sin interrumpir la interfaz
+  void _procesarCambioVarianteEnSegundoPlano(
+      int detalleId, int prodId, int cantidadVendida, String nombreViejo, String nombreNueva, int pedId) async {
+    
+    // Modificaciones locales rápidas de SQLite (Ahora usan los strings correctos)
+    await _modificarStockBD(prodId, -cantidadVendida, nombreViejo);
+    await _modificarStockBD(prodId, cantidadVendida, nombreNueva);
+
+    final db = await DBHelper.instance.database;
+    await db.update(
+        'detalle_pedidos',
+        {
+          'nombre_snapshot': nombreNueva,
+          'ultima_modificacion': DateTime.now().toIso8601String()
+        },
+        where: 'id = ?',
+        whereArgs: [detalleId]);
+
+    if (_esPremium) {
+      // Subida de fondo sin 'await' para evitar bloqueos
+      db.query('detalle_pedidos', where: 'id = ?', whereArgs: [detalleId]).then((d) {
+        if (d.isNotEmpty) ServicioNube.guardarUnicoDetalleNube(d.first);
+      });
+    }
+
+    _invalidarCache(pedId);
+  }
+  
   Future<void> _actualizarDescuentoDetalle(
       Map<String, dynamic> item,
       int pedidoId,
@@ -589,9 +715,8 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     TextEditingController domiCtrl =
         TextEditingController(text: formatearInicial(pedido['valor_domicilio'] ?? 0));
     final Map<int, TextEditingController> descCtrls = {};
-    for (int i = 0; i < detalles.length; i++) {
-      descCtrls[i] =
-          TextEditingController(text: formatearInicial(detalles[i]['descuento'] ?? 0));
+    for (var item in detalles) {
+      descCtrls[item['id'] as int] = TextEditingController(text: formatearInicial(item['descuento'] ?? 0));
     }
 
     showDialog(
@@ -603,8 +728,10 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
               detalles.fold(0, (sum, i) => sum + (i['subtotal'] as num).toDouble());
           double domiActual = double.tryParse(domiCtrl.text) ?? 0;
 
-          return AlertDialog(
-            backgroundColor: Theme.of(context).cardColor,
+          return GestureDetector(
+            onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
+            child: AlertDialog(
+              backgroundColor: Theme.of(context).cardColor,
             insetPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 20),
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(25)),
             title: Row(
@@ -653,14 +780,13 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                       ),
                     ),
                     const Divider(height: 30),
-                    ...detalles.asMap().entries.map((entry) {
-                      final idx = entry.key;
-                      final item = entry.value;
-                      if (!descCtrls.containsKey(idx)) {
-                        descCtrls[idx] = TextEditingController(
+                    ...detalles.map((item) {
+                      final int idDetalle = item['id'] as int;
+                      if (!descCtrls.containsKey(idDetalle)) {
+                        descCtrls[idDetalle] = TextEditingController(
                             text: formatearInicial(item['descuento'] ?? 0));
                       }
-                      final descCtrl = descCtrls[idx]!;
+                      final descCtrl = descCtrls[idDetalle]!;
                       bool tieneVariantes = item['prod_variantes'] != null &&
                           item['prod_variantes'].toString().length > 5;
                       double pUnitario = (item['precio_unitario'] as num).toDouble();
@@ -682,11 +808,20 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(item['nombre_prod'],
-                                  style: TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 13,
-                                      color: isOscuro ? Colors.white : Colors.black87)),
+                              // 🔥 AQUÍ SE ARREGLA EL PARPADEO. Se usa foto_data directo.
+                              Row(
+                                children: [
+                                  _construirMiniatura(item['foto_data']?.toString(), isOscuro),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Text(item['nombre_prod'],
+                                        style: TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 13,
+                                            color: isOscuro ? Colors.white : Colors.black87)),
+                                  ),
+                                ],
+                              ),
                               const SizedBox(height: 12),
                               Row(
                                 children: [
@@ -764,8 +899,26 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                                         IconButton(
                                           icon: const Icon(Icons.swap_horiz,
                                               color: Colors.orange, size: 24),
-                                          onPressed: () => _cambiarVariante(
-                                              item, pedId, setSt, (l) => detalles = l),
+                                          onPressed: () async {
+                                            // 🔥 Esperamos el mapa de datos limpios
+                                            final result = await _cambiarVariante(item, pedId);
+                                            if (result != null && mounted) {
+                                              setSt(() {
+                                                // Refleja en pantalla instantáneamente sin parpadeo
+                                                item['nombre_prod'] = result['nombreNueva'];
+                                                item['nombre_snapshot'] = result['nombreNueva'];
+                                                item['foto_data'] = result['fotoBase64']; 
+                                              });
+                                              // Ejecuta la BD en fondo con la info exacta, sin referenciar
+                                              _procesarCambioVarianteEnSegundoPlano(
+                                                  result['detalleId'], 
+                                                  result['productoId'], 
+                                                  result['cantidad'], 
+                                                  result['nombreViejo'], 
+                                                  result['nombreNueva'], 
+                                                  pedId);
+                                            }
+                                          },
                                         ),
                                       IconButton(
                                           icon: const Icon(Icons.delete_outline,
@@ -784,15 +937,9 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                                               ServicioNube.eliminarDetallePedidoNube(
                                                   item['id']);
                                             _recalcularTotal(pedId);
+                                            descCtrls.remove(item['id']); 
                                             _actualizarVistaEditor(pedId, setSt, (newList) {
                                               detalles = newList;
-                                              for (int i = descCtrls.length;
-                                                  i < detalles.length;
-                                                  i++) {
-                                                descCtrls[i] = TextEditingController(
-                                                    text: formatearInicial(
-                                                        detalles[i]['descuento'] ?? 0));
-                                              }
                                             });
                                           })
                                     ],
@@ -865,34 +1012,37 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                           backgroundColor: const Color(0xFF0D47A1),
                           minimumSize: const Size(double.infinity, 50),
                           shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(15))),
-                      onPressed: () {
-                        for (int i = 0; i < detalles.length; i++) {
-                          if (!descCtrls.containsKey(i)) {
-                            descCtrls[i] = TextEditingController(
-                                text: formatearInicial(detalles[i]['descuento'] ?? 0));
-                          }
-                          double descActual =
-                              double.tryParse(descCtrls[i]!.text) ?? 0;
-                          _actualizarDescuentoDetalle(
-                              detalles[i], pedId, descActual, setSt, (l) => detalles = l);
-                        }
-                        double valFinalDomi = double.tryParse(domiCtrl.text) ?? 0;
-                        _actualizarDomicilio(pedId, valFinalDomi);
-                        if (mounted) {
-                          Navigator.pop(ctx);
-                          _cargar();
-                        }
-                      },
-                      child: const Text("GUARDAR CAMBIOS",
-                          style: TextStyle(
-                              color: Colors.white, fontWeight: FontWeight.bold)),
-                    ),
+                          borderRadius: BorderRadius.circular(15))),
+                          onPressed: () async { 
+                            for (var item in detalles) {
+                              int idDetalle = item['id'] as int;
+                              if (!descCtrls.containsKey(idDetalle)) {
+                                descCtrls[idDetalle] = TextEditingController(
+                                    text: formatearInicial(item['descuento'] ?? 0));
+                              }
+                              double descActual =
+                              double.tryParse(descCtrls[idDetalle]!.text) ?? 0;
+                              await _actualizarDescuentoDetalle(
+                                  item, pedId, descActual, setSt, (l) => detalles = l);
+                              }
+                              double valFinalDomi = double.tryParse(domiCtrl.text) ?? 0;
+                              await _actualizarDomicilio(pedId, valFinalDomi); 
+                              
+                              if (mounted) {
+                                Navigator.pop(ctx);
+                                await _cargar(); 
+                              }
+                            },
+                            child: const Text("GUARDAR CAMBIOS",
+                                style: TextStyle(
+                                    color: Colors.white, fontWeight: FontWeight.bold)),
+                        ),
                   ],
                 ),
               ),
             ],
-          );
+          ), 
+          ); 
         },
       ),
     );
@@ -903,8 +1053,11 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     TextEditingController pctCtrl = TextEditingController();
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text("Descuento Global"),
+      builder: (ctx) => GestureDetector(
+        onTap: () => FocusManager.instance.primaryFocus?.unfocus(), // Oculta teclado
+        behavior: HitTestBehavior.translucent,
+        child: AlertDialog(
+          title: const Text("Descuento Global"),
         content: TextField(
           controller: pctCtrl,
           keyboardType: TextInputType.number,
@@ -927,12 +1080,13 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
             child: const Text("APLICAR"),
           )
         ],
-      ),
-    );
+      ), 
+      ), 
+    ); 
   }
 
   Future<void> _buscarYAgregar(int pedId, StateSetter setStEditor,
-      Function(List<Map<String, dynamic>>) callback) async {
+    Function(List<Map<String, dynamic>>) callback) async {
     final db = await DBHelper.instance.database;
     final yaEnPedido = await db.query('detalle_pedidos',
         columns: ['producto_id', 'nombre_snapshot'],
@@ -951,8 +1105,7 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
       }
     }
 
-    List<Map<String, dynamic>> productosBase =
-        await db.query('productos', where: 'activo = 1');
+    List<Map<String, dynamic>> productosBase = await db.query('productos', where: 'activo = 1');
     List<Map<String, dynamic>> productosPermitidos = [];
     for (var p in productosBase) {
       String varStr = p['variantes']?.toString() ?? "";
@@ -990,7 +1143,10 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(
-        builder: (context, setStSearch) => AlertDialog(
+        builder: (context, setStSearch) => GestureDetector(
+          onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
+          behavior: HitTestBehavior.translucent,
+          child: AlertDialog(
           backgroundColor: Theme.of(context).cardColor,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
           title: Row(
@@ -1019,24 +1175,24 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                   controller: searchCtrl,
                   style: TextStyle(color: isOscuro ? Colors.white : Colors.black),
                   decoration: InputDecoration(
-                      hintText: "Buscar producto...",
-                      hintStyle:
-                          TextStyle(color: isOscuro ? Colors.white38 : Colors.black54),
-                      prefixIcon: Icon(Icons.search,
-                          color: isOscuro ? Colors.cyanAccent : Colors.grey),
-                      filled: true,
-                      fillColor: isOscuro ? Colors.white10 : Colors.grey.shade100,
-                      border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(10),
-                          borderSide: BorderSide.none)),
+                  hintText: "Buscar producto...",
+                  hintStyle:
+                      TextStyle(color: isOscuro ? Colors.white38 : Colors.black54),
+                  prefixIcon: Icon(Icons.search,
+                      color: isOscuro ? Colors.cyanAccent : Colors.grey),
+                  filled: true,
+                  fillColor: isOscuro ? Colors.white10 : Colors.grey.shade100,
+                  border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: BorderSide.none)),
                   onChanged: (v) {
                     setStSearch(() {
                       filtrados = productosPermitidos
-                          .where((p) => p['nombre']
-                              .toString()
-                              .toLowerCase()
-                              .contains(v.toLowerCase()))
-                          .toList();
+                      .where((p) => p['nombre']
+                          .toString()
+                          .toLowerCase()
+                          .contains(v.toLowerCase()))
+                      .toList();
                     });
                   },
                 ),
@@ -1055,11 +1211,14 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                           itemBuilder: (c, i) {
                             var p = filtrados[i];
                             return ListTile(
-                              contentPadding: EdgeInsets.zero,
+                              contentPadding: const EdgeInsets.symmetric(vertical: 4),
+                              leading: MiniaturaProductoLocal(id: p['id'] as int, isOscuro: isOscuro),
                               title: Text(p['nombre'].toString(),
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
                                   style: TextStyle(
                                       fontWeight: FontWeight.bold,
-                                      fontSize: 14,
+                                      fontSize: 13,
                                       color: isOscuro ? Colors.white : Colors.black87)),
                               subtitle: Text("Stock: ${p['stock']}",
                                   style: TextStyle(
@@ -1081,30 +1240,47 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                                     } else {
                                       grps = dec;
                                     }
-                                    for (var g in grps) {
-                                      if (!g.containsKey('grupo')) continue;
-                                      g['opciones'] = (g['opciones'] as List)
-                                          .where((o) => o['activo'] != false)
-                                          .toList();
-                                    }
-                                    for (var g in grps) {
-                                      if (!g.containsKey('grupo')) continue;
-                                      g['opciones'] = (g['opciones'] as List).where((o) {
-                                        String nombreVar =
-                                            "${p['nombre']} - ${g['grupo']}: ${o['nombre']}";
-                                        String nombreAntigua =
-                                            "${p['nombre']} - ${o['nombre']}";
-                                        return !nombresVariantesOcultas
-                                                .contains(nombreVar) &&
-                                            !nombresVariantesOcultas
-                                                .contains(nombreAntigua);
-                                      }).toList();
-                                    }
                                   } catch (_) {}
                                 }
 
                                 if (grps.isNotEmpty) {
-                                  Navigator.pop(ctx);
+                                  // 🔥 1. Traemos las fotos ANTES de filtrar y ANTES de cerrar
+                                  final fotosVariantes = await db.query(
+                                    'fotos_variantes',
+                                    where: 'producto_id = ?',
+                                    whereArgs: [p['id']],
+                                  );
+
+                                  for (int gIdx = 0; gIdx < grps.length; gIdx++) {
+                                    var g = grps[gIdx];
+                                    if (!g.containsKey('grupo')) continue;
+                                    for (int oIdx = 0; oIdx < g['opciones'].length; oIdx++) {
+                                      var o = g['opciones'][oIdx];
+                                      var fotoMatch = fotosVariantes.where((f) => 
+                                        f['grupo_index'] == gIdx && f['opcion_index'] == oIdx
+                                      );
+                                      if (fotoMatch.isNotEmpty) {
+                                        o['foto_path'] = fotoMatch.first['foto_base64'];
+                                      }
+                                    }
+                                  }
+
+                                  // 🔥 2. AHORA SÍ filtramos las que están inactivas/ocultas
+                                  for (var g in grps) {
+                                    if (!g.containsKey('grupo')) continue;
+                                    g['opciones'] = (g['opciones'] as List).where((o) {
+                                      if (o['activo'] == false) return false;
+                                      String nombreVar = "${p['nombre']} - ${g['grupo']}: ${o['nombre']}";
+                                      String nombreAntigua = "${p['nombre']} - ${o['nombre']}";
+                                      return !nombresVariantesOcultas.contains(nombreVar) &&
+                                             !nombresVariantesOcultas.contains(nombreAntigua);
+                                    }).toList();
+                                  }
+
+                                  // 🔥 3. Comprobamos estado y CERRAMOS la búsqueda JUSTO antes de abrir el modal
+                                  if (!mounted) return;
+                                  Navigator.pop(ctx); 
+
                                   showModalBottomSheet(
                                     context: context,
                                     isScrollControlled: true,
@@ -1114,8 +1290,10 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                                       gruposVariantes: grps,
                                       onAceptar: (cantidades) async {
                                         int pId = p['id'] as int;
-                                        double pr =
-                                            (p['precio_venta'] as num).toDouble();
+                                        double pr = (p['precio_venta'] as num).toDouble();
+                                        double descProd = (p['descuento'] ?? 0).toDouble();
+                                        double prConDesc = pr - (pr * (descProd / 100));
+
                                         for (var entry in cantidades.entries) {
                                           if (entry.value > 0) {
                                             List<String> partes =
@@ -1135,7 +1313,8 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                                               'producto_id': pId,
                                               'cantidad': entry.value,
                                               'precio_unitario': pr,
-                                              'subtotal': pr * entry.value,
+                                              'descuento': descProd, 
+                                              'subtotal': prConDesc * entry.value, 
                                               'nombre_snapshot': nombreVar,
                                               'ultima_modificacion':
                                                   DateTime.now().toIso8601String()
@@ -1147,7 +1326,8 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                                                 'producto_id': pId,
                                                 'cantidad': entry.value,
                                                 'precio_unitario': pr,
-                                                'subtotal': pr * entry.value,
+                                                'descuento': descProd, 
+                                                'subtotal': prConDesc * entry.value, 
                                                 'nombre_snapshot': nombreVar
                                               });
                                             }
@@ -1166,6 +1346,9 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                                   int pId = p['id'] as int;
                                   double pr = (p['precio_venta'] as num).toDouble();
                                   String nombre = p['nombre'].toString();
+                                  double descProd = (p['descuento'] ?? 0).toDouble();
+                                  double prConDesc = pr - (pr * (descProd / 100));
+                                  
                                   int uniqueId = DateTime.now().millisecondsSinceEpoch;
                                   await db.insert('detalle_pedidos', {
                                     'id': uniqueId,
@@ -1173,7 +1356,8 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                                     'producto_id': pId,
                                     'cantidad': 1,
                                     'precio_unitario': pr,
-                                    'subtotal': pr,
+                                    'descuento': descProd, 
+                                    'subtotal': prConDesc, 
                                     'nombre_snapshot': nombre,
                                     'ultima_modificacion':
                                         DateTime.now().toIso8601String()
@@ -1185,7 +1369,8 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                                       'producto_id': pId,
                                       'cantidad': 1,
                                       'precio_unitario': pr,
-                                      'subtotal': pr,
+                                      'descuento': descProd, 
+                                      'subtotal': prConDesc,
                                       'nombre_snapshot': nombre
                                     });
                                   }
@@ -1203,9 +1388,10 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
               ],
             ),
           ),
-        ),
+        ), 
+        ), 
       ),
-    );
+    ); 
   }
 
   Future<void> _actualizarDomicilio(int pedidoId, double nuevoVal) async {
@@ -1987,8 +2173,11 @@ class _DialogoVariantesState extends State<_DialogoVariantes> {
   @override
   Widget build(BuildContext context) {
     final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
-    return Container(
-      decoration: BoxDecoration(
+    return GestureDetector(
+      onTap: () => FocusManager.instance.primaryFocus?.unfocus(), // Oculta el teclado
+      behavior: HitTestBehavior.translucent,
+      child: Container(
+        decoration: BoxDecoration(
           color: Theme.of(context).cardColor,
           borderRadius: const BorderRadius.vertical(top: Radius.circular(20))),
       padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
@@ -2002,17 +2191,33 @@ class _DialogoVariantesState extends State<_DialogoVariantes> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text("Seleccionar Variantes",
-                      style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                          color: isOscuro
-                              ? Colors.cyanAccent
-                              : const Color(0xFF0D47A1))),
-                  Text(widget.producto['nombre'],
-                      style: TextStyle(
-                          color: isOscuro ? Colors.white60 : Colors.grey,
-                          fontSize: 13)),
+                  Row(
+                    children: [
+                      // La miniatura al lado del nombre
+                      _construirMiniatura((widget.producto['imagen'] ?? widget.producto['foto'])?.toString(), isOscuro),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text("Seleccionar Variantes",
+                                style: TextStyle(
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.bold,
+                                    color: isOscuro
+                                        ? Colors.cyanAccent
+                                        : const Color(0xFF0D47A1))),
+                            Text(widget.producto['nombre'],
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                    color: isOscuro ? Colors.white60 : Colors.grey,
+                                    fontSize: 13)),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
                 ],
               ),
             ),
@@ -2047,8 +2252,7 @@ class _DialogoVariantesState extends State<_DialogoVariantes> {
                         return ListTile(
                           contentPadding:
                               const EdgeInsets.symmetric(horizontal: 20),
-                          leading: Icon(Icons.inventory_2,
-                              color: isOscuro ? Colors.white24 : Colors.grey),
+                          leading: _construirMiniatura(o['foto_path']?.toString(), isOscuro), // 🔥 MOSTRAMOS LA FOTO DE LA VARIANTE
                           title: Text(o['nombre'],
                               style: TextStyle(
                                   fontWeight: FontWeight.bold,
@@ -2153,6 +2357,45 @@ class _DialogoVariantesState extends State<_DialogoVariantes> {
           ],
         ),
       ),
+      ), // <-- Cierra el Container original
+    ); // <-- NUEVO: Cierra el GestureDetector
+  }
+}
+
+class MiniaturaProductoLocal extends StatefulWidget {
+  final int id;
+  final bool isOscuro;
+
+  const MiniaturaProductoLocal({super.key, required this.id, required this.isOscuro});
+
+  @override
+  State<MiniaturaProductoLocal> createState() => _MiniaturaProductoLocalState();
+}
+
+class _MiniaturaProductoLocalState extends State<MiniaturaProductoLocal> {
+  Future<String?>? _fotoFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _fotoFuture = _cargarFoto();
+  }
+
+  Future<String?> _cargarFoto() async {
+    final db = await DBHelper.instance.database;
+    final res = await db.query('productos', columns: ['foto_path'], where: 'id = ?', whereArgs: [widget.id]);
+    if (res.isNotEmpty) return res.first['foto_path']?.toString();
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<String?>(
+      future: _fotoFuture, // 🔥 Almacenado en memoria, no recarga con cada tecla presionada
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) return _construirMiniatura(null, widget.isOscuro);
+        return _construirMiniatura(snapshot.data, widget.isOscuro);
+      },
     );
   }
 }

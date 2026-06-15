@@ -6,9 +6,9 @@ class ServicioAnuncios {
   static InterstitialAd? _anuncioPantallaCompleta;
   static bool _cargandoAnuncio = false;
 
-  // ID de prueba de AdMob
+  // anuncios de abmod 
   static const String _adUnitId = 'ca-app-pub-2754846263403564/1692633493'; 
-  //anuncios de abmod ca-app-pub-3940256099942544/1033173712
+  // ID de prueba de AdMob ca-app-pub-3940256099942544/1033173712
   static Future<void> iniciar() async {
     await MobileAds.instance.initialize();
     

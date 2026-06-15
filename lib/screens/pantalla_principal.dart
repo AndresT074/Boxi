@@ -656,7 +656,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                             {'whatsapp_admin': numeroCompleto}, SetOptions(merge: true)
                           );
                           String link = "https://boxi-catalogo.web.app/catalogo/?id=${user.uid}";
-                          Share.share("📦 ¡Hola! Te comparto mi catálogo. Haz tus pedidos aquí:\n\n $link");
+                          Share.share("¡Hola! Te comparto mi catálogo. Haz tus pedidos aquí:\n $link");
                         }
                       },
                       icon: Icon(_esPremium ? Icons.public : Icons.stars, size: 18),

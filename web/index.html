@@ -10,6 +10,9 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
 
+  <!-- SCRIPT OFICIAL DE GOOGLE ADSENSE -->
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-1598839330818461" crossorigin="anonymous"></script>
+
   <link rel="icon" type="image/png" href="favicon.png"/>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -21,8 +24,7 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root { --blue-deep: #0A1628; --blue-mid: #0D47A1; --blue-bright: #1E88E5; --gold: #F0B429; --white: #FFFFFF; }
     
-    /* 🔥 MANTENEMOS EL OVERFLOW HIDDEN PARA QUE FLUTTER NO DESAPAREZCA */
-    body { background: var(--blue-deep); font-family: 'DM Sans', sans-serif; overflow: hidden; height: 100vh; width: 100vw; }
+    body { background: var(--blue-deep); font-family: 'DM Sans', sans-serif; overflow: hidden; height: 100vh; width: 100vw; margin: 0; }
     
     #loading {
       position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -59,6 +61,51 @@
     .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--gold); animation: dotPulse 1.4s ease-in-out infinite; }
     .status-txt { font-size: 12px; color: rgba(255,255,255,.42); transition: opacity .25s; }
     @keyframes dotPulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.55); } }
+
+    /* BANNER DE ANUNCIOS FLOTANTE */
+    #banner-publicitario {
+      position: fixed; 
+      bottom: 0; 
+      left: 50%; 
+      transform: translateX(-50%);
+      width: 100%; 
+      max-width: 450px; 
+      height: 60px; 
+      background: #FFFFFF;
+      box-shadow: 0 -4px 15px rgba(0,0,0,0.15);
+      z-index: 2000; 
+      display: none; 
+      align-items: center; 
+      justify-content: center;
+      border-radius: 16px 16px 0 0; 
+      transition: transform 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    }
+    #boton-cerrar-anuncio {
+      position: absolute; 
+      top: -12px; 
+      right: 15px; 
+      width: 26px; 
+      height: 26px;
+      border-radius: 50%; 
+      background: #FF3B30; 
+      color: #FFFFFF; 
+      border: 2px solid white;
+      font-size: 14px; 
+      font-weight: bold; 
+      cursor: pointer; 
+      display: flex;
+      align-items: center; 
+      justify-content: center; 
+      box-shadow: 0 2px 8px rgba(255, 59, 48, 0.4);
+    }
+    .contenedor-anuncio { 
+      width: 100%; 
+      height: 100%; 
+      display: flex; 
+      align-items: center; 
+      justify-content: center; 
+      overflow: hidden; 
+    }
   </style>
   <script src="/flutter.js" defer></script> 
 </head>
@@ -77,11 +124,41 @@
       <div class="status-txt" id="statusTxt">Iniciando sistema...</div>
     </div>
   </div>
-  <div style="position: absolute; bottom: 20px; font-size: 10px; color: rgba(255,255,255,0.3); font-weight: bold;">V 5.3.0</div>
+  <div style="position: absolute; bottom: 20px; font-size: 10px; color: rgba(255,255,255,0.3); font-weight: bold;">V 5.3.7</div>
+</div>
+
+<!-- BANNER DE ADSENSE FLOTANTE INTEGRADO -->
+<div id="banner-publicitario">
+  <button id="boton-cerrar-anuncio" onclick="cerrarAnuncio()">✕</button>
+  <div class="contenedor-anuncio">
+    <ins class="adsbygoogle"
+         style="display:inline-block;width:320px;height:50px"
+         data-ad-client="ca-pub-1598839330818461"
+         data-ad-slot="1692633493"></ins>
+  </div>
 </div>
 
 <script>
-  // 1. Mensajes normales (primeros 10 segundos)
+  // Control del Banner
+  function cerrarAnuncio() {
+    const banner = document.getElementById('banner-publicitario');
+    if (banner) {
+      banner.style.transform = 'translate(-50%, 100px)'; 
+      setTimeout(() => banner.style.display = 'none', 400);
+    }
+  }
+
+  function mostrarAnuncio() {
+    const banner = document.getElementById('banner-publicitario');
+    if (banner) {
+      banner.style.display = 'flex';
+      try {
+        (adsbygoogle = window.adsbygoogle || []).push({});
+      } catch (e) { console.log("Error cargando AdSense: ", e); }
+    }
+  }
+
+  // Textos del Loader
   const normalMsgs = [
     "Sincronizando datos...",
     "Preparando tu catálogo...",
@@ -90,7 +167,6 @@
     "Descarga Boxi gratis en la Play Store..."
   ];
 
-  // 2. Mensajes de internet lento (después de 10 segundos)
   const slowMsgs = [
     "Esto está tardando más de lo normal...",
     "Tu conexión a internet parece estar un poco lenta.",
@@ -103,14 +179,8 @@
   const statusEl = document.getElementById('statusTxt');
 
   const interval = setInterval(() => {
-    elapsedSeconds += 2; // El intervalo corre cada 2 segundos
-    
-    // Si han pasado 10 segundos o más, combinamos ambas listas de mensajes
-    let currentArray = elapsedSeconds >= 10 
-      ? normalMsgs.concat(slowMsgs) 
-      : normalMsgs;
-
-    // Quitamos la línea que reiniciaba el índice a 0 para mantener la fluidez
+    elapsedSeconds += 2; 
+    let currentArray = elapsedSeconds >= 10 ? normalMsgs.concat(slowMsgs) : normalMsgs;
     mIdx = (mIdx + 1) % currentArray.length;
 
     if (statusEl) {
@@ -135,17 +205,20 @@
       loader.style.transform = 'scale(1.05)';
       setTimeout(() => {
         if (loader.parentNode) loader.remove();
+        
+        // Mostrar el anuncio exactamente 2 segundos después de que el catálogo cargue
+        setTimeout(mostrarAnuncio, 2000);
+        
       }, 400);
     }
   }
 
-   window.addEventListener('load', function() {
+  window.addEventListener('load', function() {
     _flutter.loader.loadEntrypoint({
       onEntrypointLoaded: async function(engineInit) {
         const appRunner = await engineInit.initializeEngine({
           renderer: 'html', 
         });
-        
         await appRunner.runApp(); 
       }
     });
