@@ -24,6 +24,7 @@ class _CatalogoWebState extends State<CatalogoWeb> {
   final TextEditingController _searchCtrl = TextEditingController();
   
   List<Map<String, dynamic>> _productos = [];
+  List<String> _categoriasOrdenadas = [];
   Map<String, dynamic>? _negocioData;
   String? adminEmail;
   bool _estaCargando = true; 
@@ -47,10 +48,22 @@ class _CatalogoWebState extends State<CatalogoWeb> {
     });
 
     try {
+      // 1. Declaramos primero las referencias
       final negRef = FirebaseFirestore.instance.collection('usuarios').doc(widget.adminId);
       final prodRef = negRef.collection('productos');
+      final catRef = negRef.collection('categorias');
 
-      // 🔥 Eliminamos los .timeout(). Ahora Firebase esperará el tiempo que sea necesario
+      // 🔥 2. Descargamos y ordenamos las categorías
+      final catSnap = await catRef.get();
+      List<Map<String, dynamic>> listaCats = catSnap.docs.map((d) => d.data()).toList();
+      listaCats.sort((a, b) => (a['orden'] ?? 0).compareTo(b['orden'] ?? 0));
+      
+      List<String> nombresCategorias = listaCats
+          .where((c) => c['activo'] == 1 || c['activo'] == true)
+          .map((c) => c['nombre'].toString())
+          .toList();
+
+      // 3. Descargamos la información del negocio
       final negSnap = await negRef.get();
       if (mounted && negSnap.exists) {
         setState(() {
@@ -59,14 +72,11 @@ class _CatalogoWebState extends State<CatalogoWeb> {
         });
       }
 
+      // 4. Descargamos y ordenamos los productos
       final prodSnap = await prodRef.get();
-
       if (!mounted) return;
 
-      List<Map<String, dynamic>> listaDocs = prodSnap.docs
-          .map((doc) => doc.data()) 
-          .toList();
-
+      List<Map<String, dynamic>> listaDocs = prodSnap.docs.map((doc) => doc.data()).toList();
       listaDocs.sort((a, b) {
         int ordenA = a['orden'] ?? 0;
         int ordenB = b['orden'] ?? 0;
@@ -74,8 +84,10 @@ class _CatalogoWebState extends State<CatalogoWeb> {
         return ordenA.compareTo(ordenB);
       });
 
+      // 5. Guardamos TODO al mismo tiempo y quitamos la carga
       setState(() {
         _productos = listaDocs;
+        _categoriasOrdenadas = nombresCategorias;
         _estaCargando = false; 
       });
       
@@ -91,14 +103,8 @@ class _CatalogoWebState extends State<CatalogoWeb> {
 
     } catch (e) {
       debugPrint("Error de conexión con Firebase: $e");
-      // Si falla por algo grave (ej: no tiene permisos en la base de datos), 
-      // dejamos que quite el loader para que no se quede colgado eternamente.
       if (kIsWeb) {
-        try {
-          js.context.callMethod('quitarLoader');
-        } catch (e) {
-          debugPrint("Error llamando a quitarLoader: $e");
-        }
+        try { js.context.callMethod('quitarLoader'); } catch (_) {}
       }
       if (mounted) {
         setState(() => _estaCargando = false);
@@ -187,7 +193,19 @@ class _CatalogoWebState extends State<CatalogoWeb> {
       bool estaActivo = p['activo'] == null || p['activo'] == true || p['activo'] == 1;
       return estaActivo && p['nombre'].toString().toLowerCase().contains(busqueda.toLowerCase());
     }).toList();
+    // 🔥 Agrupar productos
+    Map<String, List<Map<String, dynamic>>> grupos = {};
+    for (String cat in _categoriasOrdenadas) grupos[cat] = [];
+    grupos['_sin_categoria'] = [];
 
+    for (var p in docsFiltrados) {
+      String? cat = p['categoria'];
+      if (cat != null && grupos.containsKey(cat)) {
+        grupos[cat]!.add(p);
+      } else {
+        grupos['_sin_categoria']!.add(p);
+      }
+    }
     return Scaffold(
       backgroundColor: const Color(0xFFF4F7FA),
       appBar: AppBar(
@@ -257,21 +275,18 @@ class _CatalogoWebState extends State<CatalogoWeb> {
                             padding: EdgeInsets.all(50),
                             child: Center(child: Text("No se encontraron productos")),
                           ),
-                        GridView.builder(
-                          shrinkWrap: true,
-                          physics: const NeverScrollableScrollPhysics(),
-                          padding: const EdgeInsets.all(15),
-                          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                            crossAxisCount: columnas,
-                            childAspectRatio: esCelular ? 0.70 : 0.62, 
-                            crossAxisSpacing: 15,
-                            mainAxisSpacing: 15,
-                          ),
-                          itemCount: docsFiltrados.length,
-                          itemBuilder: (context, index) {
-                            var p = docsFiltrados[index];
-                            return _tarjetaProducto(p);
-                          },
+                        // 🔥 1. Iterar sobre las categorías ordenadas
+                        ..._categoriasOrdenadas.map((cat) {
+                          return _construirBloqueCategoria(cat, grupos[cat]!, columnas, esCelular);
+                        }).toList(),
+
+                        // 🔥 2. Mostrar los que no tienen categoría 
+                        // (Si no existen categorías, el título se oculta y queda idéntico a la versión vieja)
+                        _construirBloqueCategoria(
+                          _categoriasOrdenadas.isEmpty ? "" : "Otros Productos", 
+                          grupos['_sin_categoria']!, 
+                          columnas, 
+                          esCelular
                         ),
                         _boxiFooter(),
                       ],
@@ -1153,6 +1168,35 @@ class _CatalogoWebState extends State<CatalogoWeb> {
           focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: const BorderSide(color: Color(0xFF0D47A1), width: 2)),
         ),
       ),
+    );
+  }
+  Widget _construirBloqueCategoria(String titulo, List<Map<String, dynamic>> prods, int columnas, bool esCelular) {
+    if (prods.isEmpty) return const SizedBox.shrink();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (titulo.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 25, 20, 0),
+            child: Text(
+              titulo.toUpperCase(), 
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: Color(0xFF0D47A1), letterSpacing: 1)
+            ),
+          ),
+        GridView.builder(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          padding: const EdgeInsets.all(15),
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: columnas,
+            childAspectRatio: esCelular ? 0.70 : 0.62, 
+            crossAxisSpacing: 15,
+            mainAxisSpacing: 15,
+          ),
+          itemCount: prods.length,
+          itemBuilder: (context, index) => _tarjetaProducto(prods[index]),
+        ),
+      ],
     );
   }
 }
