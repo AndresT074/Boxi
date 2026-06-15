@@ -145,14 +145,17 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
         prodsProcesados.add(pClon);
       }
 
-      // 2. CAPITAL GLOBAL
+      // 2. CAPITAL GLOBAL CON FECHA ASOCIADA POR TRANSACCIÓN (Últimos 150 registros)
       final capitalVentasRaw = await db.rawQuery('''
-        SELECT d.nombre_snapshot, SUM(d.cantidad) as cantidad_total, SUM(d.cantidad * (SELECT precio_compra FROM productos WHERE id = d.producto_id)) as capital_recuperado
+        SELECT d.nombre_snapshot, d.cantidad as cantidad_total, p.fecha_hora as fecha,
+               (d.cantidad * (SELECT precio_compra FROM productos WHERE id = d.producto_id)) as capital_recuperado
         FROM detalle_pedidos d JOIN pedidos p ON d.pedido_id = p.id
-        WHERE p.estado = 'Completado' GROUP BY d.producto_id, d.nombre_snapshot HAVING capital_recuperado > 0
+        WHERE p.estado = 'Completado' AND (d.cantidad * (SELECT precio_compra FROM productos WHERE id = d.producto_id)) > 0
+        ORDER BY p.fecha_hora DESC
+        LIMIT 150
       ''');
 
-      // 🔥 LÍMITE DE MEMORIA: Solo los últimos 150 ajustes manuales
+      // LÍMITE DE MEMORIA: Solo los últimos 150 ajustes manuales
       final ajustesManuales = await db.query('ajustes_capital', columns: ['id', 'monto', 'descripcion', 'fecha'], orderBy: 'id DESC', limit: 150);
 
       final totalRecuperadoVentas = await db.rawQuery("SELECT SUM(cantidad * (SELECT precio_compra FROM productos WHERE id = producto_id)) as total FROM detalle_pedidos WHERE pedido_id IN (SELECT id FROM pedidos WHERE estado = 'Completado')");
@@ -216,7 +219,7 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
         });
       }
 
-      // 🔥 LÍMITE DE MEMORIA CRÍTICO: Máximo 150 reportes históricos en RAM sin la columna gigante de JSON.
+      // Máximo 150 reportes históricos en RAM sin la columna gigante de JSON.
       final reportes = await db.query(
         'reportes_guardados', 
         columns: ['id', 'titulo', 'fecha', 'caja', 'utilidad', 'reinversion', 'ultima_modificacion'],
@@ -245,24 +248,99 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
     final now = DateTime.now();
     final String mesTarget = mesReferencia ?? "${now.year}-${now.month.toString().padLeft(2, '0')}";
 
+    // 1. VENTAS COMPLETADAS (Solo ventas del mes)
     final List<Map<String, dynamic>> peds = await db.rawQuery('''
       SELECT p.fecha_hora, p.total_venta, (p.ganancia_total + COALESCE(p.valor_domicilio, 0)) as ganancia_real, c.nombre_completo, c.nombre_negocio
       FROM pedidos p LEFT JOIN clientes c ON p.cliente_id = c.id
       WHERE p.estado = 'Completado' AND substr(p.fecha_hora, 1, 7) = ?
     ''', [mesTarget]);
 
-    if (peds.isEmpty) {
-      if (manual && mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Sin ventas completadas para este mes."), backgroundColor: Colors.orange));
+    // 2. RECONSTRUCCIÓN GENERAL DEL LIBRO MAYOR (Todos los tiempos para cálculo exacto antes/después)
+    final List<Map<String, dynamic>> todasVentas = await db.rawQuery('''
+      SELECT p.id as id_ref, p.fecha_hora, 
+             SUM(d.cantidad * COALESCE((SELECT precio_compra FROM productos WHERE id = d.producto_id), 0)) as monto
+      FROM detalle_pedidos d JOIN pedidos p ON d.pedido_id = p.id
+      WHERE p.estado = 'Completado'
+      GROUP BY p.id, p.fecha_hora
+    ''');
+
+    final List<Map<String, dynamic>> todosAjustes = await db.rawQuery('''
+      SELECT id as id_ref, fecha as fecha_hora, monto, descripcion FROM ajustes_capital
+    ''');
+
+    List<Map<String, dynamic>> libroMayor = [];
+    
+    // Sumar capital recuperado de ventas
+    for (var v in todasVentas) {
+      double m = (v['monto'] as num? ?? 0).toDouble();
+      if (m > 0) {
+        libroMayor.add({
+          'fecha_hora': v['fecha_hora'],
+          'monto': m, // Sube capital (+)
+          'descripcion': 'Capital recuperado de venta (Pedido #${v['id_ref']})',
+        });
+      }
+    }
+    
+    // Sumar/Restar egresos e ingresos manuales
+    for (var a in todosAjustes) {
+      double m = (a['monto'] as num? ?? 0).toDouble();
+      libroMayor.add({
+        'fecha_hora': a['fecha_hora'],
+        'monto': -m, // Egreso resta capital (-), Ingreso suma capital (+)
+        'descripcion': a['descripcion'] ?? 'Ajuste manual',
+      });
+    }
+
+    // Ordenar de más antiguo a más nuevo para la contabilidad
+    libroMayor.sort((a, b) => a['fecha_hora'].toString().compareTo(b['fecha_hora'].toString()));
+
+    double saldoAcumulado = 0.0;
+    List<Map<String, dynamic>> libroMayorConSaldos = [];
+    
+    for (var item in libroMayor) {
+      double antes = saldoAcumulado;
+      double impacto = (item['monto'] as num).toDouble();
+      saldoAcumulado += impacto;
+      double despues = saldoAcumulado;
+
+      libroMayorConSaldos.add({
+        ...item,
+        'antes': antes,
+        'despues': despues,
+      });
+    }
+
+    // Filtrar los movimientos que corresponden SOLAMENTE al mes target
+    final listAjustesMes = libroMayorConSaldos.where((item) {
+      final fh = item['fecha_hora'].toString();
+      return fh.length >= 7 && fh.substring(0, 7) == mesTarget;
+    }).toList();
+
+    if (peds.isEmpty && listAjustesMes.isEmpty) {
+      if (manual && mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Sin movimientos financieros para este mes."), backgroundColor: Colors.orange));
       return;
     }
 
-    double tC = 0, tU = 0;
-    for (var p in peds) { tC += (p['total_venta'] as num? ?? 0).toDouble(); tU += (p['ganancia_real'] as num? ?? 0).toDouble(); }
+    double totalVentasCaja = 0;
+    double totalVentasUtilidad = 0;
+    for (var p in peds) {
+      totalVentasCaja += (p['total_venta'] as num? ?? 0).toDouble();
+      totalVentasUtilidad += (p['ganancia_real'] as num? ?? 0).toDouble();
+    }
 
     final reporteMap = {
-      'titulo': titulo, 'fecha': now.toIso8601String(),
-      'caja': tC, 'utilidad': tU, 'reinversion': (tC - tU),
-      'detalle_json': jsonEncode(peds), 'ultima_modificacion': now.toIso8601String(),
+      'titulo': titulo, 
+      'fecha': now.toIso8601String(),
+      'caja': totalVentasCaja, 
+      'utilidad': totalVentasUtilidad, 
+      'reinversion': capitalGlobalReinversion, // Capital actual de re-inversión global real
+      'detalle_json': jsonEncode({
+        'ventas': peds,
+        'ajustes': listAjustesMes, // Guardamos la lista ordenada con antes/después
+        'capital_actual': capitalGlobalReinversion,
+      }), 
+      'ultima_modificacion': now.toIso8601String(),
     };
 
     int id = await db.insert('reportes_guardados', reporteMap);
@@ -286,13 +364,37 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
       if (queryRes.isNotEmpty && queryRes.first['detalle_json'] != null) jsonStr = queryRes.first['detalle_json'] as String;
     }
 
-    final List<dynamic> ventas = jsonStr.isNotEmpty ? jsonDecode(jsonStr) : [];
+    List<dynamic> ventas = [];
+    List<dynamic> ajustes = [];
+    double capitalActualReporte = (r['reinversion'] as num? ?? 0).toDouble();
 
+    if (jsonStr.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(jsonStr);
+        if (decoded is Map) {
+          ventas = decoded['ventas'] ?? [];
+          ajustes = decoded['ajustes'] ?? [];
+          if (decoded.containsKey('capital_actual')) {
+            capitalActualReporte = (decoded['capital_actual'] as num).toDouble();
+          }
+        } else if (decoded is List) {
+          // Retrocompatibilidad con reportes viejos que solo tenían lista
+          ventas = decoded;
+        }
+      } catch (_) {}
+    }
+
+    // 🔥 ENVIAMOS LAS TABLAS COMPLETAMENTE SEPARADAS
     await ServicioPdf.compartirReporte(
-      titulo: r['titulo'].toString(), totalCaja: (r['caja'] as num).toDouble(),
-      totalUtilidad: (r['utilidad'] as num).toDouble(), ventas: ventas,
-      nombreNegocio: nombreNeg, logoPath: logoPath,
+      titulo: r['titulo'].toString(), 
+      totalCaja: (r['caja'] as num).toDouble(), // Caja real de ventas
+      totalUtilidad: (r['utilidad'] as num).toDouble(), // Utilidad real de ventas
+      ventas: ventas, // Solo ventas reales
+      nombreNegocio: nombreNeg, 
+      logoPath: logoPath,
       mostrarLogo: _esPremiumUsuario && _incluirLogoEnReporte,
+      ajustes: ajustes, // 🔥 NUEVO: Ajustes enviados de forma aislada
+      capitalReinversion: capitalActualReporte, // 🔥 NUEVO: Capital global del reporte
     );
   }
 
@@ -682,28 +784,47 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
     color: isOscuro ? Theme.of(context).cardColor : c, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: isOscuro ? c.withOpacity(0.5) : Colors.transparent)),
     child: ExpansionTile(
       leading: Icon(icon, color: isOscuro ? c : Colors.white, size: 26), iconColor: isOscuro ? c : Colors.white, collapsedIconColor: isOscuro ? c : Colors.white,
-      title: Text(t, style: TextStyle(color: isOscuro ? Colors.white70 : Colors.white, fontSize: 13)), 
-      subtitle: Text('\$${m.toStringAsFixed(0)}', style: TextStyle(color: isOscuro ? c : Colors.white, fontSize: 22, fontWeight: FontWeight.bold)),
+      title: Text("Capital de Reinversión Actual (Fondo para Stock)", style: TextStyle(color: isOscuro ? Colors.white70 : Colors.white, fontSize: 13, fontWeight: FontWeight.bold)), 
+      subtitle: Text('\$${m.toStringAsFixed(0)}', style: TextStyle(color: isOscuro ? c : Colors.white, fontSize: 24, fontWeight: FontWeight.w900)),
       children: [
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10), decoration: BoxDecoration(color: isOscuro ? Colors.black26 : Colors.white.withOpacity(0.1)),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _subtituloDesglose("CAPITAL RECUPERADO POR VENTAS", isOscuro),
+              _subtituloDesglose("CAPITAL RECUPERADO DE VENTAS", isOscuro),
               _scrollableListContainer(
                 children: _capitalPorVentaProds.isEmpty ? [_itemVacio("No hay capital recuperado de ventas aún.", isOscuro)]
                     : _capitalPorVentaProds.map((item) {
                         final int cant = (item['cantidad_total'] as num? ?? 0).toInt();
                         String nombreSnap = item['nombre_snapshot'].toString();
-                        return _itemDesglose("$nombreSnap (x$cant)", (item['capital_recuperado'] as num).toDouble(), isOscuro, Icons.trending_up, onDelete: () => _eliminarCapitalRecuperadoConfirmacion(nombreSnap));
+                        String fechaFmt = item['fecha'] != null ? _formatearFechaCorta(item['fecha'].toString()) : '';
+                        return _itemDesglose(
+                          "$nombreSnap (x$cant)\n$fechaFmt", 
+                          (item['capital_recuperado'] as num).toDouble(), 
+                          isOscuro, 
+                          Icons.trending_up, 
+                          onDelete: () => _eliminarCapitalRecuperadoConfirmacion(nombreSnap)
+                        );
                       }).toList(),
               ),
               const Divider(height: 20, color: Colors.white24),
-              _subtituloDesglose("COMPRAS DE STOCK / AJUSTES MANUALES", isOscuro),
+              _subtituloDesglose("COMPRAS DE STOCK / REINVERSIONES / INGRESO - EGRESO", isOscuro),
               _scrollableListContainer(
-                children: _capitalManualAjustes.isEmpty ? [_itemVacio("No hay ajustes manuales registrados.", isOscuro)]
-                    : _capitalManualAjustes.map((ajuste) => _itemDesglose(ajuste['descripcion'] ?? "Ajuste sin descripción", (ajuste['monto'] as num).toDouble().abs(), isOscuro, Icons.shopping_bag_outlined, esGasto: (ajuste['monto'] as num).toDouble() >= 0, onDelete: () => _eliminarAjusteManualConfirmacion(ajuste))).toList(),
+                children: _capitalManualAjustes.isEmpty ? [_itemVacio("No hay movimientos manuales registrados.", isOscuro)]
+                    : _capitalManualAjustes.map((ajuste) {
+                        String desc = ajuste['descripcion'] ?? "Ajuste manual";
+                        String fechaFmt = ajuste['fecha'] != null ? _formatearFechaCorta(ajuste['fecha'].toString()) : '';
+                        double monto = (ajuste['monto'] as num).toDouble();
+                        return _itemDesglose(
+                          "$desc\n$fechaFmt", 
+                          monto.abs(), 
+                          isOscuro, 
+                          monto >= 0 ? Icons.remove_circle_outline : Icons.add_circle_outline, 
+                          esGasto: monto >= 0, 
+                          onDelete: () => _eliminarAjusteManualConfirmacion(ajuste)
+                        );
+                      }).toList(),
               ),
               const Divider(height: 20, color: Colors.white24),
               Row(
@@ -854,19 +975,116 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
       final String tituloRango = "REPORTE ${_obtenerFechaFmt(range.start)} A ${_obtenerFechaFmt(range.end)}";
       _mostrarConfirmacion(tituloRango, () async {
         final db = await DBHelper.instance.database;
-        final start = range.start.toIso8601String().split('T')[0]; final end = range.end.toIso8601String().split('T')[0];
-        final List<Map<String, dynamic>> peds = await db.rawQuery("SELECT p.fecha_hora, p.total_venta, (p.ganancia_total + COALESCE(p.valor_domicilio, 0)) as ganancia_real, COALESCE(c.nombre_completo, 'Cliente Temporal') as nombre_completo, c.nombre_negocio FROM pedidos p LEFT JOIN clientes c ON p.cliente_id = c.id WHERE p.estado = 'Completado' AND substr(p.fecha_hora, 1, 10) BETWEEN ? AND ?", [start, end]);
+        final start = range.start.toIso8601String().split('T')[0]; 
+        final end = range.end.toIso8601String().split('T')[0];
         
-        if (peds.isEmpty) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Sin ventas en este rango."), backgroundColor: Colors.redAccent)); return; }
-        double tC = 0, tU = 0; for (var p in peds) { tC += (p['total_venta'] as num? ?? 0).toDouble(); tU += (p['ganancia_real'] as num? ?? 0).toDouble(); }
-        final rMap = {'titulo': tituloRango, 'fecha': DateTime.now().toIso8601String(), 'caja': tC, 'utilidad': tU, 'reinversion': (tC - tU), 'detalle_json': jsonEncode(peds), 'ultima_modificacion': DateTime.now().toIso8601String()};
+        // 1. VENTAS COMPLETADAS (Solo ventas del rango)
+        final List<Map<String, dynamic>> peds = await db.rawQuery('''
+          SELECT p.fecha_hora, p.total_venta, (p.ganancia_total + COALESCE(p.valor_domicilio, 0)) as ganancia_real, COALESCE(c.nombre_completo, 'Cliente Temporal') as nombre_completo, c.nombre_negocio 
+          FROM pedidos p LEFT JOIN clientes c ON p.cliente_id = c.id 
+          WHERE p.estado = 'Completado' AND substr(p.fecha_hora, 1, 10) BETWEEN ? AND ?
+        ''', [start, end]);
+
+        // 2. RECONSTRUCCIÓN GENERAL DEL LIBRO MAYOR (Todos los tiempos)
+        final List<Map<String, dynamic>> todasVentas = await db.rawQuery('''
+          SELECT p.id as id_ref, p.fecha_hora, 
+                 SUM(d.cantidad * COALESCE((SELECT precio_compra FROM productos WHERE id = d.producto_id), 0)) as monto
+          FROM detalle_pedidos d JOIN pedidos p ON d.pedido_id = p.id
+          WHERE p.estado = 'Completado'
+          GROUP BY p.id, p.fecha_hora
+        ''');
+
+        final List<Map<String, dynamic>> todosAjustes = await db.rawQuery('''
+          SELECT id as id_ref, fecha as fecha_hora, monto, descripcion FROM ajustes_capital
+        ''');
+
+        List<Map<String, dynamic>> libroMayor = [];
+        for (var v in todasVentas) {
+          double m = (v['monto'] as num? ?? 0).toDouble();
+          if (m > 0) {
+            libroMayor.add({
+              'fecha_hora': v['fecha_hora'],
+              'monto': m,
+              'descripcion': 'Recuperación capital de venta (Pedido #${v['id_ref']})',
+            });
+          }
+        }
+        for (var a in todosAjustes) {
+          double m = (a['monto'] as num? ?? 0).toDouble();
+          libroMayor.add({
+            'fecha_hora': a['fecha_hora'],
+            'monto': -m,
+            'descripcion': a['descripcion'] ?? 'Ajuste manual',
+          });
+        }
+
+        libroMayor.sort((a, b) => a['fecha_hora'].toString().compareTo(b['fecha_hora'].toString()));
+
+        double saldoAcumulado = 0.0;
+        List<Map<String, dynamic>> libroMayorConSaldos = [];
+        for (var item in libroMayor) {
+          double antes = saldoAcumulado;
+          double impacto = (item['monto'] as num).toDouble();
+          saldoAcumulado += impacto;
+          double despues = saldoAcumulado;
+
+          libroMayorConSaldos.add({
+            ...item,
+            'antes': antes,
+            'despues': despues,
+          });
+        }
+
+        // Filtrar los movimientos que corresponden al rango de fechas
+        final listAjustesRango = libroMayorConSaldos.where((item) {
+          final fh = item['fecha_hora'].toString();
+          if (fh.length < 10) return false;
+          final fechaDia = fh.substring(0, 10);
+          return fechaDia.compareTo(start) >= 0 && fechaDia.compareTo(end) <= 0;
+        }).toList();
+
+        if (peds.isEmpty && listAjustesRango.isEmpty) { 
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Sin movimientos en este rango."), backgroundColor: Colors.redAccent)); 
+          return; 
+        }
+
+        double totalVentasCaja = 0;
+        double totalVentasUtilidad = 0;
+        for (var p in peds) { 
+          totalVentasCaja += (p['total_venta'] as num? ?? 0).toDouble(); 
+          totalVentasUtilidad += (p['ganancia_real'] as num? ?? 0).toDouble(); 
+        }
+
+        final rMap = {
+          'titulo': tituloRango, 
+          'fecha': DateTime.now().toIso8601String(), 
+          'caja': totalVentasCaja, 
+          'utilidad': totalVentasUtilidad, 
+          'reinversion': capitalGlobalReinversion, 
+          'detalle_json': jsonEncode({
+            'ventas': peds,
+            'ajustes': listAjustesRango,
+            'capital_actual': capitalGlobalReinversion,
+          }), 
+          'ultima_modificacion': DateTime.now().toIso8601String()
+        };
+
         int id = await db.insert('reportes_guardados', rMap);
         ServicioNube.guardarReporteNube({...rMap, 'id': id});
-        _generarPdfProfesional(rMap); _ejecutarMotorFinanciero();
+        _generarPdfProfesional(rMap); 
+        _ejecutarMotorFinanciero();
       });
     }
   }
-
+  
+  String _formatearFechaCorta(String fechaIso) {
+    try {
+      final dt = DateTime.parse(fechaIso);
+      return "${dt.day.toString().padLeft(2, '0')}/${dt.month.toString().padLeft(2, '0')}/${dt.year} ${_formatearHoraPro(dt)}";
+    } catch (_) {
+      return fechaIso;
+    }
+  }
   String _obtenerFechaFmt(DateTime dt) => "${dt.day.toString().padLeft(2, '0')}-${dt.month.toString().padLeft(2, '0')}-${dt.year}";
   String _formatearHoraPro(DateTime n) { String p = n.hour >= 12 ? 'PM' : 'AM'; int h = n.hour > 12 ? n.hour - 12 : (n.hour == 0 ? 12 : n.hour); return "$h:${n.minute.toString().padLeft(2, '0')} $p"; }
 }
