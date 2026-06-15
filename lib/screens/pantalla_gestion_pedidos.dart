@@ -312,6 +312,99 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     return detallesEditables;
   }
 
+  void _mostrarPantallaExito(String nuevoEstado) {
+    if (!mounted) return;
+    final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
+    
+    Color color;
+    IconData icono;
+    String titulo;
+
+    if (nuevoEstado == 'Entregado sin Pago') {
+      color = Colors.blue;
+      icono = Icons.local_shipping_rounded;
+      titulo = "¡Pedido Entregado!";
+    } else if (nuevoEstado == 'Completado') {
+      color = const Color(0xFF00C853);
+      icono = Icons.check_circle_rounded;
+      titulo = "¡Pago Completado!";
+    } else { // Cancelado
+      color = Colors.redAccent;
+      icono = Icons.delete_forever_rounded;
+      titulo = "Pedido Cancelado";
+    }
+
+    showDialog(
+      context: context,
+      barrierDismissible: false, // Evita que el usuario lo cierre tocando afuera
+      builder: (ctx) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          child: TweenAnimationBuilder(
+            duration: const Duration(milliseconds: 400),
+            curve: Curves.elasticOut, // Animación de "rebote"
+            tween: Tween<double>(begin: 0.5, end: 1.0),
+            builder: (context, double scale, child) {
+              return Transform.scale(
+                scale: scale,
+                child: Container(
+                  padding: const EdgeInsets.all(30),
+                  decoration: BoxDecoration(
+                    color: isOscuro ? const Color(0xFF141420) : Colors.white,
+                    borderRadius: BorderRadius.circular(25),
+                    boxShadow: [
+                      BoxShadow(
+                        color: color.withOpacity(0.3), 
+                        blurRadius: 25, 
+                        spreadRadius: 2
+                      )
+                    ]
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(18),
+                        decoration: BoxDecoration(
+                          color: color.withOpacity(0.15),
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(icono, color: color, size: 60),
+                      ),
+                      const SizedBox(height: 20),
+                      Text(titulo, 
+                        textAlign: TextAlign.center, 
+                        style: TextStyle(
+                          fontSize: 22, 
+                          fontWeight: FontWeight.w900,
+                          color: isOscuro ? Colors.white : Colors.black87
+                      )),
+                      const SizedBox(height: 8),
+                      Text("El estado se actualizó correctamente", 
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 13, 
+                          color: isOscuro ? Colors.white54 : Colors.black54
+                      )),
+                    ],
+                  ),
+                ),
+              );
+            }
+          ),
+        );
+      }
+    );
+
+    // 🔥 Temporizador para cerrar la pantalla de éxito automáticamente
+    Future.delayed(const Duration(milliseconds: 1600), () {
+      if (mounted && Navigator.canPop(context)) {
+        Navigator.pop(context);
+      }
+    });
+  }
+
   // Consulta de SQLite rápida y estática para las imágenes
   Future<String?> _obtenerFotoDetalleEstatico(dynamic db, int productoId, String nombreSnapshot) async {
     try {
@@ -464,7 +557,8 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     final db = await DBHelper.instance.database;
     _invalidarCache(pedidoId);
 
-    void ejecutar() async {
+    // Cambiado a Future<void> para esperar los procesos de BD
+    Future<void> ejecutar() async {
       // 1. Actualiza SQLite local de inmediato
       await db.update(
           'pedidos',
@@ -483,10 +577,13 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
         }
       }
 
-      // 2. Refresca la interfaz de inmediato para que el cambio se note offline [1.1.2]
+      // 2. Refresca la interfaz de inmediato
       _cargar();
 
-      // 3. Sincroniza en la nube de fondo protegiendo contra fallos sin conexión [1.1.2]
+      // 🔥 3. MOSTRAR LA PANTALLA DE ÉXITO ANIMADA
+      _mostrarPantallaExito(nuevoEstado);
+
+      // 4. Sincroniza en la nube de fondo
       if (_esPremium) {
         try {
           await ServicioNube.actualizarEstadoPedidoNube(pedidoId, nuevoEstado);
@@ -497,6 +594,7 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     }
 
     if (!_esPremium) {
+      // Si hay anuncio, la pantalla de éxito sale al terminar el anuncio
       ServicioAnuncios.mostrarAnuncioIntersticial(() => ejecutar());
     } else {
       ejecutar();
