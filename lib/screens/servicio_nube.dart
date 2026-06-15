@@ -102,6 +102,7 @@ class ServicioNube {
       final List<int> idsAEliminar = [];
       bool cambioProductos = false;
       bool cambioPedidos = false;
+      bool cambioCategorias = false;
 
       for (final op in pendientes) {
         final String tabla = op['tabla'] as String;
@@ -127,6 +128,7 @@ class ServicioNube {
           cambioProductos = true;
         }
         if (tabla == 'pedidos') cambioPedidos = true;
+        if (tabla == 'categorias') cambioCategorias = true; 
         idsAEliminar.add(op['id'] as int);
       }
 
@@ -138,6 +140,12 @@ class ServicioNube {
       if (cambioPedidos) {
         batch.update(_db.collection('usuarios').doc(_uid!), {
           'ultima_mod_pedidos': FieldValue.serverTimestamp(),
+        });
+      }
+
+      if (cambioCategorias) { // 🔥 AÑADIDO
+        batch.update(_db.collection('usuarios').doc(_uid!), {
+          'ultima_mod_categorias': FieldValue.serverTimestamp(),
         });
       }
 
@@ -192,6 +200,8 @@ class ServicioNube {
           campoMod = 'ultima_mod_pedidos';
         } else if (tabla == 'ajustes_capital') {
           campoMod = 'ultima_mod_ajustes';
+        } else if (tabla == 'categorias') { // 🔥 AÑADIDO PARA CATEGORÍAS
+          campoMod = 'ultima_mod_categorias';
         }
 
         if (campoMod.isNotEmpty) {
@@ -526,6 +536,7 @@ class ServicioNube {
     'reportes_guardados',
     'ajustes_capital',
     'fotos_variantes',
+    'categorias', 
   ];
 
   static Future<void> descargarPerfilNube(String uid) async {
@@ -809,6 +820,21 @@ class ServicioNube {
       debugPrint("Error limpiando fantasmas en la nube: $e");
     }
   }
+
+  static Future<void> guardarCategoriaNube(Map<String, dynamic> cat) async =>
+      _escribir(tabla: 'categorias', docId: cat['id'].toString(), datos: cat);
+
+  static Future<void> eliminarCategoriaNube(int id) async =>
+      _eliminar(tabla: 'categorias', docId: id.toString());
+
+  static Stream<QuerySnapshot>? escucharCategoriasEnTiempoReal() =>
+      _uid == null
+          ? null
+          : _db
+              .collection('usuarios')
+              .doc(_uid)
+              .collection('categorias')
+              .snapshots();
 
   // ─────────────────────────────────────────────────────────────
   //  STREAMS (para quien los necesite)

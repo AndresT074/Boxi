@@ -20,7 +20,7 @@ class DBHelper {
     final path = join(dbPath, filePath);
     return await openDatabase(
       path,
-      version: 13, 
+      version: 14, // 🔥 Subido a 14 para la migración de categorías
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
     );
@@ -29,7 +29,7 @@ class DBHelper {
   Future _createDB(Database db, int version) async {
     await db.execute('''CREATE TABLE vendedores (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, telefono TEXT, email TEXT, ultima_modificacion TEXT)''');
     await db.execute('''CREATE TABLE clientes (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre_completo TEXT NOT NULL, nombre_negocio TEXT, direccion TEXT, telefono TEXT, departamento TEXT, ciudad TEXT, firma TEXT, ultima_modificacion TEXT)''');
-    await db.execute('''CREATE TABLE productos (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, foto_path TEXT, precio_compra REAL NOT NULL, precio_venta REAL NOT NULL, descuento REAL DEFAULT 0, stock INTEGER DEFAULT 0, descripcion TEXT, variantes TEXT, orden INTEGER DEFAULT 0, activo INTEGER DEFAULT 1, ultima_modificacion TEXT)''');
+    await db.execute('''CREATE TABLE productos (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, foto_path TEXT, precio_compra REAL NOT NULL, precio_venta REAL NOT NULL, descuento REAL DEFAULT 0, stock INTEGER DEFAULT 0, descripcion TEXT, variantes TEXT, orden INTEGER DEFAULT 0, activo INTEGER DEFAULT 1, ultima_modificacion TEXT, categoria TEXT)'''); // ✅ Agregada categoría
     await db.execute('''CREATE TABLE pedidos (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha_hora TEXT NOT NULL, cliente_id INTEGER NOT NULL, vendedor_id INTEGER NOT NULL, total_venta REAL NOT NULL, ganancia_total REAL NOT NULL, estado TEXT NOT NULL, departamento TEXT, ciudad TEXT, firma BLOB, valor_domicilio REAL DEFAULT 0, ultima_modificacion TEXT)''');
     await db.execute('''CREATE TABLE detalle_pedidos (id INTEGER PRIMARY KEY AUTOINCREMENT, pedido_id INTEGER NOT NULL, producto_id INTEGER NOT NULL, cantidad INTEGER NOT NULL, precio_unitario REAL NOT NULL, subtotal REAL NOT NULL, nombre_snapshot TEXT, descuento REAL DEFAULT 0, ultima_modificacion TEXT, FOREIGN KEY (pedido_id) REFERENCES pedidos (id) ON DELETE CASCADE)''');
     await db.execute('''CREATE TABLE ajustes_capital (id INTEGER PRIMARY KEY AUTOINCREMENT, monto REAL NOT NULL, fecha TEXT NOT NULL, descripcion TEXT, ultima_modificacion TEXT)''');
@@ -43,6 +43,17 @@ class DBHelper {
         opcion_index INTEGER NOT NULL,
         variante_nombre TEXT,
         foto_base64 TEXT NOT NULL,
+        ultima_modificacion TEXT
+      )
+    ''');
+    
+    // 🔥 NUEVA TABLA DE CATEGORÍAS
+    await db.execute('''
+      CREATE TABLE categorias (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nombre TEXT UNIQUE NOT NULL,
+        activo INTEGER DEFAULT 1,
+        orden INTEGER DEFAULT 0, 
         ultima_modificacion TEXT
       )
     ''');
@@ -73,14 +84,30 @@ class DBHelper {
     if (oldVersion < 13) {
       try { await db.execute('ALTER TABLE fotos_variantes ADD COLUMN variante_nombre TEXT'); } catch (_) {}
     }
+
+    // 🔥 MIGRACIÓN SEGURA PARA USUARIOS EXISTENTES (VERSIÓN 14)
+    if (oldVersion < 14) {
+      try { await db.execute('ALTER TABLE productos ADD COLUMN categoria TEXT DEFAULT NULL'); } catch (_) {}
+      try { await db.execute('''
+        CREATE TABLE IF NOT EXISTS categorias (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          nombre TEXT UNIQUE NOT NULL,
+          activo INTEGER DEFAULT 1,
+          orden INTEGER DEFAULT 0,
+          ultima_modificacion TEXT
+        )
+      '''); } catch (_) {}
+    }
   }
 
   Future<void> close() async { final db = _database; if (db != null) { await db.close(); _database = null; } }
+  
   Future<void> limpiarTablas() async {
     final db = await database;
     await db.delete('vendedores'); await db.delete('clientes'); await db.delete('productos');
     await db.delete('pedidos'); await db.delete('detalle_pedidos'); await db.delete('ajustes_capital');
     await db.delete('reportes_guardados'); await db.delete('operaciones_pendientes');
     try { await db.delete('fotos_variantes'); } catch (_) {}
+    try { await db.delete('categorias'); } catch (_) {} // Limpiar categorías
   }
 }
