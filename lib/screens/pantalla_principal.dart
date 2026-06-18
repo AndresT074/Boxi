@@ -311,7 +311,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       final String? ultimaModCatLocal = prefs.getString('ultima_mod_categorias_local_${user.uid}');
       String? ultimaModCatStr = ultimaModCat?.microsecondsSinceEpoch.toString();
       
-      // 2. Luego se declaran TODOS los booleanos de cambio (¡Esto corrige el error!)
       bool cambioAjust = ultimaModAjustStr != null && ultimaModAjustStr != ultimaModAjustLocal;
       bool cambioProd = ultimaModStr != null && ultimaModStr != ultimaModLocal;
       bool cambioPed = ultimaModPedStr != null && ultimaModPedStr != ultimaModPedLocal;

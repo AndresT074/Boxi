@@ -45,11 +45,15 @@ class _PantallaClientesState extends State<PantallaClientes> {
 
         for (var change in snapshot.docChanges) {
           final data = change.doc.data() as Map<String, dynamic>;
-          final int id = data['id'];
+          
+          // 🛡️ EVITA CAÍDAS DE TIPADO: Si el ID viene en otro formato, lo parseamos con seguridad
+          final dynamic rawId = data['id'];
+          final int? id = rawId is num ? rawId.toInt() : int.tryParse(rawId?.toString() ?? '');
+          if (id == null) continue;
 
-          if (change.type == DocumentChangeType.removed) {
-            await db.delete('clientes', where: 'id = ?', whereArgs: [id]);
-          } else {
+          // 🛡️ EVITA BORRADOS ACCIDENTALES: Ignoramos los eventos 'removed' del flujo en tiempo real
+          // para que pérdidas de conexión o expiración de tokens no eliminen los datos locales.
+          if (change.type != DocumentChangeType.removed) {
             Map<String, dynamic> localData = Map.from(data);
             
             localData.forEach((key, value) {
@@ -63,6 +67,7 @@ class _PantallaClientesState extends State<PantallaClientes> {
               'telefono', 'departamento', 'ciudad', 'firma', 'ultima_modificacion'
             ];
             localData.removeWhere((key, value) => !permitidas.contains(key));
+            localData['id'] = id; // Forzamos el ID entero validado
 
             await db.insert('clientes', localData, conflictAlgorithm: ConflictAlgorithm.replace);
           }
@@ -164,11 +169,9 @@ class _PantallaClientesState extends State<PantallaClientes> {
       body: _filtrados.isEmpty
           ? Center(child: Text('No hay clientes registrados', style: TextStyle(color: isOscuro ? Colors.white38 : Colors.grey)))
           : ListView.builder(
-              padding: const EdgeInsets.only(left: 10, right: 10, top: 10, bottom: 90), // Espacio extra para el botón flotante
-              // 🔥 Si no es premium, agregamos 1 espacio extra para el anuncio al final
+              padding: const EdgeInsets.only(left: 10, right: 10, top: 10, bottom: 90), 
               itemCount: _filtrados.length + (!_esPremium ? 1 : 0),
               itemBuilder: (ctx, i) {
-                // 🔥 Si llegamos al final del conteo y es free, renderizamos el Anuncio
                 if (i == _filtrados.length) {
                   return const AnuncioNativoWidget(key: ValueKey('admob_client_list_ad'));
                 }

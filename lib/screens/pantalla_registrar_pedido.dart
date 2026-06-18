@@ -313,7 +313,8 @@ class _PantallaRegistrarPedidoState extends State<PantallaRegistrarPedido> {
         'departamento': _deptoC.text.trim(), 
         'ciudad': _ciuC.text.trim(), 
         'firma': firmaBytes,
-        'valor_domicilio': valorDomicilio 
+        'valor_domicilio': valorDomicilio,
+        'cliente_nombre_snapshot': _nC.text.trim(), 
       };
       int pedidoId = await db.insert('pedidos', pedidoData);
       pedidoData['id'] = pedidoId;

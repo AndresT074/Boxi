@@ -8,6 +8,7 @@ import 'servicio_nube.dart';
 import 'servicio_anuncios.dart';
 import 'dart:async';
 import 'pantalla_premium.dart';
+import 'package:sqflite/sqflite.dart';
 
 final Map<String, Uint8List> _imageCache = {};
 
@@ -127,6 +128,43 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
 
   Future<void> _cargar() async {
     final db = await DBHelper.instance.database;
+    await db.delete('pedidos', where: "fecha_hora = '2000-01-01 00:00:00' AND total_venta = 0");
+
+    // 🔥 1. AUTO-SANEAMIENTO: Rellena los nombres vacíos buscando en la tabla clientes local
+    int filasModificadas = await db.rawUpdate('''
+      UPDATE pedidos 
+      SET cliente_nombre_snapshot = (SELECT nombre_completo FROM clientes WHERE clientes.id = pedidos.cliente_id) 
+      WHERE cliente_nombre_snapshot IS NULL OR cliente_nombre_snapshot = ""
+    ''');
+
+    // 🔥 2. SINCRONIZACIÓN SILENCIOSA: Si reparamos pedidos y el usuario es Premium, encolamos el respaldo para Firebase
+    if (filasModificadas > 0 && _esPremium) {
+      try {
+        final reparados = await db.query('pedidos', columns: ['id', 'cliente_nombre_snapshot'], where: 'cliente_nombre_snapshot IS NOT NULL AND cliente_nombre_snapshot != ""');
+        final String fecha = DateTime.now().toIso8601String();
+        
+        for (var p in reparados) {
+          String? nombreSnap = p['cliente_nombre_snapshot']?.toString();
+          if (nombreSnap != null && nombreSnap.isNotEmpty) {
+            await db.insert('operaciones_pendientes', {
+              'tabla': 'pedidos',
+              'operacion': 'set',
+              'doc_id': p['id'].toString(),
+              'datos_json': jsonEncode({
+                'id': p['id'], 
+                'cliente_nombre_snapshot': nombreSnap
+              }),
+              'fecha_creacion': fecha
+            }, conflictAlgorithm: ConflictAlgorithm.replace);
+          }
+        }
+        // Dispara el procesador de cola offline de forma silenciosa
+        ServicioNube.procesarColaOffline();
+      } catch (e) {
+        debugPrint("Error sincronizando auto-saneamiento: $e");
+      }
+    }
+
     final peds = await db.rawQuery('''
       SELECT pedidos.*,
             clientes.nombre_completo as cliente_nombre,
@@ -1793,7 +1831,7 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     final colorEst = _coloresEstado[estado]!;
     final bool hayBloqueo = _pedidosBloqueados[p['id'] as int] ?? false;
 
-    String nombreCliente = p['cliente_nombre'] ?? 'Cliente no deudor';
+    String nombreCliente = p['cliente_nombre'] ?? p['cliente_nombre_snapshot'] ?? 'Cliente no registrado';
     String neg = (p['negocio_nombre'] ?? '').toString().trim();
     String ciudad = (p['cliente_ciudad'] ?? '').toString().trim();
     if (ciudad.isEmpty || ciudad == "null") ciudad = '';

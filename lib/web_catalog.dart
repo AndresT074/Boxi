@@ -72,7 +72,6 @@ class _CatalogoWebState extends State<CatalogoWeb> {
         });
       }
 
-      // 4. Descargamos y ordenamos los productos
       final prodSnap = await prodRef.get();
       if (!mounted) return;
 
@@ -84,7 +83,6 @@ class _CatalogoWebState extends State<CatalogoWeb> {
         return ordenA.compareTo(ordenB);
       });
 
-      // 5. Guardamos TODO al mismo tiempo y quitamos la carga
       setState(() {
         _productos = listaDocs;
         _categoriasOrdenadas = nombresCategorias;
