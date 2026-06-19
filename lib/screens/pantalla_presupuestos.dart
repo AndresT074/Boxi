@@ -977,15 +977,11 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
         final db = await DBHelper.instance.database;
         final start = range.start.toIso8601String().split('T')[0]; 
         final end = range.end.toIso8601String().split('T')[0];
-        
-        // 1. VENTAS COMPLETADAS (Solo ventas del rango)
         final List<Map<String, dynamic>> peds = await db.rawQuery('''
           SELECT p.fecha_hora, p.total_venta, (p.ganancia_total + COALESCE(p.valor_domicilio, 0)) as ganancia_real, COALESCE(c.nombre_completo, 'Cliente Temporal') as nombre_completo, c.nombre_negocio 
           FROM pedidos p LEFT JOIN clientes c ON p.cliente_id = c.id 
           WHERE p.estado = 'Completado' AND substr(p.fecha_hora, 1, 10) BETWEEN ? AND ?
         ''', [start, end]);
-
-        // 2. RECONSTRUCCIÓN GENERAL DEL LIBRO MAYOR (Todos los tiempos)
         final List<Map<String, dynamic>> todasVentas = await db.rawQuery('''
           SELECT p.id as id_ref, p.fecha_hora, 
                  SUM(d.cantidad * COALESCE((SELECT precio_compra FROM productos WHERE id = d.producto_id), 0)) as monto
@@ -993,11 +989,9 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
           WHERE p.estado = 'Completado'
           GROUP BY p.id, p.fecha_hora
         ''');
-
         final List<Map<String, dynamic>> todosAjustes = await db.rawQuery('''
           SELECT id as id_ref, fecha as fecha_hora, monto, descripcion FROM ajustes_capital
         ''');
-
         List<Map<String, dynamic>> libroMayor = [];
         for (var v in todasVentas) {
           double m = (v['monto'] as num? ?? 0).toDouble();
@@ -1017,9 +1011,7 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
             'descripcion': a['descripcion'] ?? 'Ajuste manual',
           });
         }
-
         libroMayor.sort((a, b) => a['fecha_hora'].toString().compareTo(b['fecha_hora'].toString()));
-
         double saldoAcumulado = 0.0;
         List<Map<String, dynamic>> libroMayorConSaldos = [];
         for (var item in libroMayor) {
@@ -1027,34 +1019,29 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
           double impacto = (item['monto'] as num).toDouble();
           saldoAcumulado += impacto;
           double despues = saldoAcumulado;
-
           libroMayorConSaldos.add({
             ...item,
             'antes': antes,
             'despues': despues,
           });
         }
-
-        // Filtrar los movimientos que corresponden al rango de fechas
+        
         final listAjustesRango = libroMayorConSaldos.where((item) {
           final fh = item['fecha_hora'].toString();
           if (fh.length < 10) return false;
           final fechaDia = fh.substring(0, 10);
           return fechaDia.compareTo(start) >= 0 && fechaDia.compareTo(end) <= 0;
         }).toList();
-
         if (peds.isEmpty && listAjustesRango.isEmpty) { 
           if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Sin movimientos en este rango."), backgroundColor: Colors.redAccent)); 
           return; 
         }
-
         double totalVentasCaja = 0;
         double totalVentasUtilidad = 0;
         for (var p in peds) { 
           totalVentasCaja += (p['total_venta'] as num? ?? 0).toDouble(); 
           totalVentasUtilidad += (p['ganancia_real'] as num? ?? 0).toDouble(); 
         }
-
         final rMap = {
           'titulo': tituloRango, 
           'fecha': DateTime.now().toIso8601String(), 
@@ -1068,7 +1055,6 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
           }), 
           'ultima_modificacion': DateTime.now().toIso8601String()
         };
-
         int id = await db.insert('reportes_guardados', rMap);
         ServicioNube.guardarReporteNube({...rMap, 'id': id});
         _generarPdfProfesional(rMap); 

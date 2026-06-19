@@ -265,7 +265,7 @@ class _PantallaLoginState extends State<PantallaLogin> {
                     ),
                     onPressed: _procesarGoogle,
                     icon: Image.network(
-                      'https://rotulosmatesanz.com/wp-content/uploads/2017/09/2000px-Google_G_Logo.svg_.png', 
+                      'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c1/Google_%22G%22_logo.svg/120px-Google_%22G%22_logo.svg.png', 
                       height: 22,
                       errorBuilder: (context, error, stackTrace) => const Icon(Icons.g_mobiledata, color: Colors.blue, size: 30),
                     ),
@@ -286,7 +286,6 @@ class _PantallaLoginState extends State<PantallaLogin> {
     );
   }
 
-  // 🔥 MÉTODO CAMPO MEJORADO: Cuadros oscuros y letra escrita visible
   Widget _campo(TextEditingController ctrl, String hint, IconData icon, bool pass) {
     return TextField(
       controller: ctrl,

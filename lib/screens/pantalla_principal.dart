@@ -115,7 +115,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       ServicioNube.procesarColaOffline();
-      
       debugPrint("▶️ App en primer plano, verificando cambios en nube...");
     }
   }
@@ -127,12 +126,11 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     if (user != null) {
       await prefs.setString('user_uid', user.uid);
     }
-
+    FirebaseAnalytics.instance.logAppOpen();
     String nombre = prefs.getString('nombre_negocio') ?? "MI NEGOCIO";
     String nuevaPath = prefs.getString('logo_path') ?? "";
     bool nuevoPremium = prefs.getBool('es_premium') ?? false;
 
-    // 🔥 CACHÉ INTELIGENTE: Solo decodifica si el logo realmente cambió
     if (nuevaPath != _logoPath || _logoImageCached == null) {
       if (nuevaPath.isNotEmpty) {
         if (nuevaPath.length > 500) {
@@ -165,7 +163,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     
     try { await db.execute('ALTER TABLE categorias ADD COLUMN orden INTEGER DEFAULT 0'); } catch (_) {}
     
-    // 🔥 Añadida 'foto_path' a la consulta principal para evitar lecturas repetitivas
     final data = await db.query('productos',
         columns: ['id', 'nombre', 'precio_compra', 'precio_venta', 'descuento', 'stock', 'descripcion', 'variantes', 'orden', 'activo', 'ultima_modificacion', 'categoria', 'foto_path'],
         where: 'activo = 1', orderBy: 'orden ASC, id DESC');
@@ -1641,9 +1638,11 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       builder: (ctx) => StatefulBuilder(
         builder: (context, setStateDialog) {
           final isOscuro = Theme.of(context).brightness == Brightness.dark;
+          final prodsDisponibles = productos.where((p) => p['categoria'] == null).toList();
+
           return AlertDialog(
             backgroundColor: Theme.of(context).cardColor,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(25)),
             title: Text(categoriaAEditar == null ? "Crear Categoría" : "Editar Categoría", style: const TextStyle(fontWeight: FontWeight.bold)),
             content: SizedBox(
               width: double.maxFinite,
@@ -1660,22 +1659,85 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                     ),
                   ),
                   const SizedBox(height: 15),
-                  if (categoriaAEditar == null && productos.any((p) => p['categoria'] == null)) ...[
-                    const Align(alignment: Alignment.centerLeft, child: Text("Añadir productos:", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
-                    const SizedBox(height: 5),
+                  if (categoriaAEditar == null) ...[
+                    const Align(alignment: Alignment.centerLeft, child: Text("Añadir productos a esta categoría:", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
+                    const SizedBox(height: 10),
                     Flexible(
-                      child: Container(
-                        decoration: BoxDecoration(border: Border.all(color: Colors.grey.shade300), borderRadius: BorderRadius.circular(10)),
-                        child: ListView(
-                          shrinkWrap: true,
-                          children: productos.where((p) => p['categoria'] == null).map((p) {
-                            return CheckboxListTile(
-                              title: Text(p['nombre'], style: const TextStyle(fontSize: 12), maxLines: 1, overflow: TextOverflow.ellipsis),
-                              value: prodsSeleccionados.contains(p['id']),
-                              onChanged: (v) => setStateDialog(() { if (v == true) prodsSeleccionados.add(p['id']); else prodsSeleccionados.remove(p['id']); }),
-                            );
-                          }).toList(),
-                        ),
+                      child: SizedBox(
+                        height: MediaQuery.of(context).size.height * 0.4,
+                        child: prodsDisponibles.isEmpty
+                            ? const Center(child: Text("No hay productos sin categoría disponibles.", style: TextStyle(color: Colors.grey, fontSize: 12)))
+                            : ListView.builder(
+                                shrinkWrap: true,
+                                itemCount: prodsDisponibles.length,
+                                itemBuilder: (context, idx) {
+                                  final p = prodsDisponibles[idx];
+                                  final isSel = prodsSeleccionados.contains(p['id']);
+                                  final String fotoPath = p['foto_path']?.toString() ?? "";
+                                  final double precioVenta = (p['precio_venta'] as num).toDouble();
+
+                                  return Container(
+                                    margin: const EdgeInsets.only(bottom: 8),
+                                    decoration: BoxDecoration(
+                                      color: isSel 
+                                          ? (isOscuro ? Colors.cyanAccent.withOpacity(0.1) : Colors.blue.withOpacity(0.05))
+                                          : Colors.transparent,
+                                      borderRadius: BorderRadius.circular(15),
+                                      border: Border.all(
+                                        color: isSel 
+                                            ? (isOscuro ? Colors.cyanAccent : Colors.blue) 
+                                            : (isOscuro ? Colors.white10 : Colors.grey.shade200)
+                                      )
+                                    ),
+                                    child: ListTile(
+                                      contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                      onTap: () {
+                                        setStateDialog(() {
+                                          if (isSel) {
+                                            prodsSeleccionados.remove(p['id']);
+                                          } else {
+                                            prodsSeleccionados.add(p['id']);
+                                          }
+                                        });
+                                      },
+                                      leading: Container(
+                                        width: 45, height: 45,
+                                        decoration: BoxDecoration(
+                                          color: isOscuro ? Colors.black26 : Colors.grey.shade100,
+                                          borderRadius: BorderRadius.circular(10),
+                                        ),
+                                        clipBehavior: Clip.antiAlias,
+                                        child: fotoPath.isEmpty
+                                            ? const Icon(Icons.image, color: Colors.grey, size: 20)
+                                            : (fotoPath.length > 500
+                                                ? Image.memory(base64Decode(fotoPath), fit: BoxFit.cover, gaplessPlayback: true)
+                                                : Image.file(File(fotoPath), fit: BoxFit.cover, gaplessPlayback: true, errorBuilder: (_,__,___) => const Icon(Icons.broken_image, size: 20))),
+                                      ),
+                                      title: Text(
+                                        p['nombre'], 
+                                        style: TextStyle(fontSize: 13, fontWeight: isSel ? FontWeight.bold : FontWeight.w600),
+                                        maxLines: 2, overflow: TextOverflow.ellipsis,
+                                      ),
+                                      subtitle: Text(
+                                        "\$${precioVenta.toStringAsFixed(0)}", 
+                                        style: TextStyle(fontSize: 11, color: isOscuro ? Colors.greenAccent : Colors.green, fontWeight: FontWeight.bold)
+                                      ),
+                                      trailing: Checkbox(
+                                        activeColor: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1),
+                                        checkColor: isOscuro ? Colors.black : Colors.white,
+                                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                                        value: isSel,
+                                        onChanged: (val) {
+                                          setStateDialog(() {
+                                            if (val == true) prodsSeleccionados.add(p['id']);
+                                            else prodsSeleccionados.remove(p['id']);
+                                          });
+                                        },
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
                       ),
                     ),
                   ]
@@ -1692,7 +1754,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                   final db = await DBHelper.instance.database;
                   
                   if (categoriaAEditar == null) {
-                    // 🔥 LÓGICA MAGISTRAL: Empuja las demás hacia abajo y crea la nueva en orden 0 (Arriba)
                     final allCats = await db.query('categorias', orderBy: 'orden ASC');
                     Batch batchLocal = db.batch();
                     for (int i = 0; i < allCats.length; i++) {
@@ -1752,7 +1813,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       )
     );
   }
-
+  
   void _mostrarAgradecimiento() {
     const correo = "Revisordecuenta@gmail.com";
     final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
@@ -2144,14 +2205,11 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         }
       }
 
-      if (!procederACompartir) return; // Detiene la ejecución si se canceló
+      if (!procederACompartir) return; 
 
       List<XFile> files = [];
       final tempDir = Directory.systemTemp; 
-
-      // 🔥 EXCLUSIÓN ESTRICTA: Separamos la compilación de archivos según la selección del usuario
-      if (compartirSeleccion == false) {
-        // Opción A: Solo compartimos la foto principal
+      if (compartirSeleccion == false || compartirSeleccion == null) {
         if (imgData.isNotEmpty) {
           if (imgData.length > 500) {
             final bytes = base64Decode(imgData);
@@ -2163,7 +2221,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
           }
         }
       } else {
-        // Opción B: Compartimos exclusivamente las variantes seleccionadas (sin la principal)
+        // Opción B: Compartimos exclusivamente las variantes seleccionadas
         for (int i = 0; i < fotosSeleccionadasBase64.length; i++) {
           try {
             final bytes = base64Decode(fotosSeleccionadasBase64[i]);
@@ -3459,12 +3517,26 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
             );
           }).toList(),
           // 2. PRODUCTOS SIN CATEGORÍA
+          // 2. PRODUCTOS SIN CATEGORÍA
           if (grupos['_sin_categoria']!.isNotEmpty)
             Container(
               key: const ValueKey('grid_sin_cat'),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                    child: Text(
+                      "OTROS PRODUCTOS", 
+                      style: TextStyle(
+                        fontSize: 16, 
+                        fontWeight: FontWeight.w900, 
+                        letterSpacing: 0.5,
+                        color: isOscuro ? Colors.white70 : const Color(0xFF0D47A1), 
+                      ),
+                    ),
+                  ),
+                  
                   widget.esAdmin 
                     ? ReorderableGridView.builder(
                         key: const PageStorageKey('rsincat'),
@@ -3494,10 +3566,8 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                 ],
               ),
             ),
-            
-          // 🔥 ANUNCIO DE VIDEO SILENCIADO (Nativo) - Solo para usuarios gratuitos
           if (!_esPremium && widget.esAdmin)
-            const AnuncioNativoWidget(key: ValueKey('admob_native_ad_key')), // <-- Clave añadida
+            const AnuncioNativoWidget(key: ValueKey('admob_native_ad_key')),
 
             const SizedBox(key: ValueKey('spacer_end'), height: 100),
         ],
@@ -4860,7 +4930,7 @@ class _AnuncioNativoWidgetState extends State<AnuncioNativoWidget> {
     _bannerAd = BannerAd(
       adUnitId: _adUnitId,
       request: const AdRequest(),
-      size: AdSize.largeBanner, // 📐 320x100 - Extremadamente estable, sin decodificación por hardware de video
+      size: AdSize.largeBanner, 
       listener: BannerAdListener(
         onAdLoaded: (ad) {
           if (mounted) {
@@ -4905,7 +4975,6 @@ class _AnuncioNativoWidgetState extends State<AnuncioNativoWidget> {
       clipBehavior: Clip.antiAlias,
       child: Column(
         children: [
-          // 🏷️ ENCABEZADO
           Container(
             padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 14),
             color: isOscuro ? Colors.white.withOpacity(0.05) : Colors.grey.shade50,
@@ -4925,7 +4994,6 @@ class _AnuncioNativoWidgetState extends State<AnuncioNativoWidget> {
             ),
           ),
           
-          // 🖥️ CUERPO (Muestra el anuncio de AdMob, o un banner Pro si está cargando)
           Container(
             height: 120,
             alignment: Alignment.center,
@@ -4954,7 +5022,6 @@ class _AnuncioNativoWidgetState extends State<AnuncioNativoWidget> {
                   ),
           ),
           
-          // 🔘 ENLACE DE CONVERSIÓN PREMIUM
           InkWell(
             onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PantallaPremium())),
             child: Container(

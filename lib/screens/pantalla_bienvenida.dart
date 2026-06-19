@@ -196,11 +196,10 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
 
   Future<void> _iniciarApp() async {
     await _cargarConfig();
-    await _sincronizarAlEntrar();
-    _verificarReembolsosEnSilencio();
     _registrarIngresoYVerificarActualizacion();
+    _sincronizarAlEntrar();
+    _verificarReembolsosEnSilencio();
   }
-
   @override
   void dispose() {
     _controller.dispose();
@@ -249,8 +248,6 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
       await _cargarConfig();
       await _sincronizacionSilenciosa(user);
       await ServicioContrasenaAdmin.sincronizarDesdeNube(user.uid);
-      
-      // 🔥 NUEVO: Forzar actualización de actividad inmediatamente al conectarse
       await _registrarIngresoYVerificarActualizacion();
       
       if (mounted) setState(() => _cargandoDatos = false);
@@ -401,6 +398,7 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
   Future<void> _registrarIngresoYVerificarActualizacion() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
+    if (!await ServicioNube.tieneInternet()) return;
 
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -418,7 +416,6 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
         Map<String, dynamic> datosAEnviar = {};
         
         if (necesitaActualizarDia) {
-          // 🔥 Solo guardamos la última actividad real diaria
           datosAEnviar['ultima_actividad'] = FieldValue.serverTimestamp();
         }
         if (necesitaActualizarVersion) {
@@ -428,7 +425,8 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
         await FirebaseFirestore.instance
             .collection('usuarios')
             .doc(user.uid)
-            .set(datosAEnviar, SetOptions(merge: true));
+            .set(datosAEnviar, SetOptions(merge: true))
+            .timeout(const Duration(seconds: 5));
             
         if (necesitaActualizarDia) {
           await prefs.setString('ultimo_registro_firestore', hoy);
@@ -439,7 +437,7 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
       }
 
       AppUpdateInfo info = await InAppUpdate.checkForUpdate();
-      if (info.updateAvailability == UpdateAvailability.updateAvailable) {
+      if (info.updateAvailability == UpdateAvailability.updateAvailable) { 
         await InAppUpdate.performImmediateUpdate();
       }
     } catch (e) {
@@ -447,9 +445,6 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
     }
   }
 
-  // ============================================================
-  // LOGO — compresión automática, sin re-selección
-  // ============================================================
   Future<void> _seleccionarLogo() async {
     if (!_esPremium) {
       Navigator.push(context,
@@ -578,7 +573,6 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
     );
   }
 
-  /// Carga imagen, la comprime automáticamente y la aplica sin re-selección
   Future<void> _cargarImagenLogo() async {
     await Permission.photos.request();
 
@@ -587,10 +581,7 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
       maxWidth: 1024,
       imageQuality: 90,
     );
-
     if (image == null) return;
-
-    // Mostrar indicador de procesamiento
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -608,14 +599,8 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
         ),
       );
     }
-
     try {
-      // Compresión automática usando solo dart:ui + ImagePicker (sin deps extra).
-      // ImagePicker ya aplica maxWidth:1024 + imageQuality:90 al seleccionar.
-      // Aquí tomamos los bytes y si superan 300 KB los redimensionamos con
-      // dart:ui sin volver a abrir la galería.
       Uint8List bytes = await image.readAsBytes();
-
       if (bytes.length > 300000) {
         try {
           final codec = await instantiateImageCodec(
@@ -630,7 +615,6 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
             bytes = pngData.buffer.asUint8List();
           }
         } catch (_) {
-          // Si falla dart:ui usar bytes originales
         }
       }
 
@@ -790,20 +774,15 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
               if (user != null) {
                 await prefs.remove("descarga_completa_${user.uid}");
               }
-
-              // 🔥 AQUÍ BORRAMOS EL RASTRO LOCAL DE LA CONTRASEÑA DE LA CUENTA ANTERIOR
               await prefs.remove('admin_password');
               await prefs.remove('admin_pregunta');
               await prefs.remove('admin_respuesta');
               await prefs.remove('admin_biometria_activa');
-
               Navigator.pop(ctx);
-
               if (!_esPremium) {
                 await DBHelper.instance.limpiarTablas();
                 await prefs.remove('datos_descargados');
               }
-
               await ServicioAuth.cerrarSesion();
               await _cargarConfig();
               if (mounted) setState(() {});
@@ -1097,10 +1076,7 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
     final user = FirebaseAuth.instance.currentUser;
 
     if (user == null) return;
-
     String? password = prefs.getString('admin_password');
-
-    // Si no hay contraseña configurada, entramos directo
     if (password == null) {
       if (mounted) {
         Navigator.pushReplacement(context,
