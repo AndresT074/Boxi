@@ -53,12 +53,15 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   StreamSubscription? _subSolicitudes;
   StreamSubscription<DocumentSnapshot>? _subPerfil;
   String _logoPath = "";
-  ImageProvider? _logoImageCached; // 🔥 Caché de imagen para evitar parpadeo
+  ImageProvider? _logoImageCached; 
   String _nombreNegocio = "MI NEGOCIO";
   bool _esPremium = false;
   bool _estaBuscando = false;
   bool _procesandoImagen = false;
   bool _mostrarAvisoReorganizar = true;
+  bool _estaArrastrandoCategoria = false;
+  Timer? _dragCollapseTimer;
+  bool _dragTriggered = false;
   Timer? _timerReorden;
   double _alturaCarrito = 150.0;
   final double _minAltura = 0;
@@ -96,6 +99,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
 
   @override
   void dispose() {
+    _dragCollapseTimer?.cancel(); 
     _nombreController.dispose();
     _timerReorden?.cancel();
     _subSolicitudes?.cancel();
@@ -3096,7 +3100,16 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   void _detenerArrastreGlobal() {
     _dragTimer?.cancel();
     _autoScrollTimer?.cancel();
+    _dragCollapseTimer?.cancel();
     _isDragging = false;
+    if (_estaArrastrandoCategoria) {
+      setState(() {
+        _estaArrastrandoCategoria = false;
+        for (var c in categorias) {
+          categoriasExpandidas[c['nombre']] = true;
+        }
+      });
+    }
   }
 
   Widget _construirVistaProductos(int columnas, bool esHorizontal) {
@@ -3290,7 +3303,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
               child: Row(
                 children: [
                   const Icon(Icons.touch_app, size: 14, color: Colors.blueGrey), const SizedBox(width: 8),
-                  const Expanded(child: Text("Mantén presionado para reordenar productos o arrastrar categorías.", style: TextStyle(fontSize: 11, color: Colors.blueGrey))),
+                  const Expanded(child: Text("Mantén presionado para reordenar productos", style: TextStyle(fontSize: 11, color: Colors.blueGrey))),
                   InkWell(onTap: () => setState(() => _mostrarAvisoReorganizar = false), child: const Icon(Icons.close, size: 16, color: Colors.grey))
                 ],
               ),
@@ -3411,14 +3424,33 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                               
                               if (widget.esAdmin) ...[
                                 const SizedBox(width: 2),
-                                // 🔥 Arrastre empaquetado + Listener para cerrar todo
+                                // 🔥 Arrastre optimizado con temporizador para evitar colapsar en toques rápidos
                                 Listener(
                                   onPointerDown: (_) {
-                                    setState(() {
-                                      for (var c in categorias) {
-                                        categoriasExpandidas[c['nombre']] = false;
+                                    _dragTriggered = false;
+                                    _dragCollapseTimer?.cancel();
+                                    _dragCollapseTimer = Timer(const Duration(milliseconds: 180), () {
+                                      _dragTriggered = true;
+                                      if (mounted) {
+                                        setState(() {
+                                          _estaArrastrandoCategoria = true;
+                                          for (var c in categorias) {
+                                            categoriasExpandidas[c['nombre']] = false;
+                                          }
+                                        });
                                       }
                                     });
+                                  },
+                                  onPointerUp: (_) {
+                                    _dragCollapseTimer?.cancel();
+                                    if (!_dragTriggered) {
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        const SnackBar(
+                                          content: Text("Mantén presionado para arrastrar"),
+                                          duration: Duration(milliseconds: 3000),
+                                        ),
+                                      );
+                                    }
                                   },
                                   child: ReorderableDragStartListener(
                                     index: globalIndex,
@@ -3516,8 +3548,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
               ),
             );
           }).toList(),
-          // 2. PRODUCTOS SIN CATEGORÍA
-          // 2. PRODUCTOS SIN CATEGORÍA
           if (grupos['_sin_categoria']!.isNotEmpty)
             Container(
               key: const ValueKey('grid_sin_cat'),
