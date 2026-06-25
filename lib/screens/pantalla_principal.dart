@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui' as ui;
 import 'dart:convert';
 import 'dart:async';
 import 'dart:math';
@@ -60,10 +61,12 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   bool _procesandoImagen = false;
   bool _mostrarAvisoReorganizar = true;
   bool _estaArrastrandoCategoria = false;
+  Map<String, bool> _categoriasExpandidasBackup = {};
   Timer? _dragCollapseTimer;
   bool _dragTriggered = false;
   Timer? _timerReorden;
   double _alturaCarrito = 150.0;
+  bool _isDraggingCarrito = false;
   final double _minAltura = 0;
   bool _aplicarDescuentoGlobal = false;
   double _descuentoGlobalPct = 0.0;
@@ -317,23 +320,29 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       bool cambioPed = ultimaModPedStr != null && ultimaModPedStr != ultimaModPedLocal;
       bool cambioCat = ultimaModCatStr != null && ultimaModCatStr != ultimaModCatLocal;
 
-      // 3. Por último se hace la evaluación en el IF
       if (!cambioProd && !cambioPed && !cambioAjust && !cambioCat) {
         debugPrint("☁️ Nube al día. 0 lecturas consumidas.");
         return; 
       }
 
       if (cambioProd) {
-        await ServicioNube.sincronizarBorradosFisicos(user.uid, 'productos');
+        // Solo eliminamos localmente si ya existía un registro de sincronización previo
+        if (ultimaModLocal != null) {
+          await ServicioNube.sincronizarBorradosFisicos(user.uid, 'productos');
+        }
         await ServicioNube.descargarSoloModificados(user.uid, 'productos', 'ultima_modificacion');
-        // 🔥 Fotos de variantes removidas de la carga rápida para evitar bloqueos por OutOfMemory
         await prefs.setString('ultima_mod_productos_local_${user.uid}', ultimaModStr);
       }
 
       if (cambioPed) {
-        await ServicioNube.sincronizarBorradosFisicos(user.uid, 'pedidos');
+        if (ultimaModPedLocal != null) {
+          await ServicioNube.sincronizarBorradosFisicos(user.uid, 'pedidos');
+        }
         await ServicioNube.descargarSoloModificados(user.uid, 'pedidos', 'ultima_modificacion');
-        await ServicioNube.sincronizarBorradosFisicos(user.uid, 'detalle_pedidos');
+        
+        if (ultimaModPedLocal != null) {
+          await ServicioNube.sincronizarBorradosFisicos(user.uid, 'detalle_pedidos');
+        }
         await ServicioNube.descargarSoloModificados(user.uid, 'detalle_pedidos', 'ultima_modificacion');
         await ServicioNube.limpiarFantasmasNubeYLocal(user.uid);
         await prefs.setString('ultima_mod_pedidos_local_${user.uid}', ultimaModPedStr);
@@ -341,14 +350,19 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       }
 
       if (cambioAjust) {
-        await ServicioNube.sincronizarBorradosFisicos(user.uid, 'ajustes_capital');
+        if (ultimaModAjustLocal != null) {
+          await ServicioNube.sincronizarBorradosFisicos(user.uid, 'ajustes_capital');
+        }
         await ServicioNube.descargarSoloModificados(user.uid, 'ajustes_capital', 'ultima_modificacion');
         await prefs.setString('ultima_mod_ajustes_local_${user.uid}', ultimaModAjustStr);
         debugPrint("💰 Capital de reinversión sincronizado.");
       }
 
       if (cambioCat) {
-        await ServicioNube.sincronizarBorradosFisicos(user.uid, 'categorias');
+        // Solo eliminamos categorías si ya existía sincronización previa
+        if (ultimaModCatLocal != null) {
+          await ServicioNube.sincronizarBorradosFisicos(user.uid, 'categorias');
+        }
         await ServicioNube.descargarSoloModificados(user.uid, 'categorias', 'ultima_modificacion');
         await prefs.setString('ultima_mod_categorias_local_${user.uid}', ultimaModCatStr);
       }
@@ -776,7 +790,9 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
           children: [
             CircularProgressIndicator(color: Color(0xFF0D47A1)),
             SizedBox(width: 20),
-            Text("Diseñando catálogo..."),
+            Expanded(
+              child: Text("Diseñando tu catálogo..."),
+            ),
           ],
         ),
       ),
@@ -800,7 +816,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         } catch (_) {}
       }
 
-      // 2. Extraer datos locales e imágenes de productos (CERO LECTURAS EN NUBE)
+      // 2a. Extraer datos locales e imágenes de productos comprimidas al vuelo (Built-in Flutter Codecs)
       final db = await DBHelper.instance.database;
       Map<int, pw.MemoryImage> imagenesPdf = {};
       final dbProds = await db.query('productos', columns: ['id', 'foto_path'], where: 'activo = 1');
@@ -811,13 +827,24 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         String fotoPath = row['foto_path']?.toString() ?? "";
         if (fotoPath.isNotEmpty) {
           try {
+            Uint8List bytes;
             if (fotoPath.length > 500) {
-              imagenesPdf[id] = pw.MemoryImage(base64Decode(fotoPath));
+              bytes = base64Decode(fotoPath);
             } else {
               final file = File(fotoPath);
               if (file.existsSync()) {
-                imagenesPdf[id] = pw.MemoryImage(await file.readAsBytes());
+                bytes = await file.readAsBytes();
+              } else {
+                continue;
               }
+            }
+            
+            // Compresión inteligente: Redimensionamos al vuelo a un ancho de 200px
+            final codec = await ui.instantiateImageCodec(bytes, targetWidth: 200);
+            final frame = await codec.getNextFrame();
+            final data = await frame.image.toByteData(format: ui.ImageByteFormat.png);
+            if (data != null) {
+              imagenesPdf[id] = pw.MemoryImage(data.buffer.asUint8List());
             }
           } catch (_) {}
         }
@@ -826,17 +853,237 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         if (contador % 5 == 0) await Future.delayed(const Duration(milliseconds: 1));
       }
 
-      // 3. Filtro para limpiar Emojis (Evita los cuadros con la X)
-      String limpiarTexto(String texto) {
-        return texto.replaceAll(RegExp(r'[^\x00-\x7F\xA0-\xFF]'), ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+      // 2b. Extraer e imágenes de variantes comprimidas al vuelo
+      Map<String, pw.MemoryImage> imagenesVariantesPdf = {};
+      final dbFotosVar = await db.query('fotos_variantes');
+      for (var row in dbFotosVar) {
+        int prodId = row['producto_id'] as int;
+        int gIdx = row['grupo_index'] as int;
+        int oIdx = row['opcion_index'] as int;
+        String fotoBase64 = row['foto_base64']?.toString() ?? "";
+        if (fotoBase64.isNotEmpty) {
+          try {
+            Uint8List bytes = base64Decode(fotoBase64);
+            
+            // Compresión al vuelo para miniaturas
+            final codec = await ui.instantiateImageCodec(bytes, targetWidth: 40);
+            final frame = await codec.getNextFrame();
+            final data = await frame.image.toByteData(format: ui.ImageByteFormat.png);
+            if (data != null) {
+              imagenesVariantesPdf["${prodId}_${gIdx}_$oIdx"] = pw.MemoryImage(data.buffer.asUint8List());
+            }
+          } catch (_) {}
+        }
       }
 
-      // 4. Cálculos optimizados para cuadrícula de 2x2 sin dejar espacio muerto
+      // 3. Purga absoluta de emojis y caracteres no compatibles
+      String limpiarTexto(String texto) {
+        return texto
+            .replaceAll(RegExp(r'[^a-zA-Z0-9áéíóúÁÉÍÓÚüÜñÑ\s.,;:()\-!?+*@#\/\[\]\$%&]'), '')
+            .replaceAll(RegExp(r'\s+'), ' ')
+            .trim();
+      }
+
+      // 4. Cálculos de cuadrícula optimizados
       const double margenPagina = 22.0; 
       const double espacioEntreCartas = 14.0;
       final double anchoCarta = (PdfPageFormat.a4.width - (margenPagina * 2) - espacioEntreCartas) / 2;
 
-      // 5. Construcción del PDF
+      // 5. Agrupar productos por categorías
+      Map<String, List<Map<String, dynamic>>> productosAgrupados = {'_sin_categoria': []};
+      for (var cat in categorias) {
+        productosAgrupados[cat['nombre']] = [];
+      }
+      for (var p in productos) {
+        String? cat = p['categoria'];
+        if (cat != null && productosAgrupados.containsKey(cat)) {
+          productosAgrupados[cat]!.add(p);
+        } else {
+          productosAgrupados['_sin_categoria']!.add(p);
+        }
+      }
+
+      // 6. Tarjetas de productos en PDF (Con tamaño ampliado y variantes grandes)
+      pw.Widget generarTarjetaProductoPdf(Map<String, dynamic> p) {
+        double precioOriginal = (p['precio_venta'] as num).toDouble();
+        double desc = (p['descuento'] ?? 0).toDouble();
+        double precioFinal = precioOriginal - (precioOriginal * (desc / 100));
+        
+        String nombreLimpio = limpiarTexto(p['nombre'].toString().toUpperCase());
+        String descLimpia = limpiarTexto(p['descripcion']?.toString() ?? "");
+        
+        pw.MemoryImage? imgProv = imagenesPdf[p['id']];
+
+        List<Map<String, dynamic>> gruposVariantes = [];
+        if (p['variantes'] != null && p['variantes'].toString().length > 5) {
+          try {
+            var dec = jsonDecode(p['variantes']);
+            if (dec.isNotEmpty && !dec[0].containsKey('grupo')) {
+              List<Map<String, dynamic>> opcionesConIndice = [];
+              for (int oIdx = 0; oIdx < dec.length; oIdx++) {
+                var o = dec[oIdx];
+                if ((o['activo'] ?? true) == true) {
+                  opcionesConIndice.add({
+                    'nombre': o['nombre'],
+                    'gIdx': 0,
+                    'oIdx': oIdx,
+                  });
+                }
+              }
+              if (opcionesConIndice.isNotEmpty) {
+                gruposVariantes.add({'grupo': 'Opciones', 'opciones': opcionesConIndice});
+              }
+            } else {
+              for (int gIdx = 0; gIdx < dec.length; gIdx++) {
+                var g = dec[gIdx];
+                List<Map<String, dynamic>> opcionesConIndice = [];
+                var opcionesList = g['opciones'] as List;
+                for (int oIdx = 0; oIdx < opcionesList.length; oIdx++) {
+                  var o = opcionesList[oIdx];
+                  if ((o['activo'] ?? true) == true) {
+                    opcionesConIndice.add({
+                      'nombre': o['nombre'],
+                      'gIdx': gIdx,
+                      'oIdx': oIdx,
+                    });
+                  }
+                }
+                if (opcionesConIndice.isNotEmpty) {
+                  gruposVariantes.add({'grupo': g['grupo'], 'opciones': opcionesConIndice});
+                }
+              }
+            }
+          } catch (e) {}
+        }
+
+        return pw.Container(
+          width: anchoCarta,
+          decoration: pw.BoxDecoration(
+            color: PdfColors.white,
+            borderRadius: const pw.BorderRadius.all(pw.Radius.circular(10)),
+            border: pw.Border.all(color: PdfColors.grey300, width: 1),
+          ),
+          child: pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              pw.Container(
+                height: 175, // Imagen grande para máxima visibilidad
+                width: double.infinity,
+                padding: const pw.EdgeInsets.all(5),
+                decoration: const pw.BoxDecoration(
+                  color: PdfColors.grey200,
+                  borderRadius: pw.BorderRadius.vertical(top: pw.Radius.circular(9)),
+                ),
+                child: imgProv == null 
+                  ? pw.Center(child: pw.Text("SIN IMAGEN", style: const pw.TextStyle(color: PdfColors.grey500, fontSize: 11))) 
+                  : pw.Center(child: pw.Image(imgProv, fit: pw.BoxFit.contain)),
+              ),
+              
+              pw.Divider(height: 1, thickness: 1, color: PdfColors.grey300), 
+
+              pw.Container(
+                padding: const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                child: pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: [
+                    pw.Text(
+                      nombreLimpio, 
+                      style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 13, color: PdfColors.black), // Título ampliado
+                      maxLines: 2
+                    ),
+                    pw.SizedBox(height: 3),
+                    
+                    if (descLimpia.isNotEmpty) ...[
+                      pw.Text(descLimpia, style: const pw.TextStyle(fontSize: 8.5, color: PdfColors.grey700), maxLines: 2),
+                      pw.SizedBox(height: 4),
+                    ] else ...[
+                      pw.SizedBox(height: 3),
+                    ],
+
+                    if (gruposVariantes.isNotEmpty) ...[
+                      ...gruposVariantes.map((g) {
+                        String nombreGrupo = g['grupo'].toString().trim();
+                        String labelGrupo = (nombreGrupo.toLowerCase() == 'opciones' || nombreGrupo.isEmpty)
+                            ? "Disponibles:"
+                            : "Disponible en ${limpiarTexto(nombreGrupo)}:";
+
+                        return pw.Column(
+                          crossAxisAlignment: pw.CrossAxisAlignment.start,
+                          children: [
+                            pw.Text(
+                              labelGrupo,
+                              style: pw.TextStyle(fontSize: 7.5, fontWeight: pw.FontWeight.bold, color: PdfColors.grey600)
+                            ),
+                            pw.SizedBox(height: 3),
+                            pw.Wrap(
+                              spacing: 5,
+                              runSpacing: 5,
+                              children: (g['opciones'] as List).map((o) {
+                                int gIndex = o['gIdx'];
+                                int oIndex = o['oIdx'];
+                                pw.MemoryImage? imgVar = imagenesVariantesPdf["${p['id']}_${gIndex}_$oIndex"];
+
+                                return pw.Container(
+                                  padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                  decoration: pw.BoxDecoration(
+                                    color: PdfColors.grey100,
+                                    border: pw.Border.all(color: PdfColors.grey300),
+                                    borderRadius: const pw.BorderRadius.all(pw.Radius.circular(4))
+                                  ),
+                                  child: pw.Row(
+                                    mainAxisSize: pw.MainAxisSize.min,
+                                    children: [
+                                      if (imgVar != null) ...[
+                                        pw.Container(
+                                          width: 22, // Variante redonda grande
+                                          height: 22,
+                                          margin: const pw.EdgeInsets.only(right: 4),
+                                          child: pw.ClipOval(
+                                            child: pw.Image(imgVar, fit: pw.BoxFit.cover),
+                                          ),
+                                        ),
+                                      ],
+                                      pw.Text(
+                                        limpiarTexto(o['nombre'].toString()), 
+                                        style: pw.TextStyle(fontSize: 9.5, color: PdfColors.grey800, fontWeight: pw.FontWeight.bold) // Texto de variante ampliado
+                                      )
+                                    ]
+                                  )
+                                );
+                              }).toList()
+                            ),
+                            pw.SizedBox(height: 4),
+                          ]
+                        );
+                      }).toList(),
+                    ],
+                    
+                    pw.SizedBox(height: 4),
+                    
+                    if (desc > 0) ...[
+                      pw.Row(
+                        children: [
+                          pw.Text("\$${precioOriginal.toStringAsFixed(0)}", style: const pw.TextStyle(fontSize: 9.5, color: PdfColors.red, decoration: pw.TextDecoration.lineThrough)),
+                          pw.SizedBox(width: 4),
+                          pw.Container(
+                            padding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                            decoration: const pw.BoxDecoration(color: PdfColors.red, borderRadius: pw.BorderRadius.all(pw.Radius.circular(3))),
+                            child: pw.Text("-$desc%", style: pw.TextStyle(color: PdfColors.white, fontSize: 7.5, fontWeight: pw.FontWeight.bold))
+                          ),
+                        ]
+                      ),
+                      pw.SizedBox(height: 1),
+                    ],
+                    pw.Text("\$${precioFinal.toStringAsFixed(0)}", style: pw.TextStyle(fontSize: 17, fontWeight: pw.FontWeight.bold, color: PdfColors.green700)), // Precio final destacado
+                  ]
+                )
+              )
+            ]
+          )
+        );
+      }
+
+      // 8. Construcción del PDF con control de títulos huérfanos mediante filas de tabla
       pdf.addPage(
         pw.MultiPage(
           pageFormat: PdfPageFormat.a4,
@@ -894,155 +1141,228 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
             ]
           ),
           build: (context) {
-            return [
-              pw.Wrap(
-                spacing: espacioEntreCartas,
-                runSpacing: espacioEntreCartas,
-                children: productos.map((p) {
-                  double precioOriginal = (p['precio_venta'] as num).toDouble();
-                  double desc = (p['descuento'] ?? 0).toDouble();
-                  double precioFinal = precioOriginal - (precioOriginal * (desc / 100));
-                  
-                  String nombreLimpio = limpiarTexto(p['nombre'].toString().toUpperCase());
-                  String descLimpia = limpiarTexto(p['descripcion']?.toString() ?? "");
-                  
-                  pw.MemoryImage? imgProv = imagenesPdf[p['id']];
+            List<pw.Widget> contenidoCatalog = [];
+            bool tieneCategorias = categorias.isNotEmpty;
 
-                  // EXTRAER VARIANTES ACTIVAS
-                  List<Map<String, dynamic>> gruposVariantes = [];
-                  if (p['variantes'] != null && p['variantes'].toString().length > 5) {
-                    try {
-                      var dec = jsonDecode(p['variantes']);
-                      if (dec.isNotEmpty && !dec[0].containsKey('grupo')) {
-                        var opcionesActivas = dec.where((o) => (o['activo'] ?? true) == true).toList();
-                        if (opcionesActivas.isNotEmpty) {
-                          gruposVariantes.add({'grupo': 'Opciones', 'opciones': opcionesActivas});
-                        }
-                      } else {
-                        for (var g in dec) {
-                          var opcionesActivas = (g['opciones'] as List).where((o) => (o['activo'] ?? true) == true).toList();
-                          if (opcionesActivas.isNotEmpty) {
-                            gruposVariantes.add({'grupo': g['grupo'], 'opciones': opcionesActivas});
-                          }
-                        }
-                      }
-                    } catch (e) {}
-                  }
+            // Secciones con productos por categoría
+            for (var cat in categorias) {
+              String nombreCat = cat['nombre'];
+              List<Map<String, dynamic>> productosDeCat = productosAgrupados[nombreCat] ?? [];
+              
+              if (productosDeCat.isNotEmpty) {
+                // Separamos los primeros 2 productos (primera fila)
+                List<Map<String, dynamic>> primeraFila = productosDeCat.take(2).toList();
+                List<Map<String, dynamic>> restoProductos = productosDeCat.skip(2).toList();
 
-                  return pw.Container(
-                    width: anchoCarta,
-                    decoration: pw.BoxDecoration(
-                      color: PdfColors.white,
-                      borderRadius: const pw.BorderRadius.all(pw.Radius.circular(10)),
-                      border: pw.Border.all(color: PdfColors.grey300, width: 1),
-                    ),
-                    child: pw.Column(
-                      crossAxisAlignment: pw.CrossAxisAlignment.start,
-                      children: [
-                        // 🔥 IMAGEN TIPO ESTUDIO (Altura perfecta a 165 con fondo vitrina gris claro)
-                        pw.Container(
-                          height: 165, 
-                          width: double.infinity,
-                          padding: const pw.EdgeInsets.all(6),
-                          decoration: const pw.BoxDecoration(
-                            color: PdfColors.grey200, // <--- Fondo gris enmarca perfectamente la foto sin perderse
-                            borderRadius: pw.BorderRadius.vertical(top: pw.Radius.circular(9)),
-                          ),
-                          child: imgProv == null 
-                            ? pw.Center(child: pw.Text("SIN IMAGEN", style: const pw.TextStyle(color: PdfColors.grey500, fontSize: 11))) 
-                            : pw.Center(child: pw.Image(imgProv, fit: pw.BoxFit.contain)),
-                        ),
-                        
-                        pw.Divider(height: 1, thickness: 1, color: PdfColors.grey300), 
-
-                        // DETALLES Y VARIANTES (Optimizado a 8px vertical para un ajuste perfecto)
-                        pw.Container(
-                          padding: const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                          child: pw.Column(
+                // Usamos un Table con un TableRow para evitar la separación entre el título y la primera fila
+                contenidoCatalog.add(
+                  pw.Table(
+                    children: [
+                      pw.TableRow(
+                        children: [
+                          pw.Column(
                             crossAxisAlignment: pw.CrossAxisAlignment.start,
                             children: [
-                              pw.Text(
-                                nombreLimpio, 
-                                style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 12, color: PdfColors.black), 
-                                maxLines: 2
-                              ),
-                              pw.SizedBox(height: 4),
-                              
-                              if (descLimpia.isNotEmpty) ...[
-                                pw.Text(descLimpia, style: const pw.TextStyle(fontSize: 9, color: PdfColors.grey700), maxLines: 2), 
-                                pw.SizedBox(height: 6),
-                              ] else ...[
-                                pw.SizedBox(height: 4),
-                              ],
-
-                              // RENDERIZAR CAPSULITAS DE VARIANTES
-                              if (gruposVariantes.isNotEmpty) ...[
-                                ...gruposVariantes.map((g) {
-                                  String nombreGrupo = g['grupo'].toString().trim();
-                                  String labelGrupo = (nombreGrupo.toLowerCase() == 'opciones' || nombreGrupo.isEmpty)
-                                      ? "Disponibles:"
-                                      : "Disponible en ${limpiarTexto(nombreGrupo)}:";
-
-                                  return pw.Column(
-                                    crossAxisAlignment: pw.CrossAxisAlignment.start,
-                                    children: [
-                                      pw.Text(
-                                        labelGrupo,
-                                        style: pw.TextStyle(fontSize: 8, fontWeight: pw.FontWeight.bold, color: PdfColors.grey600)
-                                      ),
-                                      pw.SizedBox(height: 3),
-                                      pw.Wrap(
-                                        spacing: 4,
-                                        runSpacing: 4,
-                                        children: (g['opciones'] as List).map((o) {
-                                          return pw.Container(
-                                            padding: const pw.EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                                            decoration: pw.BoxDecoration(
-                                              color: PdfColors.grey100,
-                                              border: pw.Border.all(color: PdfColors.grey300),
-                                              borderRadius: const pw.BorderRadius.all(pw.Radius.circular(4))
-                                            ),
-                                            child: pw.Text(
-                                              limpiarTexto(o['nombre'].toString()), 
-                                              style: const pw.TextStyle(fontSize: 7, color: PdfColors.grey800)
-                                            )
-                                          );
-                                        }).toList()
-                                      ),
-                                      pw.SizedBox(height: 6),
-                                    ]
-                                  );
-                                }).toList(),
-                              ],
-                              
-                              pw.Divider(color: PdfColors.grey200, thickness: 1),
-                              pw.SizedBox(height: 4),
-                              
-                              // PRECIOS
-                              if (desc > 0) ...[
-                                pw.Row(
-                                  children: [
-                                    pw.Text("\$${precioOriginal.toStringAsFixed(0)}", style: const pw.TextStyle(fontSize: 10, color: PdfColors.red, decoration: pw.TextDecoration.lineThrough)),
-                                    pw.SizedBox(width: 4),
-                                    pw.Container(
-                                      padding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 1.5),
-                                      decoration: const pw.BoxDecoration(color: PdfColors.red, borderRadius: pw.BorderRadius.all(pw.Radius.circular(3))),
-                                      child: pw.Text("-$desc%", style: pw.TextStyle(color: PdfColors.white, fontSize: 8, fontWeight: pw.FontWeight.bold))
-                                    ),
-                                  ]
+                              // Título de Categoría
+                              pw.Container(
+                                margin: const pw.EdgeInsets.only(top: 20, bottom: 10),
+                                width: double.infinity,
+                                decoration: const pw.BoxDecoration(
+                                  border: pw.Border(
+                                    left: pw.BorderSide(color: PdfColors.blue900, width: 4),
+                                  ),
                                 ),
-                                pw.SizedBox(height: 2),
-                              ],
-                              pw.Text("\$${precioFinal.toStringAsFixed(0)}", style: pw.TextStyle(fontSize: 17, fontWeight: pw.FontWeight.bold, color: PdfColors.green700)),
+                                padding: const pw.EdgeInsets.only(left: 10),
+                                child: pw.Column(
+                                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                                  children: [
+                                    pw.Text(
+                                      limpiarTexto(nombreCat).toUpperCase(),
+                                      style: pw.TextStyle(
+                                        fontSize: 14, 
+                                        fontWeight: pw.FontWeight.bold, 
+                                        color: PdfColors.blue900,
+                                        letterSpacing: 1.0,
+                                      ),
+                                    ),
+                                    pw.Container(
+                                      margin: const pw.EdgeInsets.only(top: 3),
+                                      height: 1.5,
+                                      width: 40,
+                                      color: PdfColors.blue300,
+                                    )
+                                  ]
+                                )
+                              ),
+                              // Primera fila de productos anclados al título
+                              pw.Row(
+                                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                                children: [
+                                  generarTarjetaProductoPdf(primeraFila[0]),
+                                  if (primeraFila.length > 1) ...[
+                                    pw.SizedBox(width: espacioEntreCartas),
+                                    generarTarjetaProductoPdf(primeraFila[1]),
+                                  ]
+                                ]
+                              ),
                             ]
                           )
-                        )
+                        ]
+                      )
+                    ]
+                  )
+                );
+
+                // El resto de los productos se agregan en filas estructuradas de 2
+                if (restoProductos.isNotEmpty) {
+                  contenidoCatalog.add(pw.SizedBox(height: espacioEntreCartas));
+                  for (int i = 0; i < restoProductos.length; i += 2) {
+                    var item1 = restoProductos[i];
+                    var item2 = (i + 1 < restoProductos.length) ? restoProductos[i + 1] : null;
+
+                    contenidoCatalog.add(
+                      pw.Row(
+                        crossAxisAlignment: pw.CrossAxisAlignment.start,
+                        children: [
+                          generarTarjetaProductoPdf(item1),
+                          if (item2 != null) ...[
+                            pw.SizedBox(width: espacioEntreCartas),
+                            generarTarjetaProductoPdf(item2),
+                          ] else ...[
+                            pw.SizedBox(width: anchoCarta), 
+                          ]
+                        ]
+                      )
+                    );
+
+                    if (i + 2 < restoProductos.length) {
+                      contenidoCatalog.add(pw.SizedBox(height: espacioEntreCartas));
+                    }
+                  }
+                }
+              }
+            }
+
+            // Sección de otros productos sin categoría asignada
+            List<Map<String, dynamic>> sinCatList = productosAgrupados['_sin_categoria'] ?? [];
+            if (sinCatList.isNotEmpty) {
+              if (tieneCategorias) {
+                List<Map<String, dynamic>> primeraFila = sinCatList.take(2).toList();
+                List<Map<String, dynamic>> restoProductos = sinCatList.skip(2).toList();
+
+                contenidoCatalog.add(
+                  pw.Table(
+                    children: [
+                      pw.TableRow(
+                        children: [
+                          pw.Column(
+                            crossAxisAlignment: pw.CrossAxisAlignment.start,
+                            children: [
+                              // Título OTROS PRODUCTOS
+                              pw.Container(
+                                margin: const pw.EdgeInsets.only(top: 20, bottom: 10),
+                                width: double.infinity,
+                                decoration: const pw.BoxDecoration(
+                                  border: pw.Border(
+                                    left: pw.BorderSide(color: PdfColors.grey800, width: 4),
+                                  ),
+                                ),
+                                padding: const pw.EdgeInsets.only(left: 10),
+                                child: pw.Column(
+                                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                                  children: [
+                                    pw.Text(
+                                      "OTROS PRODUCTOS",
+                                      style: pw.TextStyle(
+                                        fontSize: 14, 
+                                        fontWeight: pw.FontWeight.bold, 
+                                        color: PdfColors.black,
+                                        letterSpacing: 1.0,
+                                      ),
+                                    ),
+                                    pw.Container(
+                                      margin: const pw.EdgeInsets.only(top: 3),
+                                      height: 1.5,
+                                      width: 40,
+                                      color: PdfColors.grey500,
+                                    )
+                                  ]
+                                )
+                              ),
+                              // Primera fila anclada
+                              pw.Row(
+                                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                                children: [
+                                  generarTarjetaProductoPdf(primeraFila[0]),
+                                  if (primeraFila.length > 1) ...[
+                                    pw.SizedBox(width: espacioEntreCartas),
+                                    generarTarjetaProductoPdf(primeraFila[1]),
+                                  ]
+                                ]
+                              ),
+                            ]
+                          )
+                        ]
+                      )
+                    ]
+                  )
+                );
+
+                if (restoProductos.isNotEmpty) {
+                  contenidoCatalog.add(pw.SizedBox(height: espacioEntreCartas));
+                  for (int i = 0; i < restoProductos.length; i += 2) {
+                    var item1 = restoProductos[i];
+                    var item2 = (i + 1 < restoProductos.length) ? restoProductos[i + 1] : null;
+
+                    contenidoCatalog.add(
+                      pw.Row(
+                        crossAxisAlignment: pw.CrossAxisAlignment.start,
+                        children: [
+                          generarTarjetaProductoPdf(item1),
+                          if (item2 != null) ...[
+                            pw.SizedBox(width: espacioEntreCartas),
+                            generarTarjetaProductoPdf(item2),
+                          ] else ...[
+                            pw.SizedBox(width: anchoCarta),
+                          ]
+                        ]
+                      )
+                    );
+
+                    if (i + 2 < restoProductos.length) {
+                      contenidoCatalog.add(pw.SizedBox(height: espacioEntreCartas));
+                    }
+                  }
+                }
+              } else {
+                // Si no hay categorías en la app, todo va directo
+                for (int i = 0; i < sinCatList.length; i += 2) {
+                  var item1 = sinCatList[i];
+                  var item2 = (i + 1 < sinCatList.length) ? sinCatList[i + 1] : null;
+
+                  contenidoCatalog.add(
+                    pw.Row(
+                      crossAxisAlignment: pw.CrossAxisAlignment.start,
+                      children: [
+                        generarTarjetaProductoPdf(item1),
+                        if (item2 != null) ...[
+                          pw.SizedBox(width: espacioEntreCartas),
+                          generarTarjetaProductoPdf(item2),
+                        ] else ...[
+                          pw.SizedBox(width: anchoCarta),
+                        ]
                       ]
                     )
                   );
-                }).toList(),
-              )
-            ];
+
+                  if (i + 2 < sinCatList.length) {
+                    contenidoCatalog.add(pw.SizedBox(height: espacioEntreCartas));
+                  }
+                }
+              }
+            }
+
+            return contenidoCatalog;
           }
         )
       );
@@ -1274,13 +1594,15 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                 await prefs.remove("descarga_completa_${user.uid}");
                 await prefs.remove('ultima_mod_productos_local_${user.uid}');
                 await prefs.remove('ultima_mod_pedidos_local_${user.uid}');
+                await prefs.remove('ultima_mod_categorias_local_${user.uid}');
                 debugPrint("🗑️ Banderas eliminadas para el usuario ${user.uid}");
               }
               Navigator.pop(ctx);
-              if (!_esPremium) {
-                await DBHelper.instance.limpiarTablas();
-                await prefs.remove('datos_descargados');
-              }
+              
+              // Limpieza local de tablas
+              await DBHelper.instance.limpiarTablas();
+              await prefs.remove('datos_descargados');
+              
               await ServicioAuth.cerrarSesion();
               if (mounted) {
                 Navigator.pushAndRemoveUntil(
@@ -2402,24 +2724,28 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                           ),
                           if (espacioDisponible > 300)
                             GestureDetector(
-                              behavior: HitTestBehavior.opaque, // ← evita que se "escape" el toque
+                              behavior: HitTestBehavior.opaque,
+                              onVerticalDragStart: (_) {
+                                setState(() {
+                                  _isDraggingCarrito = true;
+                                });
+                              },
                               onVerticalDragUpdate: (details) {
                                 setState(() {
                                   double maxAllowedH = constraints.maxHeight - 220.0;
-                                  // Aplicamos resistencia cuando está en los extremos
                                   double nuevaAltura = _alturaCarrito - details.delta.dy;
                                   if (nuevaAltura < _minAltura) {
-                                    nuevaAltura = _minAltura; // tope duro en 0
+                                    nuevaAltura = _minAltura;
                                   } else if (nuevaAltura > maxAllowedH) {
-                                    nuevaAltura = maxAllowedH; // tope duro en máximo
+                                    nuevaAltura = maxAllowedH;
                                   }
                                   _alturaCarrito = nuevaAltura;
                                 });
                               },
                               onVerticalDragEnd: (details) {
-                                // Snap: si está muy cerca de 0, cierra del todo; si está muy cerca del max, abre del todo
                                 double maxAllowedH = constraints.maxHeight - 220.0;
                                 setState(() {
+                                  _isDraggingCarrito = false;
                                   if (_alturaCarrito < 40) _alturaCarrito = _minAltura;
                                   if (_alturaCarrito > maxAllowedH - 40) _alturaCarrito = maxAllowedH;
                                 });
@@ -2441,7 +2767,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                               ),
                             ),
                             AnimatedContainer(
-                              duration: const Duration(milliseconds: 120), // ← suaviza el movimiento final
+                              duration: _isDraggingCarrito ? Duration.zero : const Duration(milliseconds: 200),
                               curve: Curves.easeOut,
                               height: alturaRenderCarrito,
                               child: _buildCarritoUI(total, esHorizontal)
@@ -3105,9 +3431,8 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     if (_estaArrastrandoCategoria) {
       setState(() {
         _estaArrastrandoCategoria = false;
-        for (var c in categorias) {
-          categoriasExpandidas[c['nombre']] = true;
-        }
+        // Restauramos los estados de expansión exactamente como estaban antes de arrastrar
+        categoriasExpandidas = Map<String, bool>.from(_categoriasExpandidasBackup);
       });
     }
   }
@@ -3339,135 +3664,129 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  // 🔥 BANNER DE CATEGORÍA ULTRA COMPACTO (Da prioridad al texto)
-                  Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                    decoration: BoxDecoration(
-                      // 🔥 Cambiado de Colors.white a un tono azul-grisáceo suave en modo claro
-                      color: isOscuro ? const Color.fromARGB(255, 33, 40, 63) : const Color.fromARGB(84, 168, 209, 251), 
-                      borderRadius: BorderRadius.circular(16),
-                      boxShadow: [
-                        if (!isOscuro) 
-                          BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 8, offset: const Offset(0, 3))
-                      ],
-                      // 🔥 Borde celeste fino en modo claro para enmarcar el banner perfectamente
-                      border: Border.all(color: isOscuro ? const Color.fromARGB(213, 49, 162, 227) : const Color.fromARGB(255, 103, 153, 234)), 
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-                      child: Row(
-                        children: [
-                          Icon(isExpanded ? Icons.folder_open_rounded : Icons.folder_rounded, color: isActivo ? (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)) : Colors.grey, size: 26),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              nombre, 
-                              style: TextStyle(fontWeight: FontWeight.w900, fontSize: 15, color: isActivo ? (isOscuro ? Colors.white : Colors.black87) : Colors.grey),
-                              maxLines: 2, // Límite elegante de 2 líneas
-                              overflow: TextOverflow.ellipsis,
+                  // 🔥 BANNER DE CATEGORÍA ULTRA COMPACTO (Tocar el cuadro completo para contraer/expandir)
+                  GestureDetector(
+                    onTap: () {
+                      setState(() {
+                        categoriasExpandidas[nombre] = !isExpanded;
+                      });
+                    },
+                    child: Container(
+                      margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: isOscuro ? const Color.fromARGB(255, 33, 40, 63) : const Color.fromARGB(84, 168, 209, 251), 
+                        borderRadius: BorderRadius.circular(16),
+                        boxShadow: [
+                          if (!isOscuro) 
+                            BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 8, offset: const Offset(0, 3))
+                        ],
+                        border: Border.all(color: isOscuro ? const Color.fromARGB(213, 49, 162, 227) : const Color.fromARGB(255, 103, 153, 234)), 
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                        child: Row(
+                          children: [
+                            Icon(isExpanded ? Icons.folder_open_rounded : Icons.folder_rounded, color: isActivo ? (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)) : Colors.grey, size: 26),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                nombre, 
+                                style: TextStyle(fontWeight: FontWeight.w900, fontSize: 15, color: isActivo ? (isOscuro ? Colors.white : Colors.black87) : Colors.grey),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ),
-                          ),
-                          const SizedBox(width: 4),
-                          Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              if (widget.esAdmin) ...[
-                                // Switch empaquetado
-                                SizedBox(
-                                  height: 24,
-                                  width: 38,
-                                  child: Transform.scale(
-                                    scale: 0.7, // Más pequeño
-                                    child: Switch(
-                                      value: isActivo, 
-                                      activeColor: Colors.green, 
-                                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap, 
-                                      onChanged: (v) => _cambiarEstadoCategoria(cat['id'], v)
+                            const SizedBox(width: 4),
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (widget.esAdmin) ...[
+                                  // Switch empaquetado
+                                  SizedBox(
+                                    height: 24,
+                                    width: 38,
+                                    child: Transform.scale(
+                                      scale: 0.7,
+                                      child: Switch(
+                                        value: isActivo, 
+                                        activeColor: Colors.green, 
+                                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap, 
+                                        onChanged: (v) => _cambiarEstadoCategoria(cat['id'], v)
+                                      ),
                                     ),
                                   ),
-                                ),
-                                const SizedBox(width: 6),
-                                
-                                // Menú empaquetado
-                                SizedBox(
-                                  width: 24,
-                                  child: PopupMenuButton<String>(
-                                    icon: const Icon(Icons.more_vert, color: Colors.grey, size: 22),
-                                    padding: EdgeInsets.zero,
-                                    constraints: const BoxConstraints(), // Quita el margen obligatorio
-                                    onSelected: (val) {
-                                      if (val == 'edit') {
-                                        _mostrarModalCrearCategoria(categoriaAEditar: cat);
-                                      } else if (val == 'delete') {
-                                        _eliminarCategoria(cat['id'], nombre);
+                                  const SizedBox(width: 6),
+                                  
+                                  // Menú empaquetado
+                                  SizedBox(
+                                    width: 24,
+                                    child: PopupMenuButton<String>(
+                                      icon: const Icon(Icons.more_vert, color: Colors.grey, size: 22),
+                                      padding: EdgeInsets.zero,
+                                      constraints: const BoxConstraints(),
+                                      onSelected: (val) {
+                                        if (val == 'edit') {
+                                          _mostrarModalCrearCategoria(categoriaAEditar: cat);
+                                        } else if (val == 'delete') {
+                                          _eliminarCategoria(cat['id'], nombre);
+                                        }
+                                      },
+                                      itemBuilder: (ctx) => [
+                                        const PopupMenuItem(value: 'edit', child: Row(children: [Icon(Icons.edit, size: 16, color: Colors.orangeAccent), SizedBox(width: 8), Text("Editar", style: TextStyle(fontSize: 13))])),
+                                        const PopupMenuItem(value: 'delete', child: Row(children: [Icon(Icons.delete_outline, size: 16, color: Colors.redAccent), SizedBox(width: 8), Text("Eliminar", style: TextStyle(fontSize: 13))])),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                                const SizedBox(width: 4),
+                                if (widget.esAdmin) ...[
+                                  const SizedBox(width: 2),
+                                  // Arrastre optimizado que guarda el estado de expansión previo antes de contraer
+                                  Listener(
+                                    onPointerDown: (_) {
+                                      _dragTriggered = false;
+                                      _dragCollapseTimer?.cancel();
+                                      _dragCollapseTimer = Timer(const Duration(milliseconds: 180), () {
+                                        _dragTriggered = true;
+                                        if (mounted) {
+                                          setState(() {
+                                            _estaArrastrandoCategoria = true;
+                                            // Respaldamos el estado original antes de contraer todas
+                                            _categoriasExpandidasBackup = Map<String, bool>.from(categoriasExpandidas);
+                                            for (var c in categorias) {
+                                              categoriasExpandidas[c['nombre']] = false;
+                                            }
+                                          });
+                                        }
+                                      });
+                                    },
+                                    onPointerUp: (_) {
+                                      _dragCollapseTimer?.cancel();
+                                      if (!_dragTriggered) {
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          const SnackBar(
+                                            content: Text("Mantén presionado para arrastrar"),
+                                            duration: Duration(milliseconds: 3000),
+                                          ),
+                                        );
                                       }
                                     },
-                                    itemBuilder: (ctx) => [
-                                      const PopupMenuItem(value: 'edit', child: Row(children: [Icon(Icons.edit, size: 16, color: Colors.orangeAccent), SizedBox(width: 8), Text("Editar", style: TextStyle(fontSize: 13))])),
-                                      const PopupMenuItem(value: 'delete', child: Row(children: [Icon(Icons.delete_outline, size: 16, color: Colors.redAccent), SizedBox(width: 8), Text("Eliminar", style: TextStyle(fontSize: 13))])),
-                                    ],
-                                  ),
-                                ),
-                              ],
-                              
-                              const SizedBox(width: 4),
-                              
-                              // Flecha colapsable empaquetada
-                              InkWell(
-                                onTap: () => setState(() => categoriasExpandidas[nombre] = !isExpanded),
-                                borderRadius: BorderRadius.circular(15),
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(horizontal: 4.0, vertical: 6.0),
-                                  child: Icon(isExpanded ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down, color: Colors.grey, size: 24),
-                                ),
-                              ),
-                              
-                              if (widget.esAdmin) ...[
-                                const SizedBox(width: 2),
-                                // 🔥 Arrastre optimizado con temporizador para evitar colapsar en toques rápidos
-                                Listener(
-                                  onPointerDown: (_) {
-                                    _dragTriggered = false;
-                                    _dragCollapseTimer?.cancel();
-                                    _dragCollapseTimer = Timer(const Duration(milliseconds: 180), () {
-                                      _dragTriggered = true;
-                                      if (mounted) {
-                                        setState(() {
-                                          _estaArrastrandoCategoria = true;
-                                          for (var c in categorias) {
-                                            categoriasExpandidas[c['nombre']] = false;
-                                          }
-                                        });
-                                      }
-                                    });
-                                  },
-                                  onPointerUp: (_) {
-                                    _dragCollapseTimer?.cancel();
-                                    if (!_dragTriggered) {
-                                      ScaffoldMessenger.of(context).showSnackBar(
-                                        const SnackBar(
-                                          content: Text("Mantén presionado para arrastrar"),
-                                          duration: Duration(milliseconds: 3000),
-                                        ),
-                                      );
-                                    }
-                                  },
-                                  child: ReorderableDragStartListener(
-                                    index: globalIndex,
-                                    child: const Padding(
-                                      padding: EdgeInsets.only(left: 4.0, right: 2.0, top: 6.0, bottom: 6.0),
-                                      child: Icon(Icons.swap_vert_rounded, color: Colors.grey, size: 24),
+                                    child: ReorderableDragStartListener(
+                                      index: globalIndex,
+                                      child: const Padding(
+                                        padding: EdgeInsets.only(left: 4.0, right: 2.0, top: 6.0, bottom: 6.0),
+                                        child: Icon(Icons.swap_vert_rounded, color: Colors.grey, size: 24),
+                                      ),
                                     ),
                                   ),
-                                ),
+                                ],
                               ],
-                            ],
-                          ),
-                        ],
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
-                  
                   if (isExpanded) ...[
                     if (grupos[nombre]!.isEmpty)
                       const Padding(padding: EdgeInsets.all(20), child: Center(child: Text("Sin productos", style: TextStyle(color: Colors.grey, fontSize: 12))))

@@ -773,16 +773,20 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
 
               if (user != null) {
                 await prefs.remove("descarga_completa_${user.uid}");
+                await prefs.remove('ultima_mod_productos_local_${user.uid}');
+                await prefs.remove('ultima_mod_pedidos_local_${user.uid}');
+                await prefs.remove('ultima_mod_categorias_local_${user.uid}');
               }
               await prefs.remove('admin_password');
               await prefs.remove('admin_pregunta');
               await prefs.remove('admin_respuesta');
               await prefs.remove('admin_biometria_activa');
               Navigator.pop(ctx);
-              if (!_esPremium) {
-                await DBHelper.instance.limpiarTablas();
-                await prefs.remove('datos_descargados');
-              }
+              
+              // Se limpian siempre las tablas locales para garantizar una sincronización limpia al volver a ingresar
+              await DBHelper.instance.limpiarTablas();
+              await prefs.remove('datos_descargados');
+              
               await ServicioAuth.cerrarSesion();
               await _cargarConfig();
               if (mounted) setState(() {});

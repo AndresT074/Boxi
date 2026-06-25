@@ -1149,30 +1149,30 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                           minimumSize: const Size(double.infinity, 50),
                           shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(15))),
-                          onPressed: () async { 
-                            for (var item in detalles) {
-                              int idDetalle = item['id'] as int;
-                              if (!descCtrls.containsKey(idDetalle)) {
-                                descCtrls[idDetalle] = TextEditingController(
-                                    text: formatearInicial(item['descuento'] ?? 0));
-                              }
-                              double descActual =
+                      onPressed: () async { 
+                        for (var item in detalles) {
+                          int idDetalle = item['id'] as int;
+                          if (!descCtrls.containsKey(idDetalle)) {
+                            descCtrls[idDetalle] = TextEditingController(
+                                text: formatearInicial(item['descuento'] ?? 0));
+                          }
+                          double descActual =
                               double.tryParse(descCtrls[idDetalle]!.text) ?? 0;
-                              await _actualizarDescuentoDetalle(
-                                  item, pedId, descActual, setSt, (l) => detalles = l);
-                              }
-                              double valFinalDomi = double.tryParse(domiCtrl.text) ?? 0;
-                              await _actualizarDomicilio(pedId, valFinalDomi); 
-                              
-                              if (mounted) {
-                                Navigator.pop(ctx);
-                                await _cargar(); 
-                              }
-                            },
-                            child: const Text("GUARDAR CAMBIOS",
-                                style: TextStyle(
-                                    color: Colors.white, fontWeight: FontWeight.bold)),
-                        ),
+                          await _actualizarDescuentoDetalle(
+                              item, pedId, descActual, setSt, (l) => detalles = l);
+                        }
+                        double valFinalDomi = double.tryParse(domiCtrl.text) ?? 0;
+                        await _actualizarDomicilio(pedId, valFinalDomi); // Esto internamente recalcula e invalida la caché
+                        
+                        if (mounted) {
+                          Navigator.pop(ctx);
+                          await _cargar(); // 🔥 Recarga el listado general con la caché limpia
+                        }
+                      },
+                      child: const Text("GUARDAR CAMBIOS",
+                          style: TextStyle(
+                              color: Colors.white, fontWeight: FontWeight.bold)),
+                    ),
                   ],
                 ),
               ),
@@ -1545,34 +1545,35 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
   }
 
   Future<void> _recalcularTotal(int pedId) async {
-    final db = await DBHelper.instance.database;
-    var pedData = await db.query('pedidos',
-        columns: ['valor_domicilio'], where: 'id = ?', whereArgs: [pedId]);
-    if (pedData.isEmpty) return;
-    double domVal = (pedData.first['valor_domicilio'] ?? 0.0) as double;
-    var res = await db.rawQuery('''
-      SELECT SUM(subtotal) as total_prods,
-             SUM(subtotal - (cantidad * COALESCE((SELECT precio_compra FROM productos WHERE id = producto_id), 0))) as ganancia
-      FROM detalle_pedidos WHERE pedido_id = $pedId
-    ''');
-    double tProds = (res.first['total_prods'] as num?)?.toDouble() ?? 0.0;
-    double g = (res.first['ganancia'] as num?)?.toDouble() ?? 0.0;
-    double totalFinal = tProds + domVal;
-    await db.update(
-        'pedidos',
-        {
-          'total_venta': totalFinal,
-          'ganancia_total': g,
-          'valor_domicilio': domVal,
-          'ultima_modificacion': DateTime.now().toIso8601String()
-        },
-        where: 'id = ?',
-        whereArgs: [pedId]);
+  _invalidarCache(pedId); // 🔥 CORRECCIÓN: Limpia la caché para obligar a recargar desde la BD
+  final db = await DBHelper.instance.database;
+  var pedData = await db.query('pedidos',
+      columns: ['valor_domicilio'], where: 'id = ?', whereArgs: [pedId]);
+  if (pedData.isEmpty) return;
+  double domVal = (pedData.first['valor_domicilio'] ?? 0.0) as double;
+  var res = await db.rawQuery('''
+    SELECT SUM(subtotal) as total_prods,
+           SUM(subtotal - (cantidad * COALESCE((SELECT precio_compra FROM productos WHERE id = producto_id), 0))) as ganancia
+    FROM detalle_pedidos WHERE pedido_id = $pedId
+  ''');
+  double tProds = (res.first['total_prods'] as num?)?.toDouble() ?? 0.0;
+  double g = (res.first['ganancia'] as num?)?.toDouble() ?? 0.0;
+  double totalFinal = tProds + domVal;
+  await db.update(
+      'pedidos',
+      {
+        'total_venta': totalFinal,
+        'ganancia_total': g,
+        'valor_domicilio': domVal,
+        'ultima_modificacion': DateTime.now().toIso8601String()
+      },
+      where: 'id = ?',
+      whereArgs: [pedId]);
 
-    if (_esPremium) {
-      ServicioNube.actualizarTotalesPedidoNube(pedId, totalFinal, g, domicilio: domVal);
-    }
+  if (_esPremium) {
+    ServicioNube.actualizarTotalesPedidoNube(pedId, totalFinal, g, domicilio: domVal);
   }
+}
 
   Future<void> _actualizarVistaEditor(int pedId, StateSetter setSt,
       Function(List<Map<String, dynamic>>) callback) async {
