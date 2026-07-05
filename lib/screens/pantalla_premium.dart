@@ -140,7 +140,6 @@ class _PantallaPremiumState extends State<PantallaPremium> {
         }
       }
 
-      // 2. Registrar compra globalmente
       await db.collection('compras_realizadas').doc(idTransaccion).set({
         'owner_uid': user.uid,
         'email': user.email,
@@ -149,17 +148,13 @@ class _PantallaPremiumState extends State<PantallaPremium> {
         'estado': 'completada', 
       }, SetOptions(merge: true));
 
-      // 3. Activar Premium en el perfil del usuario
       await db.collection('usuarios').doc(user.uid).set({
         'es_premium': true,
         'fecha_pago': DateTime.now().toIso8601String(),
         'order_id': idTransaccion,
-        'motivo_degradacion': FieldValue.delete(), // 🔥 Limpia cualquier rastro de reembolso anterior
+        'motivo_degradacion': FieldValue.delete(), 
       }, SetOptions(merge: true));
-
-      // 4. 🔥 SUBIDA MASIVA DE DATOS (De Local a Nube)
       await ServicioNube.sincronizarBaseDatosHaciaNube();
-
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('es_premium', true);
       await prefs.setString('order_id', idTransaccion);

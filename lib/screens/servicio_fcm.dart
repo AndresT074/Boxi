@@ -27,12 +27,8 @@ class ServicioFCM {
     if (token != null) await _guardarToken(token);
 
     FirebaseMessaging.instance.onTokenRefresh.listen(_guardarToken);
-    
-    // CUANDO LA APP ESTÁ ABIERTA EN PANTALLA:
     FirebaseMessaging.onMessage.listen((RemoteMessage message) async {
       await ServicioNotificaciones.inicializar();
-      
-      // Identificamos de qué trata la notificación
       String tipo = message.data['tipo'] ?? 'nuevo_pedido';
 
       if (tipo == 'nuevo_pedido') {

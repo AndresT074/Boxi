@@ -15,8 +15,7 @@ import 'dart:ui';
 import 'dart:io';
 import 'dart:async';
 import 'dart:math';
-import 'dart:typed_data';
-
+import 'package:path_provider/path_provider.dart';
 import 'pantalla_principal.dart';
 import 'pantalla_login.dart';
 import 'pantalla_premium.dart';
@@ -246,16 +245,27 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
     if (user != null) {
       if (mounted) setState(() => _cargandoDatos = true);
       await _cargarConfig();
-      await _sincronizacionSilenciosa(user);
-      await ServicioContrasenaAdmin.sincronizarDesdeNube(user.uid);
-      await _registrarIngresoYVerificarActualizacion();
       
-      if (mounted) setState(() => _cargandoDatos = false);
+      try {
+        await _sincronizacionSilenciosa(user);
+        await ServicioContrasenaAdmin.sincronizarDesdeNube(user.uid);
+        await _registrarIngresoYVerificarActualizacion();
+      } catch (e) {
+        debugPrint("Error en inicio: $e");
+      } finally {
+        if (mounted) setState(() => _cargandoDatos = false); // 🔥 Asegura apagar el loader siempre
+      }
     }
   }
 
   Future<void> _sincronizacionSilenciosa(User user) async {
     try {
+      // 🔥 EVITA QUE SE QUEDE CARGANDO INDEFINIDAMENTE SI NO HAY INTERNET
+      if (!await ServicioNube.tieneInternet()) {
+        debugPrint("Sin conexión a internet. Saltando sincronización silenciosa.");
+        return; 
+      }
+
       final SharedPreferences prefs = await SharedPreferences.getInstance();
       String hoy = DateTime.now().toIso8601String().substring(0, 10);
       String nombreActual =
@@ -270,15 +280,18 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
         await _cargarConfig();
       }
       _esPremium = prefs.getBool('es_premium') ?? false;
+      
+      // Eliminar campos antiguos obsoletos
       await FirebaseFirestore.instance.collection('usuarios').doc(user.uid).update({
         'plan': FieldValue.delete(),
         'fecha_ultimo_ingreso': FieldValue.delete(),
         'ultima_modificacion': FieldValue.delete(),
       });
+
       if (_esPremium) {
         String llaveDescarga = "descarga_completa_${user.uid}";
         bool yaDescargoTodo = prefs.getBool(llaveDescarga) ?? false;
-        if (!yaDescargoTodo && await ServicioNube.tieneInternet()) {
+        if (!yaDescargoTodo) {
           await ServicioNube.descargarTodoDesdeNube();
           await prefs.setBool(llaveDescarga, true);
           await prefs.setBool('primera_carga_completada_${user.uid}', true);
@@ -304,13 +317,16 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
             }
           }
         }
+        
+        // 🔥 LANZAR MIGRACIÓN AUTOMÁTICA EN INICIO PARA PREMIUMS (RÁPIDA Y SILENCIOSA)
+        await ServicioNube.migrarTodoACloudinary();
       }
       if (mounted) setState(() {});
     } catch (e) {
-      debugPrint("Error en sincronización: $e");
+      debugPrint("Error en sincronización silenciosa: $e");
     }
   }
-
+  
   Future<void> _verificarReembolsosEnSilencio() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
@@ -582,6 +598,7 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
       imageQuality: 90,
     );
     if (image == null) return;
+    
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -592,54 +609,67 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
                 child: CircularProgressIndicator(
                     strokeWidth: 2, color: Colors.white)),
             SizedBox(width: 12),
-            Text("Procesando imagen..."),
+            Text("Procesando e instalando logo..."),
           ]),
           duration: Duration(seconds: 5),
           backgroundColor: Color(0xFF0D1B2A),
         ),
       );
     }
+
     try {
-      Uint8List bytes = await image.readAsBytes();
-      if (bytes.length > 300000) {
-        try {
-          final codec = await instantiateImageCodec(
-            bytes,
-            targetWidth: 420,
-            targetHeight: 420,
-          );
-          final frame = await codec.getNextFrame();
-          final pngData = await frame.image
-              .toByteData(format: ImageByteFormat.png);
-          if (pngData != null) {
-            bytes = pngData.buffer.asUint8List();
+      String logoDest = image.path;
+
+      // 🔥 SI ES PREMIUM, SE SUBE A CLOUDINARY PARA QUE SEA LIVIANO Y SE VEA EN LA WEB
+      if (_esPremium) {
+        logoDest = await ServicioNube.subirImagenACloudinary(image.path);
+        if (logoDest.isEmpty) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).hideCurrentSnackBar();
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Error al subir el logo a la nube"), backgroundColor: Colors.red));
           }
-        } catch (_) {
+          return;
+        }
+      } else {
+        // Si es gratuito, lo copiamos a la carpeta persistente local
+        try {
+          final appDir = await getApplicationDocumentsDirectory();
+          final File tempFile = File(image.path);
+          final String fileName = "logo_${DateTime.now().millisecondsSinceEpoch}.png";
+          final File nuevaImagen = await tempFile.copy('${appDir.path}/$fileName');
+          logoDest = nuevaImagen.path;
+        } catch (e) {
+          logoDest = image.path;
         }
       }
 
-      final String base64Logo = base64Encode(bytes);
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('logo_path', base64Logo);
+      await prefs.setString('logo_path', logoDest);
 
       if (mounted) {
         ScaffoldMessenger.of(context).hideCurrentSnackBar();
         setState(() {
-          _logoPath = base64Logo;
-          _imageCached = MemoryImage(bytes);
+          _logoPath = logoDest;
+          _imageCached = logoDest.startsWith('http')
+              ? NetworkImage(logoDest)
+              : FileImage(File(logoDest)) as ImageProvider;
         });
       }
 
       if (FirebaseAuth.instance.currentUser != null) {
-        ServicioNube.actualizarPerfilNegocioNube(_nombreNegocio, base64Logo);
+        await ServicioNube.actualizarPerfilNegocioNube(_nombreNegocio, logoDest);
       }
+
+      // 🔥 RECOMPILAMOS EL CATÁLOGO WEB AUTOMÁTICAMENTE SI ES PREMIUM
+      if (_esPremium) {
+        await ServicioNube.compilarYSubirCatalogoRTDB();
+      }
+
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).hideCurrentSnackBar();
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text("Error al procesar imagen: \$e"),
-              backgroundColor: Colors.red),
+          SnackBar(content: Text("Error al procesar el logo: $e"), backgroundColor: Colors.red),
         );
       }
     }
@@ -1115,12 +1145,6 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
         // Si hay error, simplemente ignoramos y seguimos al diálogo manual
       }
     }
-
-    // SI LLEGA AQUÍ ES PORQUE:
-    // 1. La biometría estaba desactivada
-    // 2. El usuario canceló la biometría
-    // 3. El dispositivo no tiene biometría/PIN configurado
-    // 4. El sensor falló
     _abrirDialogoPasswordManual(user);
   }
 

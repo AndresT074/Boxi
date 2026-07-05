@@ -7,6 +7,9 @@ import 'package:sqflite/sqflite.dart';
 import '../database/db_helper.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
+import 'package:firebase_database/firebase_database.dart' hide Query;
+import 'package:path_provider/path_provider.dart';
 
 class ServicioNube {
   static final FirebaseFirestore _db = FirebaseFirestore.instance;
@@ -289,12 +292,6 @@ class ServicioNube {
   static Future<void> eliminarProductoNube(int id) async =>
       _eliminar(tabla: 'productos', docId: id.toString());
 
-  static Future<void> eliminarFotoVarianteNube(
-      int productoId, int gIdx, int oIdx) async {
-    String docId = '${productoId}_${gIdx}_${oIdx}';
-    await _eliminar(tabla: 'fotos_variantes', docId: docId);
-  }
-
   // ─────────────────────────────────────────────────────────────
   //  DESCARGA CON CHUNKING PARA EVITAR COLAPSO DE SQLITE
   // ─────────────────────────────────────────────────────────────
@@ -535,7 +532,6 @@ class ServicioNube {
     'detalle_pedidos',
     'reportes_guardados',
     'ajustes_capital',
-    'fotos_variantes',
     'categorias', 
   ];
 
@@ -603,17 +599,472 @@ class ServicioNube {
     } catch (_) {}
   }
 
+  static Future<String> subirImagenACloudinary(String imageSource) async {
+    if (imageSource.startsWith('http')) return imageSource; // Ya es Cloudinary
+
+    File? imageFile;
+    bool isTemp = false;
+
+    // 🔥 Si es un texto base64, lo guardamos en un archivo temporal para enviarlo
+    if (imageSource.length > 500) {
+      final tempDir = Directory.systemTemp;
+      final bytes = base64Decode(imageSource);
+      imageFile = File('${tempDir.path}/temp_up_${DateTime.now().millisecondsSinceEpoch}.png');
+      await imageFile.writeAsBytes(bytes);
+      isTemp = true;
+    } else {
+      imageFile = File(imageSource);
+    }
+
+    if (!imageFile.existsSync()) return "";
+
+    const String cloudName = 'fdvjsavu';
+    const String uploadPreset = 'boxi_fotos';
+    final url = Uri.parse('https://api.cloudinary.com/v1_1/$cloudName/image/upload');
+    
+    try {
+      final request = http.MultipartRequest('POST', url)
+        ..fields['upload_preset'] = uploadPreset
+        ..files.add(await http.MultipartFile.fromPath('file', imageFile.path));
+
+      final response = await request.send();
+      final responseData = await response.stream.bytesToString();
+      final data = jsonDecode(responseData);
+
+      if (isTemp && imageFile.existsSync()) await imageFile.delete(); // Limpiar
+
+      if (response.statusCode == 200) {
+        return data['secure_url']; 
+      }
+      return "";
+    } catch (e) {
+      return "";
+    }
+  }
+
+  static bool _migrandoACloudinary = false;
+
+  static Future<void> migrarTodoACloudinary() async {
+    final user = _auth.currentUser;
+    if (user == null) return;
+    final uid = user.uid;
+
+    final db = await DBHelper.instance.database;
+    final prefs = await SharedPreferences.getInstance();
+
+    if (_migrandoACloudinary) {
+      debugPrint("⏳ Ya hay una migración a Cloudinary activa. Bloqueando intento duplicado.");
+      return;
+    }
+
+    bool yaMigrado = prefs.getBool('migracion_cloudinary_completada_$uid') ?? false;
+    if (yaMigrado) return;
+
+    _migrandoACloudinary = true; 
+
+    try {
+      debugPrint("🚀 Iniciando migración de imágenes locales/Base64 a Cloudinary...");
+
+      final prods = await db.query('productos');
+
+      // 1. Migrar Fotos Principales de Productos
+      for (var p in prods) {
+        String foto = p['foto_path']?.toString() ?? "";
+        if (foto.isEmpty || foto.startsWith('http')) continue;
+
+        String nuevaUrl = "";
+        File? tempFile;
+
+        try {
+          if (foto.length > 500) {
+            tempFile = await _base64ATempFile(foto, "prod_${p['id']}");
+            nuevaUrl = await subirImagenACloudinary(tempFile.path);
+          } else if (File(foto).existsSync()) {
+            nuevaUrl = await subirImagenACloudinary(foto);
+          }
+
+          if (nuevaUrl.isNotEmpty) {
+            await db.update('productos', {'foto_path': nuevaUrl}, where: 'id = ?', whereArgs: [p['id']]);
+            Map<String, dynamic> pActualizado = Map.from(p)..['foto_path'] = nuevaUrl;
+            guardarProductoNube(pActualizado);
+          }
+        } catch (e) {
+          debugPrint("Error migrando foto de producto ${p['id']}: $e");
+        } finally {
+          if (tempFile != null && tempFile.existsSync()) {
+            await tempFile.delete();
+          }
+        }
+      }
+
+      // 2. Migrar Fotos de Variantes (Directo desde el JSON)
+      final prodsActualizados = await db.query('productos');
+      for (var p in prodsActualizados) {
+        String variantesJson = p['variantes']?.toString() ?? "";
+        if (variantesJson.length > 5) {
+          bool varCambiada = false;
+          List<dynamic> dec = jsonDecode(variantesJson);
+          
+          var grupos = (dec.isNotEmpty && !dec[0].containsKey('grupo')) ? [{'opciones': dec}] : dec;
+          
+          for (var g in grupos) {
+            for (var o in g['opciones']) {
+              String foto = o['foto_path']?.toString() ?? "";
+              if (foto.isEmpty || foto.startsWith('http')) continue;
+
+              String nuevaUrl = "";
+              File? tempFile;
+              try {
+                if (foto.length > 500) {
+                  tempFile = await _base64ATempFile(foto, "var_${p['id']}");
+                  nuevaUrl = await subirImagenACloudinary(tempFile.path);
+                } else if (File(foto).existsSync()) {
+                  nuevaUrl = await subirImagenACloudinary(foto);
+                }
+
+                if (nuevaUrl.isNotEmpty) {
+                  o['foto_path'] = nuevaUrl;
+                  varCambiada = true;
+                }
+              } catch (e) {
+                debugPrint("Error migrando foto de variante: $e");
+              } finally {
+                if (tempFile != null && tempFile.existsSync()) await tempFile.delete();
+              }
+            }
+          }
+
+          if (varCambiada) {
+            String nuevoJson = jsonEncode(dec);
+            await db.update('productos', {'variantes': nuevoJson}, where: 'id = ?', whereArgs: [p['id']]);
+            Map<String, dynamic> pActualizado = Map.from(p)..['variantes'] = nuevoJson;
+            guardarProductoNube(pActualizado);
+          }
+        }
+      }
+
+      // 3. Subir el super JSON unificado y limpio a RTDB
+      await compilarYSubirCatalogoRTDB();
+
+      // 4. Guardamos la bandera
+      await prefs.setBool('migracion_cloudinary_completada_$uid', true);
+      debugPrint("✅ Migración global a Cloudinary finalizada con éxito.");
+
+    } catch (e) {
+      debugPrint("❌ Error crítico en la migración a Cloudinary: $e");
+    } finally {
+      _migrandoACloudinary = false; 
+    }
+  }
+
+  static Future<File> _base64ATempFile(String b64, String prefix) async {
+    final tempDir = Directory.systemTemp;
+    final bytes = base64Decode(b64);
+    final file = File('${tempDir.path}/${prefix}_${DateTime.now().millisecondsSinceEpoch}.png');
+    await file.writeAsBytes(bytes);
+    return file;
+  }
+
+  static Future<void> compilarYSubirCatalogoRTDB() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return;
+
+      final db = await DBHelper.instance.database;
+      final prefs = await SharedPreferences.getInstance();
+      
+      bool esPremium = prefs.getBool('es_premium') ?? false;
+      bool hayInternet = await tieneInternet();
+
+      // 1. Saneamos el LOGO
+      String logo = prefs.getString('logo_path') ?? "";
+      if (logo.isNotEmpty && !logo.startsWith('http')) {
+        if (esPremium && hayInternet) {
+          String urlLogo = await subirImagenACloudinary(logo);
+          if (urlLogo.isNotEmpty) {
+            logo = urlLogo;
+            await prefs.setString('logo_path', logo); // Actualiza la caché local
+            
+            // 🔥 SOLUCIÓN AL BUCLE: Guardamos el nuevo link de Cloudinary en Firestore
+            // para que la sincronización de perfil no vuelva a sobreescribirlo con la ruta local.
+            await actualizarPerfilNegocioNube(
+              prefs.getString('nombre_negocio') ?? "MI NEGOCIO", 
+              logo
+            );
+          } else if (logo.length > 5000) {
+            logo = ""; 
+          }
+        } else {
+          if (logo.length > 5000) logo = ""; 
+        }
+      }
+
+      final negocioData = {
+        'nombre_negocio': prefs.getString('nombre_negocio') ?? "MI NEGOCIO",
+        'logo_base64': logo, 
+        'email': user.email ?? "",
+        'whatsapp_admin': prefs.getString('whatsapp_admin') ?? ""
+      };
+      // 2. Obtener Categorías
+      final catSnap = await db.query('categorias', orderBy: 'orden ASC');
+      List<Map<String, dynamic>> categorias = [];
+      for (var row in catSnap) {
+        if (row['activo'] == null || row['activo'] == 1 || row['activo'] == '1') {
+          categorias.add(Map<String, dynamic>.from(row));
+        }
+      }
+
+      // 3. Obtener Productos (Fotos principales y de variantes desde el JSON)
+      final prodSnap = await db.query('productos', where: 'activo = 1', orderBy: 'orden ASC, id DESC');
+      List<Map<String, dynamic>> productos = [];
+      Set<String> catsDesdeProductos = {};
+      Map<String, String> fotosVariantesCache = {}; // Cache retrocompatible para la web
+
+      for (var row in prodSnap) {
+        var map = Map<String, dynamic>.from(row);
+        String foto = map['foto_path']?.toString() ?? "";
+        
+        if (map['categoria'] != null && map['categoria'].toString().isNotEmpty) {
+          catsDesdeProductos.add(map['categoria'].toString());
+        }
+
+        if (foto.isNotEmpty && !foto.startsWith('http')) {
+           if (esPremium && hayInternet) {
+             String urlFoto = await subirImagenACloudinary(foto);
+             if (urlFoto.isNotEmpty) {
+               map['foto_path'] = urlFoto;
+               await db.update('productos', {'foto_path': urlFoto}, where: 'id = ?', whereArgs: [map['id']]);
+             } else if (foto.length > 1000) {
+               map['foto_path'] = ""; 
+             }
+           } else {
+             if (foto.length > 1000) map['foto_path'] = "";
+           }
+        }
+
+        // 4. Extrayendo variantes del JSON local a objetos para RTDB
+        if (map['variantes'] != null && map['variantes'].toString().length > 5) {
+          List<dynamic> dec = jsonDecode(map['variantes']);
+          var grupos = (dec.isNotEmpty && !dec[0].containsKey('grupo')) ? [{'opciones': dec}] : dec;
+          
+          for (int gIdx = 0; gIdx < grupos.length; gIdx++) {
+            for (int oIdx = 0; oIdx < grupos[gIdx]['opciones'].length; oIdx++) {
+              String varFoto = grupos[gIdx]['opciones'][oIdx]['foto_path']?.toString() ?? "";
+              if (varFoto.isNotEmpty) {
+                fotosVariantesCache["${map['id']}_${gIdx}_${oIdx}"] = varFoto;
+              }
+            }
+          }
+          map['variantes'] = dec; // Mandamos objeto en vez de string a Firebase
+        }
+
+        productos.add(map);
+      }
+
+      // 5. Salvavidas: Si Categorías estaba vacía
+      if (categorias.isEmpty && catsDesdeProductos.isNotEmpty) {
+        int i = 0;
+        for (String c in catsDesdeProductos) {
+          categorias.add({'id': i, 'nombre': c, 'activo': 1, 'orden': i});
+          i++;
+        }
+      }
+
+      // Armar y subir JSON
+      Map<String, dynamic> superJson = {
+        'negocio': negocioData,
+        'categorias': categorias,
+        'productos': productos,
+        'fotosVariantesCache': fotosVariantesCache,
+        'ultima_actualizacion': DateTime.now().toIso8601String()
+      };
+
+      DatabaseReference ref = FirebaseDatabase.instance.ref("catalogos_web/${user.uid}");
+      await ref.set(jsonEncode(superJson));
+      
+      debugPrint("✅ Catálogo web compilado exitosamente.");
+    } catch (e) {
+      debugPrint("❌ Error subiendo catálogo a RTDB: $e");
+    }
+  }
+
+ static Future<void> migrarVariantesAlJSONyCarpetas() async {
+    final prefs = await SharedPreferences.getInstance();
+    
+    // 🔥 CONTROL DE EJECUCIÓN ÚNICA: Si ya se completó, sale en silencio.
+    if (prefs.getBool('migracion_definitiva_completa_v6') ?? false) {
+      return; 
+    }
+
+    debugPrint("🚀 ==================================================");
+    debugPrint("🚀 INICIANDO MIGRACIÓN Y RESCATE DE FOTOS DE VARIANTES...");
+    debugPrint("🚀 ==================================================");
+
+    final db = await DBHelper.instance.database;
+    bool esPremium = prefs.getBool('es_premium') ?? false;
+    final user = _auth.currentUser;
+
+    // --- 1. RESCATE DE FOTOS DESDE FIRESTORE ---
+    if (esPremium && user != null && await tieneInternet()) {
+      try {
+        final fotosSnap = await _db.collection('usuarios').doc(user.uid).collection('fotos_variantes').get();
+        if (fotosSnap.docs.isNotEmpty) {
+          debugPrint("☁️ Rescatando ${fotosSnap.docs.length} URLs de Cloudinary desde Firestore...");
+          Map<String, List<Map<String, dynamic>>> fotosPorProd = {};
+          
+          for (var doc in fotosSnap.docs) {
+            var f = doc.data();
+            String pid = f['producto_id'].toString();
+            fotosPorProd.putIfAbsent(pid, () => []).add(f);
+          }
+
+          for (String pid in fotosPorProd.keys) {
+            final pRes = await db.query('productos', where: 'id = ?', whereArgs: [pid]);
+            if (pRes.isEmpty) continue;
+
+            var p = Map<String, dynamic>.from(pRes.first);
+            String varStr = p['variantes']?.toString() ?? "";
+            
+            if (varStr.length > 5) {
+              List<dynamic> dec = jsonDecode(varStr);
+              bool cambiado = false;
+              
+              for (var f in fotosPorProd[pid]!) {
+                int gIdx = f['grupo_index'] as int;
+                int oIdx = f['opcion_index'] as int;
+                String fotoUrl = f['foto_base64']?.toString() ?? "";
+                
+                if (fotoUrl.isNotEmpty) {
+                  if (dec.isNotEmpty && !dec[0].containsKey('grupo')) {
+                     if (oIdx < dec.length) { dec[oIdx]['foto_path'] = fotoUrl; cambiado = true; }
+                  } else {
+                     if (gIdx < dec.length && oIdx < dec[gIdx]['opciones'].length) {
+                       dec[gIdx]['opciones'][oIdx]['foto_path'] = fotoUrl; cambiado = true;
+                     }
+                  }
+                }
+              }
+              
+              if (cambiado) {
+                String nuevoJson = jsonEncode(dec);
+                await db.update('productos', {'variantes': nuevoJson}, where: 'id = ?', whereArgs: [pid]);
+                await _db.collection('usuarios').doc(user.uid).collection('productos').doc(pid).update({
+                  'variantes': nuevoJson,
+                  'ultima_modificacion': FieldValue.serverTimestamp()
+                });
+              }
+            }
+            
+            final batch = _db.batch();
+            for (var doc in fotosSnap.docs.where((d) => d.data()['producto_id'].toString() == pid)) {
+              batch.delete(doc.reference);
+            }
+            await batch.commit();
+          }
+        }
+      } catch (e) {
+        debugPrint("❌ Error rescatando fotos: $e");
+      }
+    }
+
+    // --- 2. MOVER CARPETAS A LA GALERÍA PÚBLICA Y DESCARGAR ---
+    try {
+      Directory baseDir = Directory('/storage/emulated/0/Pictures/Boxi');
+      if (!await baseDir.exists()) {
+        try {
+          await baseDir.create(recursive: true);
+        } catch (_) {
+          final appDir = await getApplicationDocumentsDirectory();
+          baseDir = Directory('${appDir.path}/Boxi');
+        }
+      }
+      
+      final varDir = Directory('${baseDir.path}/Variantes');
+      if (!await varDir.exists()) await varDir.create(recursive: true);
+
+      Future<void> descargarA(String url, Directory dir) async {
+        if (url.startsWith('http')) {
+          String name = url.split('/').last;
+          if (!name.contains('.')) name += '.jpg';
+          File f = File('${dir.path}/$name');
+          if (!f.existsSync()) {
+            try {
+              final res = await http.get(Uri.parse(url));
+              if (res.statusCode == 200) await f.writeAsBytes(res.bodyBytes);
+            } catch (_) {}
+          }
+        }
+      }
+
+      final prods = await db.query('productos');
+      int fotosMovidas = 0;
+      
+      for (var p in prods) {
+        String foto = p['foto_path']?.toString() ?? "";
+        String variantesJson = p['variantes']?.toString() ?? "";
+        bool actualizado = false;
+        
+        if (foto.isNotEmpty) {
+          if (foto.startsWith('http')) {
+            await descargarA(foto, baseDir);
+          } else if (foto.length < 500 && !foto.contains(baseDir.path)) {
+            File oldFile = File(foto);
+            if (oldFile.existsSync()) {
+              File newFile = await oldFile.copy('${baseDir.path}/${foto.split('/').last}');
+              foto = newFile.path;
+              actualizado = true;
+              fotosMovidas++;
+            }
+          }
+        }
+
+        if (variantesJson.length > 5) {
+          List<dynamic> dec = jsonDecode(variantesJson);
+          bool varCambiada = false;
+          
+          for (var g in (dec.isNotEmpty && !dec[0].containsKey('grupo') ? [{'opciones': dec}] : dec)) {
+             for (var o in g['opciones']) {
+               String vFoto = o['foto_path']?.toString() ?? "";
+               if (vFoto.isNotEmpty) {
+                 if (vFoto.startsWith('http')) {
+                   await descargarA(vFoto, varDir);
+                 } else if (vFoto.length < 500 && !vFoto.contains(varDir.path)) {
+                    File oldFile = File(vFoto);
+                    if (oldFile.existsSync()) {
+                      File newFile = await oldFile.copy('${varDir.path}/${vFoto.split('/').last}');
+                      o['foto_path'] = newFile.path;
+                      varCambiada = true;
+                      fotosMovidas++;
+                    }
+                 }
+               }
+             }
+          }
+          if (varCambiada) {
+            variantesJson = jsonEncode(dec);
+            actualizado = true;
+          }
+        }
+
+        if (actualizado) {
+          await db.update('productos', {'foto_path': foto, 'variantes': variantesJson}, where: 'id = ?', whereArgs: [p['id']]);
+        }
+      }
+      
+      // Marcar como completada para no volver a repetirse nunca
+      await prefs.setBool('migracion_definitiva_completa_v2', true);
+      
+      debugPrint("🚀 ==================================================");
+      debugPrint("✅ Respaldo físico en la galería local completado. Total de fotos procesadas: $fotosMovidas");
+      debugPrint("🚀 ==================================================");
+    } catch (e) {
+      debugPrint("❌ Error en respaldo físico: $e");
+    }
+  }
+  
   static Future<void> guardarProductoNube(Map<String, dynamic> p) async =>
       _escribir(
           tabla: 'productos', docId: p['id'].toString(), datos: p);
-
-  static Future<void> guardarFotoVarianteNube(
-      Map<String, dynamic> f) async {
-    if (_uid == null) return;
-    String docId =
-        '${f['producto_id']}_${f['grupo_index']}_${f['opcion_index']}';
-    await _escribir(tabla: 'fotos_variantes', docId: docId, datos: f);
-  }
 
   static Future<void> guardarClienteNube(Map<String, dynamic> c) async =>
       _escribir(

@@ -10,10 +10,20 @@ import 'servicio_nube.dart';
 import 'servicio_anuncios.dart'; 
 import 'pantalla_premium.dart'; 
 import 'dart:async';
-import 'dart:ui' as ui;           // Para ui.Codec, ui.FrameInfo, etc.
-import 'dart:typed_data';       // Para Uint8List y ByteData
-
-final Map<String, Uint8List> _inventarioImageCache = {};
+import 'dart:ui' as ui;           
+import 'dart:typed_data';       
+import 'package:path_provider/path_provider.dart';
+import 'package:flutter/foundation.dart'; // 🔥 INDISPENSABLE PARA COMPUTE
+// 🔥 Función aislada a prueba de fallos y textos corruptos
+Uint8List? decodificarBase64Aislado(String b64) {
+  try { 
+    String clean = b64.replaceAll(RegExp(r'\s+'), '');
+    return base64Decode(clean); 
+  } catch(e) { 
+    return null; 
+  }
+}
+final Map<int, String> _rutaFotosCache = {};
 
 class PantallaInventario extends StatefulWidget {
   const PantallaInventario({super.key});
@@ -40,85 +50,21 @@ class _PantallaInventarioState extends State<PantallaInventario> {
     final prefs = await SharedPreferences.getInstance();
     bool migracionRealizada = prefs.getBool('migracion_variantes_completada') ?? false;
     if (!migracionRealizada) {
-      await _migrarVariantesViejasGlobal(); 
       await prefs.setBool('migracion_variantes_completada', true);
     }
+    await ServicioNube.migrarVariantesAlJSONyCarpetas();
     _cargar();
     _activarTiempoReal();
-  }
 
-  Future<void> _migrarVariantesViejasGlobal() async {
-    final db = await DBHelper.instance.database;
-    final prefs = await SharedPreferences.getInstance();
+    // 🔥 NUEVA COMPROBACIÓN: Si es Premium, migrar imágenes locales/base64 a Cloudinary silenciosamente
     bool esPremium = prefs.getBool('es_premium') ?? false;
-    
-    final prods = await db.query('productos');
-    
-    for (var p in prods) {
-      if (p['variantes'] != null && p['variantes'].toString().length > 50) {
-        try {
-          List<dynamic> dec = jsonDecode(p['variantes'].toString());
-          bool huboCambio = false;
-          
-          // Caso 1: Formato viejo sin grupos
-          if (dec.isNotEmpty && !dec[0].containsKey('grupo')) {
-            for (int o = 0; o < dec.length; o++) {
-              if (dec[o]['foto_path'] != null && dec[o]['foto_path'].toString().length > 50) {
-                final fotoMap = {
-                  'producto_id': p['id'],
-                  'grupo_index': 0,
-                  'opcion_index': o,
-                  'variante_nombre': dec[o]['nombre'] ?? '', // 🔥 GUARDAMOS EL NOMBRE
-                  'foto_base64': dec[o]['foto_path'],
-                };
-                await db.insert('fotos_variantes', fotoMap);
-                if (esPremium) ServicioNube.guardarFotoVarianteNube(fotoMap); // 🔥 SUBIMOS A LA NUBE
-                dec[o].remove('foto_path');
-                huboCambio = true;
-              }
-            }
-          } 
-          // Caso 2: Formato con grupos
-          else {
-            for (int g = 0; g < dec.length; g++) {
-              List opciones = dec[g]['opciones'] ?? [];
-              for (int o = 0; o < opciones.length; o++) {
-                if (opciones[o]['foto_path'] != null && opciones[o]['foto_path'].toString().length > 50) {
-                  final fotoMap = {
-                    'producto_id': p['id'],
-                    'grupo_index': g,
-                    'opcion_index': o,
-                    'variante_nombre': opciones[o]['nombre'] ?? '', // 🔥 GUARDAMOS EL NOMBRE
-                    'foto_base64': opciones[o]['foto_path'],
-                  };
-                  await db.insert('fotos_variantes', fotoMap);
-                  if (esPremium) ServicioNube.guardarFotoVarianteNube(fotoMap); // 🔥 SUBIMOS A LA NUBE
-                  opciones[o].remove('foto_path');
-                  huboCambio = true;
-                }
-              }
-            }
-          }
-
-          if (huboCambio) {
-            String nuevoJson = jsonEncode(dec);
-            // Actualizamos local
-            await db.update('productos', {'variantes': nuevoJson}, where: 'id = ?', whereArgs: [p['id']]);
-            
-            // 🔥 ACTUALIZAMOS LA NUBE PARA QUE EL PRODUCTO YA NO TENGA FOTOS EN EL JSON
-            if (esPremium) {
-              Map<String, dynamic> prodParaNube = Map.from(p);
-              prodParaNube['variantes'] = nuevoJson;
-              ServicioNube.guardarProductoNube(prodParaNube);
-            }
-            debugPrint("✅ Producto ${p['nombre']} migrado exitosamente.");
-          }
-        } catch(e) {
-          debugPrint("Error migrando producto ${p['id']}: $e");
-        }
-      }
+    if (esPremium) {
+      ServicioNube.migrarTodoACloudinary().then((_) {
+        if (mounted) _cargar(); // Recargamos el inventario una vez migrado
+      });
     }
   }
+
 
   Future<void> _repararFotosPesadas() async {
     final db = await DBHelper.instance.database;
@@ -140,13 +86,13 @@ class _PantallaInventarioState extends State<PantallaInventario> {
         
         await db.update('productos', {'foto_path': nuevaFoto}, where: 'id = ?', whereArgs: [p['id']]);
       } catch (e) {
-        // Si la foto está corrupta, mejor la vaciamos para evitar crash
+        // 🔥 Un solo catch es suficiente en Dart para atrapar tanto excepciones
+        // de formato como errores OutOfMemory (OOM) de memoria.
         await db.update('productos', {'foto_path': ''}, where: 'id = ?', whereArgs: [p['id']]);
       }
     }
     _cargar(); // Recargamos la lista ya limpia
   }
-
 
   @override
   void dispose() {
@@ -512,22 +458,14 @@ class _PantallaInventarioState extends State<PantallaInventario> {
             onPressed: () async {
               final db = await DBHelper.instance.database;
               
-              // 1. Encontrar cuántas variantes tenía para poder borrarlas en la nube
-              final fotosDelProd = await db.query('fotos_variantes', where: 'producto_id = ?', whereArgs: [id]);
-              
-              // 2. Borrar de SQLite
-              await db.delete('fotos_variantes', where: 'producto_id = ?', whereArgs: [id]);
+              // Solo borramos el producto (el JSON contiene las variantes)
               await db.delete('productos', where: 'id = ?', whereArgs: [id]);
               
-              // 3. Borrar de Firebase
+              // Borrar de Firebase
               if (_esPremium) {
                 ServicioNube.eliminarProductoNube(id);
-                // Borramos las fotos de Firestore una por una
-                for (var f in fotosDelProd) {
-                  ServicioNube.eliminarFotoVarianteNube(id, f['grupo_index'] as int, f['opcion_index'] as int);
-                }
               }
-
+              ServicioNube.compilarYSubirCatalogoRTDB();
               _cargar();
               if (mounted) Navigator.pop(ctx);
             },
@@ -658,6 +596,8 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
   final Map<String, TextEditingController> _stockCtrls = {};
   final Map<String, String> _fotosVariantes = {};
   List<Map<String, dynamic>> _gruposVariantes = [];
+  dynamic _imgDataProcesada;
+  final Map<String, dynamic> _fotosVariantesProcesadas = {};
 
   @override
   void initState() {
@@ -669,6 +609,7 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
       _pVC.text = widget.producto!['precio_venta'].toString();
       _sC.text = widget.producto!['stock'].toString();
       _imgData = widget.producto!['foto_path'] ?? '';
+      _procesarFotoPrincipal();
       _descC.text = widget.producto!['descripcion'] ?? '';
       double pct = widget.producto!['descuento']?.toDouble() ?? 0.0;
       _descPctC.text = pct > 0 ? pct.toString() : '';
@@ -708,22 +649,51 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
     super.dispose(); 
   }
 
+  Future<void> _procesarFotoPrincipal() async {
+    if (_imgData.isEmpty) return;
+    if (_imgData.startsWith('http')) {
+      _imgDataProcesada = _imgData;
+    } else if (_imgData.length > 500) {
+      _imgDataProcesada = await compute(decodificarBase64Aislado, _imgData);
+    } else {
+      _imgDataProcesada = _imgData;
+    }
+    if (mounted) setState((){});
+  }
+
   Future<void> _cargarFotosVariantes() async {
-    if (widget.producto == null) return;
-    final db = await DBHelper.instance.database;
-    final fotos = await db.query(
-      'fotos_variantes',
-      where: 'producto_id = ?',
-      whereArgs: [widget.producto!['id']],
-    );
-    for (var f in fotos) {
-      String key = "${f['grupo_index']}_${f['opcion_index']}";
-      _fotosVariantes[key] = f['foto_base64'] as String;
+    if (_gruposVariantes.isEmpty) return;
+    for (int gIdx = 0; gIdx < _gruposVariantes.length; gIdx++) {
+      var opciones = _gruposVariantes[gIdx]['opciones'] ?? [];
+      for (int oIdx = 0; oIdx < opciones.length; oIdx++) {
+        String key = "${gIdx}_$oIdx";
+        String b64 = opciones[oIdx]['foto_path'] ?? '';
+        _fotosVariantes[key] = b64;
+        
+        // Interceptor offline
+        if (b64.startsWith('http')) {
+          String name = b64.split('/').last;
+          if (!name.contains('.')) name += '.jpg';
+          File fPub = File('/storage/emulated/0/Pictures/Boxi/Variantes/$name');
+          if (fPub.existsSync()) {
+            _fotosVariantesProcesadas[key] = fPub.path;
+            continue;
+          }
+        }
+        
+        if (b64.startsWith('http')) {
+          _fotosVariantesProcesadas[key] = b64;
+        } else if (b64.length > 500) {
+          _fotosVariantesProcesadas[key] = await compute(decodificarBase64Aislado, b64);
+        } else if (b64.isNotEmpty) {
+          _fotosVariantesProcesadas[key] = b64;
+        }
+      }
     }
     if (mounted) setState(() {});
   }
 
-  Future<String> _capturarImagenBase64(ImageSource source) async {
+  Future<String> _capturarImagenLocal(ImageSource source) async {
     try {
       await [Permission.camera, Permission.photos].request();
       
@@ -731,12 +701,11 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
         source: source,
         maxWidth: 800,
         maxHeight: 800,
-        imageQuality: 70,
+        imageQuality: 70, // Cloudinary optimizará esto aún más
       );
       
       if (x != null) {
-        final bytes = await x.readAsBytes();
-        return base64Encode(bytes);
+        return x.path; // 🔥 AHORA DEVOLVEMOS LA RUTA LOCAL DEL ARCHIVO
       }
     } catch (e) {
       debugPrint("Error al capturar imagen: $e");
@@ -775,20 +744,6 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
     }
 
     String variantesJson = jsonEncode(_gruposVariantes);
-
-    int pesoTotal = variantesJson.length + _imgData.length;
-    if (pesoTotal > 1900000) {
-      showDialog(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('⚠️ Límite de Base de Datos', style: TextStyle(color: Colors.red)),
-          content: const Text('La foto principal es demasiado pesada. Por favor usa una imagen más pequeña.'),
-          actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('ENTENDIDO'))],
-        ),
-      );
-      return;
-    }
-
     setState(() => _estaGuardando = true);
 
     try {
@@ -811,14 +766,24 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
       }
 
       String pathFinal = _imgData;
-      if (pathFinal.isNotEmpty && pathFinal.length < 500 && File(pathFinal).existsSync()) {
-        final bytes = await File(pathFinal).readAsBytes();
-        if (bytes.length > 950000) {
-          setState(() => _estaGuardando = false);
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("⚠️ Imagen muy pesada"), backgroundColor: Colors.red));
-          return;
+      
+      // 🔥 1. TRATAMIENTO DE IMAGEN PRINCIPAL
+      if (pathFinal.isNotEmpty && !pathFinal.startsWith('http') && pathFinal.length < 500 && File(pathFinal).existsSync()) {
+        
+        // SIEMPRE guardamos una copia en la galería Boxi, seas Premium o no
+        String rutaLocal = await _guardarImagenEnLocalPersistente(pathFinal);
+
+        if (esPremium) {
+          // Si es Premium, subimos esa foto a Cloudinary
+          String urlSubida = await ServicioNube.subirImagenACloudinary(rutaLocal);
+          if (urlSubida.isNotEmpty) {
+             pathFinal = urlSubida; // En BD usamos la web, pero en la galería ya quedó el respaldo
+          } else {
+             pathFinal = rutaLocal; // Fallback
+          }
+        } else {
+          pathFinal = rutaLocal;
         }
-        pathFinal = base64Encode(bytes);
       }
 
       int ordenActual = widget.producto != null ? (widget.producto!['orden'] ?? 0) : 0;
@@ -831,7 +796,7 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
         'precio_compra': pCompra,
         'precio_venta': pVenta,
         'stock': nuevoStock,
-        'foto_path': pathFinal,
+        'foto_path': pathFinal, 
         'orden': ordenActual,
         'descuento': descPct,
       };
@@ -839,7 +804,7 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
       int idActual;
       if (widget.producto == null) {
         idActual = DateTime.now().millisecondsSinceEpoch;
-        final mapConId = {...map, 'id': idActual}; // Añadimos el ID al mapa
+        final mapConId = {...map, 'id': idActual};
         await db.insert('productos', mapConId);
         if (!esPremium) {
           int prodsCreados = (prefs.getInt('contador_anuncios_creacion') ?? 0) + 1;
@@ -851,37 +816,80 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
         await db.update('productos', map, where: 'id = ?', whereArgs: [idActual]);
       }
 
-      await db.delete('fotos_variantes', where: 'producto_id = ?', whereArgs: [idActual]);
-
+      // 🔥 2. TRATAMIENTO DE IMÁGENES DE VARIANTES
       for (var entry in _fotosVariantes.entries) {
         if (entry.value.isEmpty) continue;
         List<String> partes = entry.key.split('_');
         int gIdx = int.parse(partes[0]);
         int oIdx = int.parse(partes[1]);
+
+        String fotoVarianteUrl = entry.value;
+
+        if (!fotoVarianteUrl.startsWith('http') && fotoVarianteUrl.length < 500 && File(fotoVarianteUrl).existsSync()) {
+          
+          // SIEMPRE guardamos una copia en la galería Boxi/Variantes
+          String rutaLocal = await _guardarImagenEnLocalPersistente(fotoVarianteUrl, esVariante: true);
+          
+          if (esPremium) {
+            String urlSubida = await ServicioNube.subirImagenACloudinary(rutaLocal);
+            if (urlSubida.isNotEmpty) {
+               fotoVarianteUrl = urlSubida;
+            } else {
+               fotoVarianteUrl = rutaLocal;
+            }
+          } else {
+            fotoVarianteUrl = rutaLocal;
+          }
+        }
         
-        // OBTENEMOS EL NOMBRE DE LA VARIANTE 👇
-        String nombreVar = "";
-        try { nombreVar = _gruposVariantes[gIdx]['opciones'][oIdx]['nombre']; } catch(_) {}
+        _gruposVariantes[gIdx]['opciones'][oIdx]['foto_path'] = fotoVarianteUrl;
+      }
+      
+      // Actualizamos SQLite y la Nube con los nuevos JSON
+      variantesJson = jsonEncode(_gruposVariantes);
+      await db.update('productos', {'variantes': variantesJson}, where: 'id = ?', whereArgs: [idActual]);
+      await db.delete('fotos_variantes', where: 'producto_id = ?', whereArgs: [idActual]);
 
-        final fotoMap = {
-          'producto_id': idActual,
-          'grupo_index': gIdx,
-          'opcion_index': oIdx,
-          'variante_nombre': nombreVar, // 🔥 AHORA SE GUARDA EL NOMBRE
-          'foto_base64': entry.value,
-        };
-
-        await db.insert('fotos_variantes', fotoMap);
-        if (esPremium) ServicioNube.guardarFotoVarianteNube(fotoMap);
+      if (esPremium) {
+        map['variantes'] = variantesJson;
+        ServicioNube.guardarProductoNube({...map, 'id': idActual});
+        ServicioNube.compilarYSubirCatalogoRTDB();
       }
 
-      if (esPremium) ServicioNube.guardarProductoNube({...map, 'id': idActual});
+      _rutaFotosCache[idActual] = _imgData;
 
       widget.onGuardar();
       if (mounted) Navigator.pop(context);
     } catch (e) {
       setState(() => _estaGuardando = false);
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Error: $e")));
+    }
+  }
+
+  Future<String> _guardarImagenEnLocalPersistente(String tempPath, {bool esVariante = false}) async {
+    try {
+      // Intentamos usar la galería principal pública
+      Directory baseDir = Directory('/storage/emulated/0/Pictures/Boxi');
+      if (!await baseDir.exists()) {
+        try {
+          await baseDir.create(recursive: true);
+        } catch (_) {
+          // Fallback a app directory si Android bloquea Pictures por seguridad
+          final appDir = await getApplicationDocumentsDirectory();
+          baseDir = Directory('${appDir.path}/Boxi');
+        }
+      }
+      
+      Directory targetDir = esVariante ? Directory('${baseDir.path}/Variantes') : baseDir;
+      if (!await targetDir.exists()) await targetDir.create(recursive: true);
+
+      final File tempFile = File(tempPath);
+      final String fileName = tempPath.split('/').last.isNotEmpty ? tempPath.split('/').last : "${DateTime.now().millisecondsSinceEpoch}.png";
+      final File nuevaImagen = await tempFile.copy('${targetDir.path}/$fileName');
+      return nuevaImagen.path; 
+    } catch (e) {
+      debugPrint("Error guardando foto local: $e");
+      return tempPath; 
     }
   }
 
@@ -931,16 +939,16 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
                 child: Column(mainAxisSize: MainAxisSize.min, children:[
                   ListTile(leading: const Icon(Icons.camera_alt, color: Colors.blue), title: const Text("Tomar Foto"), onTap: () async {
                     Navigator.pop(context);
-                    String res = await _capturarImagenBase64(ImageSource.camera);
-                    if(res.isNotEmpty && res != "error_size") setState(() => _imgData = res);
+                    String res = await _capturarImagenLocal(ImageSource.camera);
+                    if(res.isNotEmpty && res != "error_size") setState(() { _imgData = res; _imgDataProcesada = res; });
                   }),
                   ListTile(leading: const Icon(Icons.photo_library, color: Colors.blue), title: const Text("Elegir de Galería"), onTap: () async {
                     Navigator.pop(context);
-                    String res = await _capturarImagenBase64(ImageSource.gallery);
-                    if(res.isNotEmpty && res != "error_size") setState(() => _imgData = res);
+                    String res = await _capturarImagenLocal(ImageSource.gallery);
+                    if(res.isNotEmpty && res != "error_size") setState(() { _imgData = res; _imgDataProcesada = res; });
                   }),
                   if (_imgData.isNotEmpty)
-                    ListTile(leading: const Icon(Icons.delete_forever, color: Colors.red), title: const Text("Eliminar Foto", style: TextStyle(color: Colors.red)), onTap: () { setState(() => _imgData = ""); Navigator.pop(context); }),
+                    ListTile(leading: const Icon(Icons.delete_forever, color: Colors.red), title: const Text("Eliminar Foto", style: TextStyle(color: Colors.red)), onTap: () { setState(() { _imgData = ""; _imgDataProcesada = null; }); Navigator.pop(context); }),
                 ]),
               )),
               child: Container(
@@ -949,8 +957,13 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
                   color: isOscuro ? Colors.white.withOpacity(0.05) : Colors.white, 
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(color: isOscuro ? Colors.white24 : Colors.blue.withOpacity(0.3), width: 2, style: BorderStyle.solid),
-                  image: _imgData.isEmpty ? null : DecorationImage(
-                    image: _imgData.length > 500 ? MemoryImage(base64Decode(_imgData)) : FileImage(File(_imgData)) as ImageProvider, fit: BoxFit.cover
+                  image: _imgDataProcesada == null ? null : DecorationImage(
+                    image: _imgDataProcesada is Uint8List 
+                        ? MemoryImage(_imgDataProcesada)
+                        : (_imgDataProcesada.toString().startsWith('http')
+                            ? NetworkImage(_imgDataProcesada.toString()) as ImageProvider
+                            : FileImage(File(_imgDataProcesada.toString())) as ImageProvider), 
+                    fit: BoxFit.cover
                   ),
                   boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 10, offset: const Offset(0, 5))]
                 ),
@@ -1199,16 +1212,16 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
                                             child: Column(mainAxisSize: MainAxisSize.min, children: [
                                               ListTile(leading: const Icon(Icons.camera_alt), title: const Text("Cámara"), onTap: () async {
                                                 Navigator.pop(context);
-                                                String res = await _capturarImagenBase64(ImageSource.camera);
-                                                if (res.isNotEmpty && res != "error_size") setState(() => _fotosVariantes[key] = res); 
+                                                String res = await _capturarImagenLocal(ImageSource.camera);
+                                                if (res.isNotEmpty && res != "error_size") setState(() { _fotosVariantes[key] = res; _fotosVariantesProcesadas[key] = res; }); 
                                               }),
                                               ListTile(leading: const Icon(Icons.photo_library), title: const Text("Galería"), onTap: () async {
                                                 Navigator.pop(context);
-                                                String res = await _capturarImagenBase64(ImageSource.gallery);
-                                                if (res.isNotEmpty && res != "error_size") setState(() => _fotosVariantes[key] = res); 
+                                                String res = await _capturarImagenLocal(ImageSource.gallery);
+                                                if (res.isNotEmpty && res != "error_size") setState(() { _fotosVariantes[key] = res; _fotosVariantesProcesadas[key] = res; }); 
                                               }),
                                               if (fotoBase64.isNotEmpty)
-                                                ListTile(leading: const Icon(Icons.delete_forever, color: Colors.red), title: const Text("Eliminar foto", style: TextStyle(color: Colors.red)), onTap: () { setState(() => _fotosVariantes[key] = ''); Navigator.pop(context); }),
+                                                ListTile(leading: const Icon(Icons.delete_forever, color: Colors.red), title: const Text("Eliminar foto", style: TextStyle(color: Colors.red)), onTap: () { setState(() { _fotosVariantes[key] = ''; _fotosVariantesProcesadas[key] = null; }); Navigator.pop(context); }),
                                             ]),
                                           ),
                                         );
@@ -1217,26 +1230,13 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
                                         width: 55, height: 55,
                                         decoration: BoxDecoration(color: isOscuro ? Colors.black26 : Colors.white, borderRadius: BorderRadius.circular(10), border: Border.all(color: isOscuro ? Colors.white12 : Colors.grey.shade300)),
                                         clipBehavior: Clip.antiAlias,
-                                        child: fotoBase64.isEmpty
+                                        child: _fotosVariantesProcesadas[key] == null
                                             ? Icon(Icons.add_a_photo_rounded, color: isOscuro ? Colors.white38 : Colors.grey, size: 24)
-                                            // 🔥 USO INTELIGENTE DEL CACHÉ PARA EVITAR PARPADEO
-                                            : Builder(
-                                                builder: (context) {
-                                                  Uint8List bytes;
-                                                  if (_inventarioImageCache.containsKey(fotoBase64)) {
-                                                    bytes = _inventarioImageCache[fotoBase64]!;
-                                                  } else {
-                                                    bytes = base64Decode(fotoBase64);
-                                                    if (_inventarioImageCache.length > 200) _inventarioImageCache.clear();
-                                                    _inventarioImageCache[fotoBase64] = bytes;
-                                                  }
-                                                  return Image.memory(
-                                                    bytes, 
-                                                    fit: BoxFit.cover,
-                                                    gaplessPlayback: true, // Crucial anti-parpadeo
-                                                  );
-                                                }
-                                              ),
+                                            : _fotosVariantesProcesadas[key] is Uint8List
+                                                ? Image.memory(_fotosVariantesProcesadas[key], fit: BoxFit.cover, gaplessPlayback: true, errorBuilder: (_,__,___) => const Icon(Icons.broken_image))
+                                                : _fotosVariantesProcesadas[key].toString().startsWith('http')
+                                                    ? Image.network(_fotosVariantesProcesadas[key].toString(), fit: BoxFit.cover, gaplessPlayback: true, errorBuilder: (_,__,___) => const Icon(Icons.broken_image))
+                                                    : Image.file(File(_fotosVariantesProcesadas[key].toString()), fit: BoxFit.cover, gaplessPlayback: true, errorBuilder: (_,__,___) => const Icon(Icons.broken_image))
                                       ),
                                     ),
                                     const SizedBox(width: 10),
@@ -1386,14 +1386,14 @@ class PantallaDetalleProducto extends StatefulWidget {
 }
 
 class _PantallaDetalleProductoState extends State<PantallaDetalleProducto> {
-  final Map<String, String> _fotosVariantes = {};
+  final Map<String, dynamic> _fotosVariantesProcesadas = {};
+  dynamic _imgPrincipalProcesada;
   List<dynamic> _gruposVariantes = [];
-  late Map<String, dynamic> _prodLocal; // Almacenará el producto completo
+  late Map<String, dynamic> _prodLocal; 
 
   @override
   void initState() {
     super.initState();
-    // Inicializamos con los datos ligeros para evitar parpadeos
     _prodLocal = Map<String, dynamic>.from(widget.producto); 
     _cargarDatos();
   }
@@ -1401,13 +1401,25 @@ class _PantallaDetalleProductoState extends State<PantallaDetalleProducto> {
   Future<void> _cargarDatos() async {
     final db = await DBHelper.instance.database;
 
-    // 🔥 1. Consultamos el producto COMPLETO (trae foto_path y variantes)
     final resProd = await db.query('productos', where: 'id = ?', whereArgs: [widget.producto['id']]);
     if (resProd.isNotEmpty) {
       _prodLocal = Map<String, dynamic>.from(resProd.first);
     }
 
-    // 🔥 2. Decodificamos las variantes desde el producto completo
+    String fotoPrincipal = _prodLocal['foto_path'] ?? '';
+    if (fotoPrincipal.isNotEmpty) {
+      if (fotoPrincipal.startsWith('http')) {
+        String name = fotoPrincipal.split('/').last;
+        if (!name.contains('.')) name += '.jpg';
+        File fPub = File('/storage/emulated/0/Pictures/Boxi/$name');
+        _imgPrincipalProcesada = fPub.existsSync() ? fPub.path : fotoPrincipal;
+      } else if (fotoPrincipal.length > 500) {
+        _imgPrincipalProcesada = await compute(decodificarBase64Aislado, fotoPrincipal);
+      } else {
+        _imgPrincipalProcesada = fotoPrincipal;
+      }
+    }
+
     if (_prodLocal['variantes'] != null && _prodLocal['variantes'].toString().length > 5) {
       try {
         var dec = jsonDecode(_prodLocal['variantes']);
@@ -1416,13 +1428,26 @@ class _PantallaDetalleProductoState extends State<PantallaDetalleProducto> {
         } else {
           _gruposVariantes = dec;
         }
-      } catch(e) {}
-    }
 
-    // 3. Traemos las fotos de las variantes
-    final fotos = await db.query('fotos_variantes', where: 'producto_id = ?', whereArgs: [widget.producto['id']]);
-    for (var f in fotos) {
-      _fotosVariantes["${f['grupo_index']}_${f['opcion_index']}"] = f['foto_base64'] as String;
+        for (int gIdx = 0; gIdx < _gruposVariantes.length; gIdx++) {
+          var opciones = _gruposVariantes[gIdx]['opciones'] ?? [];
+          for (int oIdx = 0; oIdx < opciones.length; oIdx++) {
+            String key = "${gIdx}_$oIdx";
+            String fotoStr = opciones[oIdx]['foto_path'] ?? "";
+            
+            if (fotoStr.startsWith('http')) {
+              String name = fotoStr.split('/').last;
+              if (!name.contains('.')) name += '.jpg';
+              File fPub = File('/storage/emulated/0/Pictures/Boxi/Variantes/$name');
+              _fotosVariantesProcesadas[key] = fPub.existsSync() ? fPub.path : fotoStr;
+            } else if (fotoStr.length > 500) {
+              _fotosVariantesProcesadas[key] = await compute(decodificarBase64Aislado, fotoStr);
+            } else if (fotoStr.isNotEmpty) {
+              _fotosVariantesProcesadas[key] = fotoStr;
+            }
+          }
+        }
+      } catch(e) {}
     }
     
     if (mounted) setState((){});
@@ -1454,7 +1479,7 @@ class _PantallaDetalleProductoState extends State<PantallaDetalleProducto> {
             backgroundColor: isOscuro ? const Color(0xFF0D1B2A) : const Color(0xFF0D47A1),
             flexibleSpace: FlexibleSpaceBar(
               title: Text(_prodLocal['nombre'] ?? 'Producto', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, shadows: [Shadow(blurRadius: 10, color: Colors.black54)])),
-              background: Hero(tag: 'prod_${_prodLocal['id']}', child: _construirImagen(_prodLocal['foto_path'] ?? '')),
+              background: Hero(tag: 'prod_${_prodLocal['id']}', child: _construirImagen(_imgPrincipalProcesada)),
             ),
           ),
           SliverToBoxAdapter(
@@ -1521,35 +1546,50 @@ class _PantallaDetalleProductoState extends State<PantallaDetalleProducto> {
                               width: double.infinity,
                               color: isOscuro ? Colors.blue.withOpacity(0.1) : Colors.blue.shade50,
                               padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 8),
-                              child: Text(g['grupo'].toString().toUpperCase(), style: TextStyle(fontWeight: FontWeight.bold, color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1))),
+                              child: Text(
+                                (g['grupo'] != null && g['grupo'].toString().trim().isNotEmpty)
+                                    ? g['grupo'].toString().toUpperCase()
+                                    : "Variantes", 
+                                style: TextStyle(fontWeight: FontWeight.bold, color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1))
+                              ),
                             ),
                             ListView.separated(
                               shrinkWrap: true,
                               physics: const NeverScrollableScrollPhysics(),
+                              padding: EdgeInsets.zero, // 🔥 ELIMINA EL ESPACIO GIGANTE SUPERIOR
                               itemCount: (g['opciones'] as List).length,
                               separatorBuilder: (c, i) => Divider(height: 1, color: isOscuro ? Colors.white10 : Colors.black12),
                               itemBuilder: (c, oIndex) {
                                 var o = g['opciones'][oIndex];
                                 int s = o['stock'] ?? 0;
-                                String foto = _fotosVariantes["${gIndex}_$oIndex"] ?? "";
 
                                 return ListTile(
                                   leading: Container(
                                     width: 45, height: 45,
                                     decoration: BoxDecoration(color: isOscuro ? Colors.white10 : Colors.grey.shade200, borderRadius: BorderRadius.circular(8)),
                                     clipBehavior: Clip.antiAlias,
-                                    child: foto.length > 500 
-                                      ? Image.memory(base64Decode(foto), fit: BoxFit.cover)
-                                      : Icon(Icons.style, color: isOscuro ? Colors.white24 : Colors.grey),
+                                    child: _fotosVariantesProcesadas["${gIndex}_$oIndex"] != null
+                                        ? (_fotosVariantesProcesadas["${gIndex}_$oIndex"] is Uint8List
+                                            ? Image.memory(_fotosVariantesProcesadas["${gIndex}_$oIndex"], fit: BoxFit.cover, errorBuilder: (c,e,s) => const Icon(Icons.broken_image))
+                                            : (_fotosVariantesProcesadas["${gIndex}_$oIndex"].toString().startsWith('http')
+                                                ? Image.network(_fotosVariantesProcesadas["${gIndex}_$oIndex"].toString(), fit: BoxFit.cover, errorBuilder: (c,e,s) => const Icon(Icons.broken_image))
+                                                : Image.file(File(_fotosVariantesProcesadas["${gIndex}_$oIndex"].toString()), fit: BoxFit.cover, errorBuilder: (c,e,s) => const Icon(Icons.broken_image))))
+                                        : Icon(Icons.style, color: isOscuro ? Colors.white24 : Colors.grey),
                                   ),
-                                  title: Text(o['nombre'], style: TextStyle(fontWeight: FontWeight.bold, color: isOscuro ? Colors.white : Colors.black87)),
+                                  // 🔥 SALVAVIDAS: Si la opción no tiene nombre, ponemos "Opción sin nombre"
+                                  title: Text(
+                                    (o['nombre'] != null && o['nombre'].toString().trim().isNotEmpty)
+                                        ? o['nombre']
+                                        : "Opción sin nombre", 
+                                    style: TextStyle(fontWeight: FontWeight.bold, color: isOscuro ? Colors.white : Colors.black87)
+                                  ),
                                   trailing: Container(
                                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                                     decoration: BoxDecoration(
                                       color: s < 0 ? Colors.red.withOpacity(0.1) : (s == 0 ? Colors.orange.withOpacity(0.1) : Colors.green.withOpacity(0.1)),
                                       borderRadius: BorderRadius.circular(10)
                                     ),
-                                    child: Text("Cant: $s", style: TextStyle(fontWeight: FontWeight.bold, color: s < 0 ? Colors.redAccent : (s == 0 ? Colors.orange : Colors.greenAccent))),
+                                    child: Text("Cant: $s", style: TextStyle(fontWeight: FontWeight.bold, color: s < 0 ? Colors.redAccent : (s == 0 ? Colors.orange : const Color.fromARGB(255, 18, 114, 68)))),
                                   ),
                                 );
                               },
@@ -1595,7 +1635,7 @@ class _PantallaDetalleProductoState extends State<PantallaDetalleProducto> {
               const SizedBox(width: 15),
               Column(crossAxisAlignment: CrossAxisAlignment.start, children:[
                 Text("Ganancia Neta por unidad", style: TextStyle(color: isOscuro ? Colors.white38 : Colors.grey, fontSize: 13)), 
-                Text("\$${ganancia.toStringAsFixed(2)}", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: ganancia >= 0 ? Colors.greenAccent : Colors.redAccent))
+                Text("\$${ganancia.toStringAsFixed(2)}", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: ganancia >= 0 ? const Color.fromARGB(255, 24, 155, 92) : Colors.redAccent))
               ]),
             ],
           )
@@ -1672,16 +1712,20 @@ class _PantallaDetalleProductoState extends State<PantallaDetalleProducto> {
     );
   }
 
-  Widget _construirImagen(String data) {
-    if (data.isEmpty) return Container(color: Colors.grey[300], child: const Icon(Icons.image_not_supported, size: 100, color: Colors.white));
+  Widget _construirImagen(dynamic data) {
+    if (data == null || data.toString().isEmpty) return Container(color: Colors.grey[300], child: const Icon(Icons.image_not_supported, size: 100, color: Colors.white));
     try {
-      if (data.length > 500) {
-        return Image.memory(base64Decode(data), fit: BoxFit.cover, color: Colors.black.withOpacity(0.2), colorBlendMode: BlendMode.darken);
+      if (data is Uint8List) {
+        return Image.memory(data, fit: BoxFit.cover, color: Colors.black.withOpacity(0.2), colorBlendMode: BlendMode.darken, errorBuilder: (c,e,s) => const Icon(Icons.broken_image, size: 100));
       }
-      return Image.file(File(data), fit: BoxFit.cover, color: Colors.black.withOpacity(0.2), colorBlendMode: BlendMode.darken);
-    } catch (e) {
-      return Container(color: Colors.red[100], child: const Icon(Icons.broken_image, size: 100));
-    }
+      if (data is String) {
+        if (data.startsWith('http')) {
+          return Image.network(data, fit: BoxFit.cover, color: Colors.black.withOpacity(0.2), colorBlendMode: BlendMode.darken, errorBuilder: (c,e,s) => const Icon(Icons.broken_image, size: 100));
+        }
+        return Image.file(File(data), fit: BoxFit.cover, color: Colors.black.withOpacity(0.2), colorBlendMode: BlendMode.darken, errorBuilder: (c,e,s) => const Icon(Icons.broken_image, size: 100));
+      }
+    } catch (e) {}
+    return Container(color: Colors.red[100], child: const Icon(Icons.broken_image, size: 100));
   }
 }
 
@@ -1694,7 +1738,7 @@ class ImagenInventario extends StatefulWidget {
 }
 
 class _ImagenInventarioState extends State<ImagenInventario> {
-  Future<String?>? _fotoFuture;
+  Future<dynamic>? _fotoFuture;
 
   @override
   void initState() {
@@ -1702,39 +1746,62 @@ class _ImagenInventarioState extends State<ImagenInventario> {
     _fotoFuture = _cargarFoto();
   }
 
-  Future<String?> _cargarFoto() async {
+  Future<dynamic> _cargarFoto() async {
+    if (_rutaFotosCache.containsKey(widget.id)) {
+      String data = _rutaFotosCache[widget.id]!;
+      if (data.isEmpty) return null;
+      
+      // Interceptor offline para Premium
+      if (data.startsWith('http')) {
+         String name = data.split('/').last;
+         if (!name.contains('.')) name += '.jpg';
+         File fPub = File('/storage/emulated/0/Pictures/Boxi/$name');
+         if (fPub.existsSync()) return fPub.path; // Retorna ruta local física
+      }
+      return data;
+    }
+
     final db = await DBHelper.instance.database;
     final res = await db.query('productos', columns: ['foto_path'], where: 'id = ?', whereArgs: [widget.id]);
-    if (res.isNotEmpty) return res.first['foto_path']?.toString();
+    if (res.isNotEmpty) {
+      String data = res.first['foto_path']?.toString() ?? "";
+      _rutaFotosCache[widget.id] = data; 
+      
+      if (data.isEmpty) return null;
+      if (data.startsWith('http')) {
+         String name = data.split('/').last;
+         if (!name.contains('.')) name += '.jpg';
+         File fPub = File('/storage/emulated/0/Pictures/Boxi/$name');
+         if (fPub.existsSync()) return fPub.path;
+      }
+      return data;
+    }
     return null;
   }
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<String?>(
+    return FutureBuilder<dynamic>(
       future: _fotoFuture,
       builder: (context, snapshot) {
-        if (!snapshot.hasData || snapshot.data!.isEmpty) {
+        if (!snapshot.hasData || snapshot.data == null) {
           return Container(color: Colors.grey.shade200, child: const Icon(Icons.image, color: Colors.grey, size: 30));
         }
 
-        String data = snapshot.data!;
+        dynamic data = snapshot.data!;
         try {
-          if (data.length > 500) {
-            Uint8List bytes;
-            if (_inventarioImageCache.containsKey(data)) {
-              bytes = _inventarioImageCache[data]!;
-            } else {
-              bytes = base64Decode(data);
-              if (_inventarioImageCache.length > 200) _inventarioImageCache.clear();
-              _inventarioImageCache[data] = bytes;
-            }
-            return Image.memory(bytes, fit: BoxFit.cover, width: double.infinity, height: double.infinity, gaplessPlayback: true, errorBuilder: (c,e,s) => const Icon(Icons.broken_image));
+          if (data is Uint8List) {
+             return Image.memory(data, fit: BoxFit.cover, width: double.infinity, height: double.infinity, gaplessPlayback: true, errorBuilder: (c,e,s) => const Icon(Icons.broken_image));
           }
-          return Image.file(File(data), fit: BoxFit.cover, width: double.infinity, height: double.infinity, gaplessPlayback: true, errorBuilder: (c,e,s) => const Icon(Icons.broken_image));
-        } catch (e) {
-          return const Icon(Icons.broken_image, color: Colors.red);
-        }
+          if (data is String) {
+             if (data.startsWith('http')) {
+               return Image.network(data, fit: BoxFit.cover, width: double.infinity, height: double.infinity, gaplessPlayback: true, errorBuilder: (c,e,s) => const Icon(Icons.broken_image));
+             }
+             return Image.file(File(data), fit: BoxFit.cover, width: double.infinity, height: double.infinity, gaplessPlayback: true, errorBuilder: (c,e,s) => const Icon(Icons.broken_image));
+          }
+        } catch (e) {}
+        
+        return const Icon(Icons.broken_image, color: Colors.red);
       }
     );
   }

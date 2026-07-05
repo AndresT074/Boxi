@@ -28,6 +28,7 @@ import 'servicio_respaldo.dart';
 import 'servicio_auth.dart';
 import 'servicio_nube.dart';
 import 'servicio_tema.dart';
+import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
@@ -35,7 +36,18 @@ import 'servicio_anuncios.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'servicio_notificaciones.dart';
+import 'package:flutter/foundation.dart'; 
 
+// 🔥 Función aislada a prueba de fallos y textos corruptos
+Uint8List? decodificarBase64Aislado(String b64) {
+  try { 
+    // Limpiamos espacios o saltos de línea basura que corrompen el Base64
+    String clean = b64.replaceAll(RegExp(r'\s+'), '');
+    return base64Decode(clean); 
+  } catch(e) { 
+    return null; // Si está corrupto, devuelve null pacíficamente
+  }
+}
 class PantallaPrincipal extends StatefulWidget {
   final bool esAdmin;
   const PantallaPrincipal({super.key, this.esAdmin = true});
@@ -93,6 +105,9 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     super.initState();
     ServicioNotificaciones.inicializar();
     ServicioNube.procesarColaOffline();
+    ServicioNube.migrarVariantesAlJSONyCarpetas().then((_) {
+      if (mounted) _cargar(); // Recargamos visualmente si hubo cambios
+    });
     _cargarConfig();
     _cargar();
     _intentarSincronizacionNube();
@@ -167,8 +182,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
 
   Future<void> _cargar() async {
     final db = await DBHelper.instance.database;
-    
-    try { await db.execute('ALTER TABLE categorias ADD COLUMN orden INTEGER DEFAULT 0'); } catch (_) {}
     
     final data = await db.query('productos',
         columns: ['id', 'nombre', 'precio_compra', 'precio_venta', 'descuento', 'stock', 'descripcion', 'variantes', 'orden', 'activo', 'ultima_modificacion', 'categoria', 'foto_path'],
@@ -828,7 +841,10 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         if (fotoPath.isNotEmpty) {
           try {
             Uint8List bytes;
-            if (fotoPath.length > 500) {
+            if (fotoPath.startsWith('http')) {
+              final response = await http.get(Uri.parse(fotoPath));
+              bytes = response.bodyBytes;
+            } else if (fotoPath.length > 500) {
               bytes = base64Decode(fotoPath);
             } else {
               final file = File(fotoPath);
@@ -1476,17 +1492,24 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
           maxHeight: 400,
           imageQuality: 70);
       if (image != null) {
-        final bytes = await image.readAsBytes();
-        String base64 = base64Encode(bytes);
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setString('logo_path', base64);
-        setState(() {
-          _logoPath = base64;
-          _logoImageCached = MemoryImage(bytes); // 🔥 Guardamos en el caché de memoria
-        });
-        if (FirebaseAuth.instance.currentUser != null) {
-          await ServicioNube.actualizarPerfilNegocioNube(
-              _nombreNegocio, base64);
+        // 🔥 SUBIMOS EL LOGO A CLOUDINARY PARA QUE SEA LIVIANO Y SE VEA EN LA WEB
+        String logoUrl = await ServicioNube.subirImagenACloudinary(image.path);
+
+        if (logoUrl.isNotEmpty) {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('logo_path', logoUrl);
+          setState(() {
+            _logoPath = logoUrl;
+            _logoImageCached = NetworkImage(logoUrl); // Caché en red
+          });
+          
+          if (FirebaseAuth.instance.currentUser != null) {
+            await ServicioNube.actualizarPerfilNegocioNube(_nombreNegocio, logoUrl);
+          }
+          
+          // Recompilar catálogo web con el nuevo logo de Cloudinary
+          await ServicioNube.compilarYSubirCatalogoRTDB();
+          _cargar();
         }
       }
     } finally {
@@ -1756,7 +1779,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   }
 
   void _mostrarDialogoAnadirProductosExistentes(String categoriaNombre) {
-    List<int> seleccionados = [];
+    List<int> seleccionados = []; // 🔥 Todo deseleccionado por defecto
     TextEditingController searchCtrl = TextEditingController();
     String busqueda = "";
 
@@ -2139,6 +2162,229 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       )
     );
   }
+
+  // 🔥 MODAL DE SELECCIÓN DE PRODUCTOS A COMPARTIR (Actualizado)
+  void _mostrarDialogoCompartirCategoria(String categoriaNombre, List<Map<String, dynamic>> prods) {
+    if (prods.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Esta categoría no tiene productos activos.")));
+      return;
+    }
+
+    List<int> seleccionados = []; // 🔥 Todo deseleccionado por defecto
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setStateDialog) {
+          final isOscuro = Theme.of(context).brightness == Brightness.dark;
+
+          return AlertDialog(
+            backgroundColor: Theme.of(context).cardColor,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(25)),
+            title: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text("Compartir de: $categoriaNombre", style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
+                const SizedBox(height: 6),
+                const Text("Selecciona los productos que deseas enviar:", style: TextStyle(fontSize: 12, color: Colors.grey)),
+              ],
+            ),
+            content: SizedBox(
+              width: double.maxFinite,
+              height: MediaQuery.of(context).size.height * 0.45,
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: prods.length,
+                itemBuilder: (context, idx) {
+                  final p = prods[idx];
+                  final int pId = p['id'] as int;
+                  final isSel = seleccionados.contains(pId);
+                  final String fotoPath = p['foto_path']?.toString() ?? "";
+                  final double precioVenta = (p['precio_venta'] as num).toDouble();
+
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 8),
+                    decoration: BoxDecoration(
+                      color: isSel 
+                          ? (isOscuro ? Colors.cyanAccent.withOpacity(0.08) : Colors.blue.withOpacity(0.05))
+                          : Colors.transparent,
+                      borderRadius: BorderRadius.circular(15),
+                      border: Border.all(
+                        color: isSel 
+                            ? (isOscuro ? Colors.cyanAccent : Colors.blue) 
+                            : (isOscuro ? Colors.white10 : Colors.grey.shade200)
+                      )
+                    ),
+                    child: ListTile(
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      onTap: () {
+                        setStateDialog(() {
+                          if (isSel) {
+                            seleccionados.remove(pId);
+                          } else {
+                            seleccionados.add(pId);
+                          }
+                        });
+                      },
+                      leading: Container(
+                        width: 45, height: 45,
+                        decoration: BoxDecoration(
+                          color: isOscuro ? Colors.black26 : Colors.grey.shade100,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        clipBehavior: Clip.antiAlias,
+                        child: fotoPath.isEmpty
+                            ? const Icon(Icons.image, color: Colors.grey, size: 20)
+                            : (fotoPath.startsWith('http')
+                                ? Image.network(fotoPath, fit: BoxFit.cover, errorBuilder: (_,__,___) => const Icon(Icons.broken_image))
+                                : (fotoPath.length > 500
+                                    ? Image.memory(base64Decode(fotoPath), fit: BoxFit.cover, gaplessPlayback: true)
+                                    : Image.file(File(fotoPath), fit: BoxFit.cover, gaplessPlayback: true, errorBuilder: (_,__,___) => const Icon(Icons.broken_image, size: 20)))),
+                      ),
+                      title: Text(
+                        p['nombre'], 
+                        style: TextStyle(fontSize: 13, fontWeight: isSel ? FontWeight.bold : FontWeight.w600),
+                        maxLines: 2, overflow: TextOverflow.ellipsis,
+                      ),
+                      subtitle: Text(
+                        "\$${precioVenta.toStringAsFixed(0)}", 
+                        style: TextStyle(fontSize: 11, color: isOscuro ? Colors.greenAccent : Colors.green, fontWeight: FontWeight.bold)
+                      ),
+                      trailing: Checkbox(
+                        activeColor: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1),
+                        checkColor: isOscuro ? Colors.black : Colors.white,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                        value: isSel,
+                        onChanged: (val) {
+                          setStateDialog(() {
+                            if (val == true) seleccionados.add(pId);
+                            else seleccionados.remove(pId);
+                          });
+                        },
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+            actionsPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx), 
+                child: const Text("CANCELAR", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold))
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: isOscuro ? Colors.cyanAccent.shade700 : const Color(0xFF0D47A1), 
+                  foregroundColor: isOscuro ? Colors.black : Colors.white,
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12)
+                ),
+                onPressed: seleccionados.isEmpty ? null : () {
+                  Navigator.pop(ctx);
+                  List<Map<String, dynamic>> prodsCompartir = prods.where((p) => seleccionados.contains(p['id'])).toList();
+                  // 🔥 Cambiado para mandar el nombre de la categoría
+                  _compartirMultiplesProductos(categoriaNombre, prodsCompartir);
+                },
+                child: Text(
+                  seleccionados.isEmpty ? "COMPARTIR" : "COMPARTIR (${seleccionados.length})", 
+                  style: const TextStyle(fontWeight: FontWeight.w900)
+                ),
+              ),
+            ],
+          );
+        }
+      )
+    );
+  }
+  // 🔥 PROCESADOR MASIVO DE ARCHIVOS E IMÁGENES (Sin advertencias de linter)
+  Future<void> _compartirMultiplesProductos(String categoriaNombre, List<Map<String, dynamic>> seleccionados) async {
+    if (seleccionados.isEmpty) return;
+    
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(color: Color(0xFF0D47A1)),
+            SizedBox(width: 20),
+            Expanded(child: Text("Preparando catálogo para compartir...")),
+          ],
+        ),
+      ),
+    );
+
+    try {
+      List<XFile> files = [];
+      StringBuffer sb = StringBuffer();
+      
+      // Formateador de moneda integrado ($20000 -> $20.000)
+      String formatMoney(double val) {
+        return '\$${val.toStringAsFixed(0).replaceAllMapped(RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'), (Match m) => '${m[1]}.')}';
+      }
+
+      // Diseño del Encabezado
+      sb.writeln("📂 *CATEGORÍA: ${categoriaNombre.toUpperCase()}*");
+      sb.writeln("━━━━━━━━━━━━━━━━━━━━\n");
+
+      for (var p in seleccionados) {
+        String nombre = p['nombre']?.toString() ?? "Producto";
+        String descPct = p['descuento']?.toString() ?? "0";
+        double descVal = double.tryParse(descPct) ?? 0;
+        double pOriginal = (p['precio_venta'] as num?)?.toDouble() ?? 0.0;
+        double pFinal = pOriginal - (pOriginal * (descVal / 100));
+
+        // 🔥 Diseño de viñeta clásico con punto (•) y sin rombos
+        if (descVal > 0) {
+          sb.writeln("• *$nombre* (En Oferta 🔥)");
+          sb.writeln(" ↳ Precio: *${formatMoney(pFinal)}* ~${formatMoney(pOriginal)}~ (-${descVal.toStringAsFixed(0)}%)");
+        } else {
+          sb.writeln("• *$nombre*");
+          sb.writeln(" ↳ Precio: *${formatMoney(pFinal)}*");
+        }
+        sb.writeln(""); // Salto de línea estético
+
+        // Resolver e incorporar imagen física usando directamente Directory.systemTemp.path
+        String imgData = p['foto_path']?.toString() ?? "";
+        if (imgData.isNotEmpty) {
+          try {
+            if (imgData.startsWith('http')) {
+              // Descargamos temporalmente de Cloudinary para pasarlo a Share
+              final response = await http.get(Uri.parse(imgData));
+              final file = File('${Directory.systemTemp.path}/shared_web_${p['id']}.png');
+              await file.writeAsBytes(response.bodyBytes);
+              files.add(XFile(file.path));
+            } else if (imgData.length > 500) {
+              // Base64
+              final bytes = base64Decode(imgData);
+              final file = File('${Directory.systemTemp.path}/shared_b64_${p['id']}.png');
+              await file.writeAsBytes(bytes);
+              files.add(XFile(file.path));
+            } else {
+              // Ruta física local de Pictures/Boxi
+              File file = File(imgData);
+              if (file.existsSync()) {
+                files.add(XFile(imgData));
+              }
+            }
+          } catch (_) {}
+        }
+      }
+
+      Navigator.pop(context); // Cerrar diálogo de carga
+
+      if (files.isNotEmpty) {
+        await Share.shareXFiles(files, text: sb.toString());
+      } else {
+        await Share.share(sb.toString());
+      }
+    } catch (e) {
+      Navigator.pop(context); // Asegurar cierre del diálogo de carga
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Error al empaquetar imágenes")));
+    }
+  }
   
   void _mostrarAgradecimiento() {
     const correo = "Revisordecuenta@gmail.com";
@@ -2160,7 +2406,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              "Gracias por tu apoyo querido usuario Premium 🙌\n\nSugerencias o problemas:",
+              "Muchas gracias por tu apoyo querid@ usuario Premium 🙌\n\nSugerencias o problemas:",
               style: TextStyle(
                   color: isOscuro ? Colors.white70 : Colors.black87),
             ),
@@ -2248,17 +2494,30 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
             children: [
               Stack(
                 children: [
-                  fotoPath.length > 500
+                  fotoPath.startsWith('http')
                       ? GestureDetector(
-                          onTap: () => _ampliarImagen(context, fotoPath, nombreProd),
+                          onTap: () => _ampliarImagen(context, () {
+                            String name = fotoPath.split('/').last;
+                            if (!name.contains('.')) name += '.jpg';
+                            File f = File('/storage/emulated/0/Pictures/Boxi/$name');
+                            return f.existsSync() ? f.path : fotoPath;
+                          }(), nombreProd),
                           child: Container(
                             color: Colors.black, 
-                            width: double.infinity,
-                            height: 280,
-                            child: Image.memory(base64Decode(fotoPath), fit: BoxFit.contain),
+                            width: double.infinity, 
+                            height: 280, 
+                            child: () {
+                              String name = fotoPath.split('/').last;
+                              if (!name.contains('.')) name += '.jpg';
+                              File f = File('/storage/emulated/0/Pictures/Boxi/$name');
+                              if (f.existsSync()) {
+                                return Image.file(f, fit: BoxFit.contain);
+                              }
+                              return Image.network(fotoPath, fit: BoxFit.contain, errorBuilder: (_,__,___) => const Icon(Icons.broken_image, color: Colors.white, size: 60));
+                            }()
                           ),
                         )
-                      : Container(height: 250, width: double.infinity, color: isOscuro ? Colors.white10 : Colors.grey.shade200, child: const Icon(Icons.image, size: 60, color: Colors.grey)),
+                          : Container(height: 250, width: double.infinity, color: isOscuro ? Colors.white10 : Colors.grey.shade200, child: const Icon(Icons.image, size: 60, color: Colors.grey)),
                   if (descPct > 0)
                     Positioned(
                       top: 15, left: 15,
@@ -2412,12 +2671,24 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         text += "\n💰 *Precio: \$${precioFinal.toStringAsFixed(0)}*";
       }
 
-      final db = await DBHelper.instance.database;
-      final List<Map<String, dynamic>> fotosDb = await db.query(
-        'fotos_variantes',
-        where: 'producto_id = ?',
-        whereArgs: [p['id']],
-      );
+      final List<Map<String, dynamic>> fotosDb = [];
+      String varStr = p['variantes']?.toString() ?? "";
+      if (varStr.length > 5) {
+        try {
+          List<dynamic> dec = jsonDecode(varStr);
+          var grupos = (dec.isNotEmpty && !dec[0].containsKey('grupo')) ? [{'opciones': dec}] : dec;
+          for (var g in grupos) {
+            for (var o in g['opciones']) {
+              if (o['foto_path'] != null && o['foto_path'].toString().isNotEmpty) {
+                fotosDb.add({
+                  'variante_nombre': o['nombre'],
+                  'foto_base64': o['foto_path'] // Mantienes esta key temporal para que el código de abajo funcione
+                });
+              }
+            }
+          }
+        } catch (_) {}
+      }
 
       List<String> fotosSeleccionadasBase64 = [];
       bool procederACompartir = true;
@@ -2436,9 +2707,30 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         }
 
         // 2. PRE-DECODIFICAR IMÁGENES UNA SOLA VEZ PARA ELIMINAR EL PARPADEO COMPLETAMENTE
+        // 2. OBTENER IMÁGENES (Soporta Cloudinary, Local y Base64)
         final List<Uint8List> decodedBytesList = [];
         for (var f in fotosFiltradas) {
-          decodedBytesList.add(base64Decode(f['foto_base64'] as String));
+          String imgData = f['foto_base64'] as String? ?? '';
+          if (imgData.startsWith('http')) {
+            try {
+              // Si es Cloudinary, la descargamos temporalmente para mostrarla
+              final response = await http.get(Uri.parse(imgData));
+              decodedBytesList.add(response.bodyBytes);
+            } catch (e) {
+              decodedBytesList.add(Uint8List(0)); // Placeholder vacío si falla internet
+            }
+          } else if (imgData.length > 500) {
+            // Si es Base64
+            decodedBytesList.add(base64Decode(imgData));
+          } else {
+            // Si es usuario gratuito (Ruta local)
+            File file = File(imgData);
+            if (file.existsSync()) {
+              decodedBytesList.add(await file.readAsBytes());
+            } else {
+              decodedBytesList.add(Uint8List(0));
+            }
+          }
         }
 
         final Map<int, bool> seleccionadas = {};
@@ -3412,6 +3704,16 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     }
     
     try {
+      if (data.startsWith('http')) {
+        // Interceptor offline
+        String name = data.split('/').last;
+        if (!name.contains('.')) name += '.jpg';
+        File fPub = File('/storage/emulated/0/Pictures/Boxi/$name');
+        if (fPub.existsSync()) {
+          return Image.file(fPub, fit: BoxFit.cover, width: double.infinity, height: double.infinity, gaplessPlayback: true);
+        }
+        return Image.network(data, fit: BoxFit.cover, width: double.infinity, height: double.infinity, gaplessPlayback: true, errorBuilder: (c,e,s) => const Icon(Icons.broken_image));
+      }
       if (data.length > 500) {
         _fotoCache[id] = base64Decode(data);
         return Image.memory(_fotoCache[id]!, fit: BoxFit.cover, width: double.infinity, height: double.infinity, gaplessPlayback: true, errorBuilder: (c,e,s) => const Icon(Icons.broken_image));
@@ -3729,11 +4031,15 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                                           _mostrarModalCrearCategoria(categoriaAEditar: cat);
                                         } else if (val == 'delete') {
                                           _eliminarCategoria(cat['id'], nombre);
+                                        }else if (val == 'share') {
+                                          // 🔥 Llamamos al nuevo selector masivo de la categoría
+                                          _mostrarDialogoCompartirCategoria(nombre, grupos[nombre] ?? []);
                                         }
                                       },
                                       itemBuilder: (ctx) => [
                                         const PopupMenuItem(value: 'edit', child: Row(children: [Icon(Icons.edit, size: 16, color: Colors.orangeAccent), SizedBox(width: 8), Text("Editar", style: TextStyle(fontSize: 13))])),
                                         const PopupMenuItem(value: 'delete', child: Row(children: [Icon(Icons.delete_outline, size: 16, color: Colors.redAccent), SizedBox(width: 8), Text("Eliminar", style: TextStyle(fontSize: 13))])),
+                                        const PopupMenuItem(value: 'share', child: Row(children: [Icon(Icons.share, size: 16, color: Colors.blueAccent), SizedBox(width: 8), Text("Compartir", style: TextStyle(fontSize: 13))])),
                                       ],
                                     ),
                                   ),
@@ -3939,10 +4245,10 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(15),
                 child: imagenSource is Uint8List 
-                  ? Image.memory(imagenSource, fit: BoxFit.contain)
-                  : (imagenSource is String && imagenSource.length > 500 
-                      ? Image.memory(base64Decode(imagenSource), fit: BoxFit.contain)
-                      : Image.file(File(imagenSource), fit: BoxFit.contain)),
+                  ? Image.memory(imagenSource, fit: BoxFit.contain, errorBuilder: (_,__,___) => const Icon(Icons.broken_image, color: Colors.white, size: 50))
+                  : (imagenSource.toString().startsWith('http')
+                      ? Image.network(imagenSource.toString(), fit: BoxFit.contain, errorBuilder: (_,__,___) => const Icon(Icons.broken_image, color: Colors.white, size: 50))
+                      : Image.file(File(imagenSource.toString()), fit: BoxFit.contain, errorBuilder: (_,__,___) => const Icon(Icons.broken_image, color: Colors.white, size: 50))),
               ),
             ),
             Positioned(
@@ -3965,7 +4271,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       ),
     );
   }
-  // 🔥 MÉTODOS PARA EDITAR EL NOMBRE
+  
   void _abrirModalEditar() {
     setState(() {
       _nombreController.text = _nombreNegocio;
@@ -4053,7 +4359,10 @@ class _DialogoVariantes extends StatefulWidget {
 class _DialogoVariantesState extends State<_DialogoVariantes> {
   final Map<String, int> _cantidades = {};
   final Map<String, TextEditingController> _controllers = {};
-  final Map<String, Uint8List> _bytesCache = {};
+  
+  // 🔥 Ahora almacena directamente la imagen procesada lista para usar (URL o Bytes)
+  final Map<String, dynamic> _fotosProcesadas = {}; 
+
   @override
   void initState() {
     super.initState();
@@ -4063,26 +4372,7 @@ class _DialogoVariantesState extends State<_DialogoVariantes> {
         String key = "${g}_$o"; 
         _cantidades[key] = 0;
         _controllers[key] = TextEditingController(text: "0");
-        String foto = opciones[o]['foto_path']?.toString() ?? "";
-        if (foto.length > 50) {
-          try { _bytesCache[key] = base64Decode(foto); } catch(e) {}
-        }
       }
-    }
-    Future<void> _cargarFotosDeDB() async {
-      final db = await DBHelper.instance.database;
-      final fotos = await db.query(
-        'fotos_variantes',
-        where: 'producto_id = ?',
-        whereArgs: [widget.producto['id']],
-      );
-      for (var f in fotos) {
-        String key = "${f['grupo_index']}_${f['opcion_index']}";
-        try {
-          _bytesCache[key] = base64Decode(f['foto_base64'] as String);
-        } catch (_) {}
-      }
-      if (mounted) setState(() {});
     }
     _cargarFotosDeDB();
   }
@@ -4103,6 +4393,35 @@ class _DialogoVariantesState extends State<_DialogoVariantes> {
     });
   }
 
+  Future<void> _cargarFotosDeDB() async {
+    for (int gIdx = 0; gIdx < widget.gruposVariantes.length; gIdx++) {
+      var opciones = widget.gruposVariantes[gIdx]['opciones'] ?? [];
+      for (int oIdx = 0; oIdx < opciones.length; oIdx++) {
+        String key = "${gIdx}_$oIdx";
+        String fotoData = opciones[oIdx]['foto_path'] ?? "";
+        
+        if (fotoData.startsWith('http')) {
+          String name = fotoData.split('/').last;
+          if (!name.contains('.')) name += '.jpg';
+          File fPub = File('/storage/emulated/0/Pictures/Boxi/Variantes/$name');
+          if (fPub.existsSync()) {
+            _fotosProcesadas[key] = fPub.path;
+            continue;
+          }
+        }
+        
+        if (fotoData.startsWith('http')) {
+          _fotosProcesadas[key] = fotoData;
+        } else if (fotoData.length > 500) {
+          _fotosProcesadas[key] = await compute(decodificarBase64Aislado, fotoData);
+        } else if (fotoData.isNotEmpty) {
+          _fotosProcesadas[key] = fotoData; 
+        }
+      }
+    }
+    if (mounted) setState(() {});
+  }
+
   void _ampliarImagen(BuildContext context, dynamic imagenSource, String nombre) {
     showDialog(
       context: context,
@@ -4117,28 +4436,16 @@ class _DialogoVariantesState extends State<_DialogoVariantes> {
               maxScale: 4.0,
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(15),
+                // 🔥 ESCUDO ANTI-CRASHEO 404
                 child: imagenSource is Uint8List 
-                  ? Image.memory(imagenSource, fit: BoxFit.contain)
-                  : (imagenSource is String && imagenSource.length > 500 
-                      ? Image.memory(base64Decode(imagenSource), fit: BoxFit.contain)
-                      : Image.file(File(imagenSource), fit: BoxFit.contain)),
+                  ? Image.memory(imagenSource, fit: BoxFit.contain, errorBuilder: (_,__,___) => const Icon(Icons.broken_image, color: Colors.white, size: 80))
+                  : (imagenSource is String && imagenSource.startsWith('http')
+                      ? Image.network(imagenSource, fit: BoxFit.contain, errorBuilder: (_,__,___) => const Icon(Icons.broken_image, color: Colors.white, size: 80))
+                      : Image.file(File(imagenSource.toString()), fit: BoxFit.contain, errorBuilder: (_,__,___) => const Icon(Icons.broken_image, color: Colors.white, size: 80))),
               ),
             ),
-            Positioned(
-              top: 10, right: 10,
-              child: IconButton(
-                icon: const Icon(Icons.close, color: Colors.white, size: 35),
-                onPressed: () => Navigator.pop(ctx),
-              ),
-            ),
-            Positioned(
-              bottom: 20,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 8),
-                decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(20)),
-                child: Text(nombre, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-              ),
-            ),
+            Positioned(top: 10, right: 10, child: IconButton(icon: const Icon(Icons.close, color: Colors.white, size: 35), onPressed: () => Navigator.pop(ctx))),
+            Positioned(bottom: 20, child: Container(padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 8), decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(20)), child: Text(nombre, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)))),
           ],
         ),
       ),
@@ -4161,123 +4468,97 @@ class _DialogoVariantesState extends State<_DialogoVariantes> {
           Container(width: 40, height: 4, decoration: BoxDecoration(color: isOscuro ? Colors.white24 : Colors.grey[300], borderRadius: BorderRadius.circular(10))),
           Padding(
             padding: const EdgeInsets.all(16),
-            child: Text(
-              widget.producto['nombre'], 
-              style: TextStyle(
-                fontWeight: FontWeight.w900, 
-                fontSize: 18, 
-                color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)
-              )
-            ),
+            child: Text(widget.producto['nombre'], style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18, color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1))),
           ),
-            const Divider(height: 1),
-            Flexible(
-              child: ListView.builder(
-                shrinkWrap: true,
-                itemCount: widget.gruposVariantes.length,
-                itemBuilder: (context, gIdx) {
-                  var grupo = widget.gruposVariantes[gIdx];
-                  List opciones = grupo['opciones'] ?? [];
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-                        child: Text(grupo['grupo'].toString().toUpperCase(), style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.blueGrey)),
-                      ),
-                      ...opciones.asMap().entries.where((entry) => entry.value['activo'] != false).map((entry) {
-                        int oIdx = entry.key;
-                        var o = entry.value;
-                        String key = "${gIdx}_$oIdx";
-                        return ListTile(
-                          key: ValueKey("tile_$key"),
-                          leading: GestureDetector( // 🔥 AGREGADO
-                            onTap: () {
-                              if (_bytesCache.containsKey(key)) {
-                                _ampliarImagen(context, _bytesCache[key], o['nombre']);
-                              }
-                            },
-                            child: Stack( // Usamos stack para poner el icono de lupa
-                              children: [
-                                Container(
-                                  width: 45, height: 45,
-                                  decoration: BoxDecoration(
-                                    color: Colors.grey[100], 
-                                    borderRadius: BorderRadius.circular(8),
-                                    border: Border.all(color: Colors.blue.shade100),
-                                  ),
-                                  clipBehavior: Clip.antiAlias,
-                                  child: _bytesCache.containsKey(key) 
-                                    ? Image.memory(_bytesCache[key]!, fit: BoxFit.cover, gaplessPlayback: true)
-                                    : const Icon(Icons.image, color: Colors.grey),
-                                ),
-                                if (_bytesCache.containsKey(key))
-                                  Positioned(
-                                    bottom: 0, right: 0,
-                                    child: Container(
-                                      decoration: const BoxDecoration(
-                                        color: Colors.black45, 
-                                        borderRadius: BorderRadius.only(topLeft: Radius.circular(5))
-                                      ),
-                                      child: const Icon(Icons.zoom_in, color: Colors.white, size: 12),
-                                    ),
-                                  ),
-                              ],
-                            ),
-                          ),
-                          title: Text(o['nombre'], 
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold, 
-                              fontSize: 14, 
-                              color: isOscuro ? Colors.white : Colors.black87 // ✅ Corregido
-                            )
-                          ),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
+          const Divider(height: 1),
+          Flexible(
+            child: ListView.builder(
+              shrinkWrap: true,
+              itemCount: widget.gruposVariantes.length,
+              itemBuilder: (context, gIdx) {
+                var grupo = widget.gruposVariantes[gIdx];
+                List opciones = grupo['opciones'] ?? [];
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                      child: Text(grupo['grupo'].toString().toUpperCase(), style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.blueGrey)),
+                    ),
+                    ...opciones.asMap().entries.where((entry) => entry.value['activo'] != false).map((entry) {
+                      int oIdx = entry.key;
+                      var o = entry.value;
+                      String key = "${gIdx}_$oIdx";
+                      dynamic fotoObj = _fotosProcesadas[key]; // 🔥 Dato procesado y seguro
+
+                      return ListTile(
+                        key: ValueKey("tile_$key"),
+                        leading: GestureDetector(
+                          onTap: () {
+                            if (fotoObj != null) _ampliarImagen(context, fotoObj, o['nombre']);
+                          },
+                          child: Stack(
                             children: [
-                              IconButton(
-                                icon: const Icon(Icons.remove_circle_outline, color: Colors.red), 
-                                onPressed: () => _updateQty(key, -1),
-                                constraints: const BoxConstraints(), padding: const EdgeInsets.all(8),
-                              ),
-                              SizedBox(
-                                width: 40,
-                                child: TextFormField(
-                                  controller: _controllers[key],
-                                  keyboardType: TextInputType.number,
-                                  textAlign: TextAlign.center,
-                                  style: const TextStyle(fontWeight: FontWeight.bold),
-                                  decoration: const InputDecoration(isDense: true, border: InputBorder.none),
-                                  onChanged: (v) => _cantidades[key] = int.tryParse(v) ?? 0,
+                              Container(
+                                width: 45, height: 45,
+                                decoration: BoxDecoration(
+                                  color: Colors.grey[100], 
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(color: Colors.blue.shade100),
                                 ),
+                                clipBehavior: Clip.antiAlias,
+                                child: fotoObj != null
+                                    ? (fotoObj is Uint8List
+                                        ? Image.memory(fotoObj, fit: BoxFit.cover, gaplessPlayback: true, errorBuilder: (_,__,___) => const Icon(Icons.broken_image, color: Colors.grey))
+                                        : (fotoObj.toString().startsWith('http')
+                                            ? Image.network(fotoObj.toString(), fit: BoxFit.cover, gaplessPlayback: true, errorBuilder: (_,__,___) => const Icon(Icons.broken_image, color: Colors.grey)) // 👈 ESTO EVITA EL CRASHEO 404
+                                            : Image.file(File(fotoObj.toString()), fit: BoxFit.cover, gaplessPlayback: true, errorBuilder: (_,__,___) => const Icon(Icons.broken_image, color: Colors.grey))))
+                                    : const Icon(Icons.image, color: Colors.grey),
                               ),
-                              IconButton(
-                                icon: const Icon(Icons.add_circle_outline, color: Colors.green), 
-                                onPressed: () => _updateQty(key, 1),
-                                constraints: const BoxConstraints(), padding: const EdgeInsets.all(8),
-                              ),
+                              if (fotoObj != null)
+                                Positioned(
+                                  bottom: 0, right: 0,
+                                  child: Container(decoration: const BoxDecoration(color: Colors.black45, borderRadius: BorderRadius.only(topLeft: Radius.circular(5))), child: const Icon(Icons.zoom_in, color: Colors.white, size: 12)),
+                                ),
                             ],
                           ),
-                        );
-                      }).toList(),
-                    ],
-                  );
-                },
-              ),
+                        ),
+                        title: Text(o['nombre'], style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: isOscuro ? Colors.white : Colors.black87)),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(icon: const Icon(Icons.remove_circle_outline, color: Colors.red), onPressed: () => _updateQty(key, -1), constraints: const BoxConstraints(), padding: const EdgeInsets.all(8)),
+                            SizedBox(
+                              width: 40,
+                              child: TextFormField(
+                                controller: _controllers[key], keyboardType: TextInputType.number, textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.bold),
+                                decoration: const InputDecoration(isDense: true, border: InputBorder.none),
+                                onChanged: (v) => _cantidades[key] = int.tryParse(v) ?? 0,
+                              ),
+                            ),
+                            IconButton(icon: const Icon(Icons.add_circle_outline, color: Colors.green), onPressed: () => _updateQty(key, 1), constraints: const BoxConstraints(), padding: const EdgeInsets.all(8)),
+                          ],
+                        ),
+                      );
+                    }).toList(),
+                  ],
+                );
+              },
             ),
-            Padding(
-              padding: const EdgeInsets.all(20),
-              child: ElevatedButton(
-                style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0D47A1), minimumSize: const Size(double.infinity, 50), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15))),
-                onPressed: () { widget.onAceptar(_cantidades); Navigator.pop(context); },
-                child: const Text("AÑADIR AL CARRITO", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-              ),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(20),
+            child: ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0D47A1), minimumSize: const Size(double.infinity, 50), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15))),
+              onPressed: () { widget.onAceptar(_cantidades); Navigator.pop(context); },
+              child: const Text("AÑADIR AL CARRITO", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
             ),
-          ],
-        ),
-      );
-    }
+          ),
+        ],
+      ),
+    );
   }
+}
 
 class PantallaSolicitudes extends StatefulWidget {
   const PantallaSolicitudes({super.key});

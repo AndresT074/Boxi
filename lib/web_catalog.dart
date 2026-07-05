@@ -6,7 +6,8 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart' show kIsWeb; // Nuevo
 import 'package:universal_html/js.dart' as js; 
-import 'package:http/http.dart' as http; // 🔥 NUEVO: Importación que faltaba en el catálogo
+import 'package:http/http.dart' as http; 
+import 'package:firebase_database/firebase_database.dart';
 
 class CatalogoWeb extends StatefulWidget {
   final String adminId;
@@ -28,7 +29,7 @@ class _CatalogoWebState extends State<CatalogoWeb> {
   Map<String, dynamic>? _negocioData;
   String? adminEmail;
   bool _estaCargando = true; 
-  Map<String, String> _fotosVariantesCache = {};
+  bool _enviandoPedido = false; 
 
   @override
   void initState() {
@@ -43,108 +44,91 @@ class _CatalogoWebState extends State<CatalogoWeb> {
   }
 
   Future<void> _iniciarCargaProgresiva() async {
-    setState(() {
-      _estaCargando = true;
-    });
+    setState(() => _estaCargando = true);
+    
+    debugPrint("🚀 [DIAGNOSIS] Iniciando carga progresiva...");
+    debugPrint("🚀 [DIAGNOSIS] ID del Admin recibido en la URL: '${widget.adminId}'");
+
+    if (widget.adminId.isEmpty || widget.adminId == "null") {
+      debugPrint("❌ [DIAGNOSIS] ERROR: El adminId está vacío o es null. La URL no está pasando el ID correctamente.");
+      setState(() => _estaCargando = false);
+      return;
+    }
 
     try {
-      // 1. Declaramos primero las referencias
-      final negRef = FirebaseFirestore.instance.collection('usuarios').doc(widget.adminId);
-      final prodRef = negRef.collection('productos');
-      final catRef = negRef.collection('categorias');
-
-      // 🔥 2. Descargamos y ordenamos las categorías
-      final catSnap = await catRef.get();
-      List<Map<String, dynamic>> listaCats = catSnap.docs.map((d) => d.data()).toList();
-      listaCats.sort((a, b) => (a['orden'] ?? 0).compareTo(b['orden'] ?? 0));
+      DatabaseReference ref = FirebaseDatabase.instance.ref("catalogos_web/${widget.adminId}");
+      debugPrint("🚀 [DIAGNOSIS] Consultando ruta en RTDB: catalogos_web/${widget.adminId}");
       
-      List<String> nombresCategorias = listaCats
-          .where((c) => c['activo'] == 1 || c['activo'] == true)
-          .map((c) => c['nombre'].toString())
-          .toList();
+      final snapshot = await ref.get();
+      debugPrint("🚀 [DIAGNOSIS] ¿Existe el nodo en la base de datos?: ${snapshot.exists}");
 
-      // 3. Descargamos la información del negocio
-      final negSnap = await negRef.get();
-      if (mounted && negSnap.exists) {
-        setState(() {
-          _negocioData = negSnap.data(); 
-          adminEmail = _negocioData?['email'];
-        });
-      }
+      if (snapshot.exists) {
+        Map<String, dynamic> datos = {};
+        final rawValue = snapshot.value;
+        debugPrint("🚀 [DIAGNOSIS] Tipo de dato recibido de Firebase: ${rawValue.runtimeType}");
 
-      final prodSnap = await prodRef.get();
-      if (!mounted) return;
-
-      List<Map<String, dynamic>> listaDocs = prodSnap.docs.map((doc) => doc.data()).toList();
-      listaDocs.sort((a, b) {
-        int ordenA = a['orden'] ?? 0;
-        int ordenB = b['orden'] ?? 0;
-        if (ordenA == ordenB) return (b['id'] ?? 0).compareTo(a['id'] ?? 0);
-        return ordenA.compareTo(ordenB);
-      });
-
-      setState(() {
-        _productos = listaDocs;
-        _categoriasOrdenadas = nombresCategorias;
-        _estaCargando = false; 
-      });
-      
-      if (kIsWeb) {
-        try {
-          js.context.callMethod('quitarLoader');
-        } catch (e) {
-          debugPrint("Error llamando a quitarLoader: $e");
+        if (rawValue is String) {
+          datos = jsonDecode(rawValue);
+        } else if (rawValue is Map) {
+          datos = Map<String, dynamic>.from(rawValue);
         }
+        
+        debugPrint("🚀 [DIAGNOSIS] Claves principales encontradas en el JSON: ${datos.keys.toList()}");
+
+        if (datos['negocio'] != null) {
+          _negocioData = Map<String, dynamic>.from(datos['negocio']);
+          adminEmail = _negocioData?['email'];
+          debugPrint("🚀 [DIAGNOSIS] Negocio cargado: ${_negocioData?['nombre_negocio']}");
+        }
+
+        if (datos['categorias'] != null) {
+          List<Map<String, dynamic>> listaCats = [];
+          
+          // 🔥 Evitar crasheo si Firebase RTDB metió un 'null' en la lista
+          for (var e in (datos['categorias'] as List)) {
+            if (e != null) {
+              listaCats.add(Map<String, dynamic>.from(e));
+            }
+          }
+          
+          // 🔥 Ordenar de forma segura convirtiendo a int
+          listaCats.sort((a, b) {
+            int oA = int.tryParse(a['orden']?.toString() ?? '0') ?? 0;
+            int oB = int.tryParse(b['orden']?.toString() ?? '0') ?? 0;
+            return oA.compareTo(oB);
+          });
+          
+          _categoriasOrdenadas = listaCats.map((c) => c['nombre'].toString()).toList();
+          debugPrint("🚀 [DIAGNOSIS] Categorías ordenadas cargadas: $_categoriasOrdenadas");
+        }
+
+        if (datos['productos'] != null) {
+          _productos = (datos['productos'] as List)
+              .map((e) => Map<String, dynamic>.from(e))
+              .toList();
+          debugPrint("🚀 [DIAGNOSIS] Cantidad de productos cargados: ${_productos.length}");
+        }
+
+        setState(() {
+          _estaCargando = false;
+        });
+      } else {
+        debugPrint("⚠️ [DIAGNOSIS] No se encontraron datos en esa ruta de Realtime Database (snapshot.exists es falso).");
+        setState(() => _estaCargando = false);
       }
 
-      _cargarFotosVariantesEnSegundoPlano();
-
-    } catch (e) {
-      debugPrint("Error de conexión con Firebase: $e");
       if (kIsWeb) {
         try { js.context.callMethod('quitarLoader'); } catch (_) {}
       }
-      if (mounted) {
-        setState(() => _estaCargando = false);
+
+    } catch (e, stack) {
+      debugPrint("❌ [DIAGNOSIS] ERROR CRÍTICO CAPTURADO: $e");
+      debugPrint("❌ [DIAGNOSIS] DETALLE DEL CRASH: $stack");
+      if (kIsWeb) {
+        try { js.context.callMethod('quitarLoader'); } catch (_) {}
       }
+      if (mounted) setState(() => _estaCargando = false);
     }
-  }
-  
-  Future<void> _cargarFotosVariantesEnSegundoPlano() async {
-    try {
-      final snapshot = await FirebaseFirestore.instance
-          .collection('usuarios')
-          .doc(widget.adminId)
-          .collection('fotos_variantes')
-          .get(); 
-
-      final Map<String, String> cache = {};
-      for (var doc in snapshot.docs) {
-        final data = doc.data();
-        final productoId = data['producto_id']?.toString() ?? '';
-        final grupoIndex = data['grupo_index']?.toString() ?? '';
-        final opcionIndex = data['opcion_index']?.toString() ?? '';
-        final fotoBase64 = data['foto_base64']?.toString() ?? '';
-
-        if (productoId.isNotEmpty && grupoIndex.isNotEmpty && opcionIndex.isNotEmpty && fotoBase64.length > 100) {
-          final clave = '${productoId}_${grupoIndex}_${opcionIndex}';
-          cache[clave] = fotoBase64;
-        }
-      }
-
-      if (mounted && cache.isNotEmpty) {
-        setState(() {
-          _fotosVariantesCache = cache;
-        });
-      }
-    } catch (e) {
-      print("Error cargando fotos de variantes: $e");
-    }
-  }
-
-  String _getFotoVariante(int productoId, int grupoIndex, int opcionIndex) {
-    final clave = '${productoId}_${grupoIndex}_${opcionIndex}';
-    return _fotosVariantesCache[clave] ?? '';
   }
 
   double get totalPedido => carrito.values.fold(
@@ -356,7 +340,7 @@ class _CatalogoWebState extends State<CatalogoWeb> {
 
     if (_negocioData != null) {
       nombre = _negocioData?['nombre_negocio'] ?? nombre;
-      logoB64 = _negocioData?['logo_base64'];
+      logoB64 = _negocioData?['logo_base64'] ?? _negocioData?['logo_path'] ?? _negocioData?['logo_url'];
     }
 
     double ancho = MediaQuery.of(context).size.width;
@@ -370,8 +354,14 @@ class _CatalogoWebState extends State<CatalogoWeb> {
           child: CircleAvatar(
             radius: size,
             backgroundColor: Colors.white,
-            child: logoB64 != null && logoB64.length > 100
-                ? ClipOval(child: Image.memory(base64Decode(logoB64), width: size * 2, height: size * 2, fit: BoxFit.cover, gaplessPlayback: true))
+            child: logoB64 != null && logoB64.isNotEmpty
+                ? ClipOval(
+                    child: logoB64.startsWith('http')
+                        ? Image.network(logoB64, width: size * 2, height: size * 2, fit: BoxFit.cover)
+                        : (logoB64.length > 500 
+                            ? Image.memory(base64Decode(logoB64), width: size * 2, height: size * 2, fit: BoxFit.cover, gaplessPlayback: true)
+                            : Icon(Icons.store, color: const Color(0xFF0D47A1), size: size)) // Fallback si es ruta local en la web
+                  )
                 : Icon(Icons.store, color: const Color(0xFF0D47A1), size: size),
           ),
         ),
@@ -528,10 +518,17 @@ class _CatalogoWebState extends State<CatalogoWeb> {
     List<dynamic> grps = [];
     if (tieneVariantes) {
       try {
-        var dec = jsonDecode(p['variantes']);
+        var dec = p['variantes'];
+        // 🔥 SOLUCIÓN: Si viene como String lo decodifica, si no, lo usa como List directamente
+        if (dec is String) {
+          dec = jsonDecode(dec);
+        }
+        
         grps = (dec is List && dec.isNotEmpty && !dec[0].containsKey('grupo')) 
-            ? [{'grupo': 'Opciones', 'opciones': dec}] : dec;
-      } catch(e){}
+            ? [{'grupo': 'Opciones', 'opciones': dec}] : List<dynamic>.from(dec);
+      } catch(e){
+        debugPrint("Error decodificando variantes del producto ${p['nombre']}: $e");
+      }
     }
 
     int cantTotalProd = 0;
@@ -556,8 +553,10 @@ class _CatalogoWebState extends State<CatalogoWeb> {
               children: [
                 ClipRRect(
                   borderRadius: const BorderRadius.vertical(top: Radius.circular(25)),
-                  child: p['foto_path'] != null && p['foto_path'].toString().length > 500
-                      ? Image.memory(base64Decode(p['foto_path']), fit: BoxFit.cover, width: double.infinity, height: double.infinity, gaplessPlayback: true,)
+                  child: p['foto_path'] != null && p['foto_path'].toString().isNotEmpty
+                      ? p['foto_path'].toString().startsWith('http')
+                          ? Image.network(p['foto_path'], fit: BoxFit.cover, width: double.infinity, height: double.infinity)
+                          : Image.memory(base64Decode(p['foto_path']), fit: BoxFit.cover, width: double.infinity, height: double.infinity, gaplessPlayback: true)
                       : Container(color: Colors.grey.shade100, width: double.infinity, height: double.infinity, child: const Icon(Icons.image, size: 40, color: Colors.grey)),
                 ),
                 
@@ -716,12 +715,14 @@ class _CatalogoWebState extends State<CatalogoWeb> {
                 children: [
                   Stack(
                     children: [
-                      p['foto_path'] != null && p['foto_path'].toString().length > 500
+                      p['foto_path'] != null && p['foto_path'].toString().isNotEmpty
                           ? Container(
                               color: Colors.black, 
                               width: double.infinity,
                               height: 300,
-                              child: Image.memory(base64Decode(p['foto_path']), fit: BoxFit.contain, gaplessPlayback: true)
+                              child: p['foto_path'].toString().startsWith('http')
+                                ? Image.network(p['foto_path'], fit: BoxFit.contain)
+                                : Image.memory(base64Decode(p['foto_path']), fit: BoxFit.contain, gaplessPlayback: true)
                             )
                           : Container(height: 250, width: double.infinity, color: Colors.grey.shade200, child: const Icon(Icons.image, size: 60, color: Colors.grey)),
                       if (descPct > 0)
@@ -779,7 +780,6 @@ class _CatalogoWebState extends State<CatalogoWeb> {
         producto: p,
         gruposVariantes: grps,
         cantidadesIniciales: carrito,
-        getFotoVariante: _getFotoVariante,
         onAceptar: (cantidadesNuevas) {
           int pId = p['id'];
           for (var entry in cantidadesNuevas.entries) {
@@ -910,8 +910,9 @@ class _CatalogoWebState extends State<CatalogoWeb> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (ctx) => Center(
-        child: Container(
+      builder: (ctx) => StatefulBuilder( // 🔥 Añadido para actualizar el botón de envío
+        builder: (ctx, setModalState) => Center(
+          child: Container(
           constraints: const BoxConstraints(maxWidth: 600), 
           decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.vertical(top: Radius.circular(35))),
           padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom + 20, left: 25, right: 25, top: 20),
@@ -996,7 +997,8 @@ class _CatalogoWebState extends State<CatalogoWeb> {
                     shape: const StadiumBorder(),
                     elevation: 5,
                   ),
-                  onPressed: () async {
+                  // 🔥 Si ya está enviando, deshabilitamos el botón físicamente (null)
+                  onPressed: _enviandoPedido ? null : () async {
                     String indClean = indC.text.trim().replaceAll(RegExp(r'\D'), '');
                     String numClean = tC.text.trim().replaceAll(RegExp(r'\D'), '');
                     String numeroCompleto = "$indClean$numClean";
@@ -1006,75 +1008,94 @@ class _CatalogoWebState extends State<CatalogoWeb> {
                       return;
                     }
         
-                    await prefs.setString('cache_nombre', nC.text.trim());
-                    await prefs.setString('cache_negocio', negC.text.trim());
-                    await prefs.setString('cache_depto', deptoC.text.trim());
-                    await prefs.setString('cache_ciudad', cC.text.trim());
-                    await prefs.setString('cache_direccion', dC.text.trim());
-                    
-                    // Guardamos localmente la configuración para el próximo pedido
-                    await prefs.setString('cache_telefono_indicativo', indClean);
-                    await prefs.setString('cache_telefono_numero', numClean);
-                    await prefs.setString('cache_telefono', numeroCompleto);
-        
-                    final DateTime ahora = DateTime.now();
-                    final DateTime fechaExpiracion = ahora.add(const Duration(days: 7));
-        
-                    StringBuffer sb = StringBuffer();
-                    sb.writeln("📦 *¡Hola! Acabo de hacer un pedido en tu catálogo web*\n");
-                    sb.writeln("*Cliente:* ${nC.text.trim()}");
-                    sb.writeln("*Mi pedido es:*");
-                    for (var item in carrito.values) {
-                      double pFinal = (item['precio_final'] as num).toDouble();
-                      sb.writeln("▪️ ${item['cantidad']}x ${item['nombre']} (\$${(pFinal * item['cantidad']).toStringAsFixed(0)})");
-                    }
-                    sb.writeln("\n*TOTAL:* \$${totalPedido.toStringAsFixed(0)}");
-                    sb.writeln("\nQuedo atento a la confirmación.");
+                    // 🔥 Bloqueamos clics adicionales inmediatamente
+                    setState(() => _enviandoPedido = true);
+                    setModalState(() {}); // Actualiza el modal para mostrar la animación de carga
 
-                    String mensajeCodificado = Uri.encodeComponent(sb.toString());
+                    try {
+                      await prefs.setString('cache_nombre', nC.text.trim());
+                      await prefs.setString('cache_negocio', negC.text.trim());
+                      await prefs.setString('cache_depto', deptoC.text.trim());
+                      await prefs.setString('cache_ciudad', cC.text.trim());
+                      await prefs.setString('cache_direccion', dC.text.trim());
+                      
+                      await prefs.setString('cache_telefono_indicativo', indClean);
+                      await prefs.setString('cache_telefono_numero', numClean);
+                      await prefs.setString('cache_telefono', numeroCompleto);
+          
+                      final DateTime ahora = DateTime.now();
+                      final DateTime fechaExpiracion = ahora.add(const Duration(days: 7));
+          
+                      StringBuffer sb = StringBuffer();
+                      sb.writeln("📦 *¡Hola! Acabo de hacer un pedido en tu catálogo web*\n");
+                      sb.writeln("*Cliente:* ${nC.text.trim()}");
+                      sb.writeln("*Mi pedido es:*");
+                      for (var item in carrito.values) {
+                        double pFinal = (item['precio_final'] as num).toDouble();
+                        sb.writeln("▪️ ${item['cantidad']}x ${item['nombre']} (\$${(pFinal * item['cantidad']).toStringAsFixed(0)})");
+                      }
+                      sb.writeln("\n*TOTAL:* \$${totalPedido.toStringAsFixed(0)}");
+                      sb.writeln("\nQuedo atento a la confirmación.");
 
-                    // Enviamos la orden con el número combinado
-                    await FirebaseFirestore.instance.collection('solicitudes').add({
-                      'adminId': widget.adminId,
-                      'adminEmail': adminEmail ?? "desconocido",
-                      'cliente': {
-                        'nombre': nC.text.trim(),
-                        'negocio': negC.text.trim(),
-                        'direccion': dC.text.trim(),
-                        'departamento': deptoC.text.trim(),
-                        'ciudad': cC.text.trim(),
-                        'telefono': numeroCompleto, // 👈 Enviado unificado
-                      },
-                      'productos': carrito.values.toList(), 
-                      'total': totalPedido,
-                      'estado': 'pendiente',
-                      'fecha': ahora.toIso8601String(),
-                      'expireAt': Timestamp.fromDate(fechaExpiracion),
-                    });
-                    //  Pega esto en su lugar (cambia con tu URL de Vercel):
-                    await http.post(
-                      Uri.parse('https://boxi-api.vercel.app/api/notificar'), // 👈 Tu URL de Vercel
-                      headers: {'Content-Type': 'application/json'},
-                      body: jsonEncode({
+                      String mensajeCodificado = Uri.encodeComponent(sb.toString());
+
+                      // Enviamos la orden
+                      await FirebaseFirestore.instance.collection('solicitudes').add({
                         'adminId': widget.adminId,
-                        'nombreCliente': nC.text.trim(),
-                      }),
-                    );
-                    Navigator.pop(ctx);
-                    
-                    setState(() => carrito.clear());
-                    _mostrarDialogoExito(mensajeCodificado); 
+                        'adminEmail': adminEmail ?? "desconocido",
+                        'cliente': {
+                          'nombre': nC.text.trim(),
+                          'negocio': negC.text.trim(),
+                          'direccion': dC.text.trim(),
+                          'departamento': deptoC.text.trim(),
+                          'ciudad': cC.text.trim(),
+                          'telefono': numeroCompleto,
+                        },
+                        'productos': carrito.values.toList(), 
+                        'total': totalPedido,
+                        'estado': 'pendiente',
+                        'fecha': ahora.toIso8601String(),
+                        'expireAt': Timestamp.fromDate(fechaExpiracion),
+                      });
+
+                      // Notificar por API
+                      await http.post(
+                        Uri.parse('https://boxi-api.vercel.app/api/notificar'),
+                        headers: {'Content-Type': 'application/json'},
+                        body: jsonEncode({
+                          'adminId': widget.adminId,
+                          'nombreCliente': nC.text.trim(),
+                        }),
+                      );
+
+                      Navigator.pop(ctx);
+                      setState(() => carrito.clear());
+                      _mostrarDialogoExito(mensajeCodificado); 
+                    } catch (e) {
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("❌ Error al procesar tu pedido: $e")));
+                    } finally {
+                      // 🔥 Liberamos el cerrojo de envíos al terminar (éxito o error)
+                      setState(() => _enviandoPedido = false);
+                    }
                   },
-                  child: const Text("ENVIAR PEDIDO", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18)),
-                ),
+                  // 🔥 Si está procesando, mostramos la animación de carga, de lo contrario el texto.
+                  child: _enviandoPedido
+                      ? const SizedBox(
+                          width: 24,
+                          height: 24,
+                          child: CircularProgressIndicator(color: Colors.white, strokeWidth: 3),
+                        )
+                      : const Text("ENVIAR PEDIDO", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18)),
+                ), // 1. Cierra ElevatedButton
                 const SizedBox(height: 10),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
+              ], // 2. Cierra children de Column
+            ), // 3. Cierra Column
+          ), // 4. Cierra SingleChildScrollView
+        ), // 5. Cierra Container
+      ), // 6. Cierra Center
+    ), // 7. Cierra StatefulBuilder (🔥 Añadido)
+  ); // 8. Cierra showModalBottomSheet
+} // 9. Cierra _abrirFinalizar()
 
   void _mostrarDialogoExito(String mensajeWhatsapp) {
     showDialog(
@@ -1233,14 +1254,12 @@ class _DialogoVariantesWeb extends StatefulWidget {
   final List<dynamic> gruposVariantes;
   final Map<String, Map<String, dynamic>> cantidadesIniciales;
   final Function(Map<String, int>) onAceptar;
-  final String Function(int productoId, int grupoIndex, int opcionIndex) getFotoVariante;
 
   const _DialogoVariantesWeb({
     required this.producto, 
     required this.gruposVariantes, 
     required this.cantidadesIniciales,
     required this.onAceptar,
-    required this.getFotoVariante,
   });
 
   @override
@@ -1301,11 +1320,11 @@ class _DialogoVariantesWebState extends State<_DialogoVariantesWeb> {
               maxScale: 4.0,
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(15),
-                child: Image.memory(
-                  base64Decode(b64),
-                  fit: BoxFit.contain,
-                  gaplessPlayback: true,
-                ),
+                child: b64.startsWith('http')
+                    ? Image.network(b64, fit: BoxFit.contain)
+                    : (b64.length > 500 
+                        ? Image.memory(base64Decode(b64), fit: BoxFit.contain, gaplessPlayback: true)
+                        : const Icon(Icons.broken_image, size: 50, color: Colors.grey)),
               ),
             ),
             Positioned(
@@ -1338,8 +1357,6 @@ class _DialogoVariantesWebState extends State<_DialogoVariantesWeb> {
 
   @override
   Widget build(BuildContext context) {
-    int productoId = widget.producto['id'];
-
     return Material(
       color: Colors.transparent,
       child: Center(
@@ -1374,12 +1391,16 @@ class _DialogoVariantesWebState extends State<_DialogoVariantesWeb> {
                     var grupo = widget.gruposVariantes[gIndex];
                     List<dynamic> opciones = grupo['opciones'] ?? [];
 
+                    // Salvavidas estético para grupos sin nombre
+                    String tituloGrupo = grupo['grupo']?.toString() ?? "";
+                    if (tituloGrupo.trim().isEmpty) tituloGrupo = "Opciones";
+
                     return Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 25, vertical: 10),
-                          child: Text(grupo['grupo'].toString().toUpperCase(), style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey, fontSize: 12, letterSpacing: 1)),
+                          child: Text(tituloGrupo.toUpperCase(), style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey, fontSize: 12, letterSpacing: 1)),
                         ),
                         ...opciones.asMap().entries.where((entry) {
                           var val = entry.value['activo'];
@@ -1389,15 +1410,16 @@ class _DialogoVariantesWebState extends State<_DialogoVariantesWeb> {
                           var o = entry.value;
                           String key = "${gIndex}_$oIndex";
 
-                          String foto = widget.getFotoVariante(productoId, gIndex, oIndex);
+                          String foto = o['foto_path']?.toString() ?? '';
+                          bool esCloudinary = foto.startsWith('http');
+                          bool esBase64 = foto.length > 500;
+                          bool tieneFotoWeb = esCloudinary || esBase64;
 
                           return ListTile(
                             contentPadding: const EdgeInsets.symmetric(horizontal: 25, vertical: 5),
                             leading: GestureDetector(
                               onTap: () {
-                                if (foto.length > 100) {
-                                  _ampliarImagen(foto, o['nombre']);
-                                }
+                                if (tieneFotoWeb) _ampliarImagen(foto, o['nombre']);
                               },
                               child: Stack(
                                 children: [
@@ -1409,11 +1431,14 @@ class _DialogoVariantesWebState extends State<_DialogoVariantesWeb> {
                                       border: Border.all(color: Colors.blue.shade100)
                                     ),
                                     clipBehavior: Clip.antiAlias,
-                                    child: foto.isNotEmpty && foto.length > 100
-                                        ? Image.memory(base64Decode(foto), fit: BoxFit.cover, gaplessPlayback: true)
+                                    // 🔥 WEB SEGURA: Solo renderiza HTTP o Base64, ignora rutas del celular
+                                    child: tieneFotoWeb
+                                        ? (esCloudinary
+                                            ? Image.network(foto, fit: BoxFit.cover, gaplessPlayback: true)
+                                            : Image.memory(base64Decode(foto), fit: BoxFit.cover, gaplessPlayback: true))
                                         : const Icon(Icons.image, color: Colors.grey),
                                   ),
-                                  if (foto.length > 100)
+                                  if (tieneFotoWeb)
                                     Positioned(
                                       bottom: 0, right: 0,
                                       child: Container(

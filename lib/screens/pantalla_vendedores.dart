@@ -547,8 +547,6 @@ class _AnuncioNativoWidgetState extends State<AnuncioNativoWidget> {
                     ),
                   ),
           ),
-          
-          // 🔘 ACCESO PREMIUM
           InkWell(
             onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PantallaPremium())),
             child: Container(

@@ -29,6 +29,7 @@ void main() async {
           projectId: "boxi-4a68c",
           authDomain: "boxi-4a68c.firebaseapp.com",
           storageBucket: "boxi-4a68c.firebasestorage.app",
+          databaseURL: "https://boxi-4a68c-default-rtdb.firebaseio.com",
         ),
       );
     } else {

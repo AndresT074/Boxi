@@ -79,7 +79,7 @@ class ServicioRespaldo {
         context: context,
         builder: (ctx) => AlertDialog(
           title: const Text("📥 Fusionar Datos"),
-          content: const Text("Se restaurarán productos, clientes y pedidos vinculándolos a tu inventario actual. Los duplicados se ignorarán."),
+          content: const Text("Se restaurarán categorías, productos, clientes y pedidos vinculándolos a tu inventario actual. Los duplicados se ignorarán."),
           actions:[
             TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("CANCELAR")),
             ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text("FUSIONAR")),
@@ -103,7 +103,21 @@ class ServicioRespaldo {
 
       // --- PROCESO DE FUSIÓN CON COMPROBACIONES DE SEGURIDAD ---
 
-      // VENDEDORES (Verificar si existe la tabla en el respaldo)
+      // CATEGORÍAS (🔥 AÑADIDO)
+      if (await _tablaExiste(dbRespaldo, 'categorias')) {
+        List<Map<String, dynamic>> catRes = await dbRespaldo.query('categorias');
+        for (var cat in catRes) {
+          var existe = await dbActual.query('categorias', where: 'nombre = ?', whereArgs: [cat['nombre']]);
+          if (existe.isEmpty) {
+            Map<String, dynamic> catNueva = Map.from(cat)..remove('id');
+            catNueva['ultima_modificacion'] = ahora; 
+            await dbActual.insert('categorias', catNueva);
+            contadorNuevos++;
+          }
+        }
+      }
+
+      // VENDEDORES
       if (await _tablaExiste(dbRespaldo, 'vendedores')) {
         List<Map<String, dynamic>> vRes = await dbRespaldo.query('vendedores');
         for (var v in vRes) {
@@ -196,19 +210,18 @@ class ServicioRespaldo {
         }
       }
 
-      // 🔥 EXCLUSIVO: FUSIÓN DE FOTOS DE VARIANTES (Evita pérdida de imágenes)
+      // FUSIÓN DE FOTOS DE VARIANTES (Para bases de datos muy antiguas)
       if (await _tablaExiste(dbRespaldo, 'fotos_variantes')) {
         List<Map<String, dynamic>> fvRes = await dbRespaldo.query('fotos_variantes');
         for (var fv in fvRes) {
           int? idProductoActual = pMap[fv['producto_id']];
           if (idProductoActual != null) {
-            // Comprobar si ya existe la foto de esta variante localmente
             var existe = await dbActual.query('fotos_variantes', 
                 where: 'producto_id = ? AND grupo_index = ? AND opcion_index = ?', 
                 whereArgs: [idProductoActual, fv['grupo_index'], fv['opcion_index']]);
             if (existe.isEmpty) {
               Map<String, dynamic> fvNueva = Map.from(fv);
-              fvNueva['producto_id'] = idProductoActual; // Re-vinculamos al nuevo ID
+              fvNueva['producto_id'] = idProductoActual; 
               fvNueva['ultima_modificacion'] = ahora;
               await dbActual.insert('fotos_variantes', fvNueva);
             }
@@ -230,12 +243,17 @@ class ServicioRespaldo {
       }
 
       await dbRespaldo.close();
-      onComplete(); // Refresca la UI de la pantalla principal
 
-      // Sincronizar cambios a la nube si es Premium
+      // 🔥 1. FORZAMOS LA RE-EJECUCIÓN DE LA MIGRACIÓN LOCAL
+      // Reseteamos temporalmente la bandera para que asimile los nuevos productos importados
       final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('migracion_definitiva_completa_v6', false);
+      await ServicioNube.migrarVariantesAlJSONyCarpetas();
+
+      onComplete(); // Refresca la UI de la pantalla principal
       if (prefs.getBool('es_premium') ?? false) {
         await ServicioNube.sincronizarBaseDatosHaciaNube();
+        await ServicioNube.migrarTodoACloudinary();
       }
 
       if (context.mounted) {
