@@ -1168,17 +1168,46 @@ class _CatalogoWebState extends State<CatalogoWeb> {
       ),
     );
   }
+  
   Widget _construirBloqueCategoria(String titulo, List<Map<String, dynamic>> prods, int columnas, bool esCelular) {
     if (prods.isEmpty) return const SizedBox.shrink();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (titulo.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 25, 20, 0),
-            child: Text(
-              titulo.toUpperCase(), 
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: Color(0xFF0D47A1), letterSpacing: 1)
+          Container(
+            margin: const EdgeInsets.fromLTRB(15, 30, 15, 10),
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFF0D47A1), Color(0xFF42A5F5)], // Degradado azul llamativo
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              borderRadius: BorderRadius.circular(20), // Bordes bien redondeados
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFF0D47A1).withOpacity(0.3),
+                  blurRadius: 10,
+                  offset: const Offset(0, 5),
+                )
+              ]
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min, // Se ajusta al tamaño del texto
+              children: [
+                const Icon(Icons.local_offer_rounded, color: Colors.white, size: 20),
+                const SizedBox(width: 8),
+                Text(
+                  titulo.toUpperCase(), 
+                  style: const TextStyle(
+                    fontSize: 16, 
+                    fontWeight: FontWeight.w900, 
+                    color: Colors.white, 
+                    letterSpacing: 1.2
+                  )
+                ),
+              ],
             ),
           ),
         GridView.builder(

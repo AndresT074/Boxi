@@ -726,37 +726,20 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
   Future<String> _capturarImagenBase64(ImageSource source) async {
     try {
       await [Permission.camera, Permission.photos].request();
-      XFile? x = await ImagePicker().pickImage(source: source);
+      
+      final XFile? x = await ImagePicker().pickImage(
+        source: source,
+        maxWidth: 800,
+        maxHeight: 800,
+        imageQuality: 70,
+      );
       
       if (x != null) {
-        Uint8List bytes = await x.readAsBytes();
-        String base64Result = "";
-        int anchoActual = 600; // Empezamos con tus 600px
-
-        // Preparamos el procesador de imagen
-        ui.Codec codec = await ui.instantiateImageCodec(bytes, targetWidth: anchoActual);
-        ui.FrameInfo fi = await codec.getNextFrame();
-        
-        // Bucle inteligente: si el texto Base64 se pasa de 1MB, bajamos el tamaño un poco
-        // Esto solo pasará con fotos muy pesadas para asegurar que Firestore las acepte.
-        do {
-          final ByteData? data = await fi.image.toByteData(format: ui.ImageByteFormat.png);
-          if (data == null) break;
-          bytes = data.buffer.asUint8List();
-          base64Result = base64Encode(bytes);
-          
-          if (base64Result.length > 1000000) {
-            anchoActual -= 50; // Bajamos de 50 en 50 hasta que quepa
-            codec = await ui.instantiateImageCodec(bytes, targetWidth: anchoActual);
-            fi = await codec.getNextFrame();
-          }
-        } while (base64Result.length > 1000000 && anchoActual > 100);
-
-        debugPrint("FOTO PROCESADA: ${base64Result.length / 1024} KB (Ancho: $anchoActual px)");
-        return base64Result;
+        final bytes = await x.readAsBytes();
+        return base64Encode(bytes);
       }
     } catch (e) {
-      debugPrint("Error imagen: $e");
+      debugPrint("Error al capturar imagen: $e");
     }
     return "";
   }
