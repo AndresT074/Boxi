@@ -457,15 +457,12 @@ class _PantallaInventarioState extends State<PantallaInventario> {
             style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
             onPressed: () async {
               final db = await DBHelper.instance.database;
-              
-              // Solo borramos el producto (el JSON contiene las variantes)
               await db.delete('productos', where: 'id = ?', whereArgs: [id]);
-              
-              // Borrar de Firebase
               if (_esPremium) {
-                ServicioNube.eliminarProductoNube(id);
+                ServicioNube.eliminarProductoNube(id); // Se encola si estás offline
+                ServicioNube.compilarYSubirCatalogoRTDB(); // Se actualizará al volver el internet
               }
-              ServicioNube.compilarYSubirCatalogoRTDB();
+              
               _cargar();
               if (mounted) Navigator.pop(ctx);
             },
@@ -1747,6 +1744,11 @@ class _ImagenInventarioState extends State<ImagenInventario> {
   }
 
   Future<dynamic> _cargarFoto() async {
+    final prefs = await SharedPreferences.getInstance();
+    
+    // 🔥 NUEVO: Cargar la ruta dinámica unificada resuelta en el Splash
+    String basePath = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
+
     if (_rutaFotosCache.containsKey(widget.id)) {
       String data = _rutaFotosCache[widget.id]!;
       if (data.isEmpty) return null;
@@ -1755,8 +1757,8 @@ class _ImagenInventarioState extends State<ImagenInventario> {
       if (data.startsWith('http')) {
          String name = data.split('/').last;
          if (!name.contains('.')) name += '.jpg';
-         File fPub = File('/storage/emulated/0/Pictures/Boxi/$name');
-         if (fPub.existsSync()) return fPub.path; // Retorna ruta local física
+         File fPub = File('$basePath/$name'); // 🔥 CAMBIADO: Usa la ruta dinámica
+         if (fPub.existsSync()) return fPub.path; 
       }
       return data;
     }
@@ -1771,7 +1773,7 @@ class _ImagenInventarioState extends State<ImagenInventario> {
       if (data.startsWith('http')) {
          String name = data.split('/').last;
          if (!name.contains('.')) name += '.jpg';
-         File fPub = File('/storage/emulated/0/Pictures/Boxi/$name');
+         File fPub = File('$basePath/$name'); // 🔥 CAMBIADO: Usa la ruta dinámica
          if (fPub.existsSync()) return fPub.path;
       }
       return data;

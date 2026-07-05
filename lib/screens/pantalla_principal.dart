@@ -99,22 +99,29 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   bool _isDragging = false;
   Offset? _startPos;
   final Set<String> _categoriasEnModoEliminacion = {};
+  String _localBoxiPath = ""; 
 
   @override
   void initState() {
     super.initState();
-    ServicioNotificaciones.inicializar();
-    ServicioNube.procesarColaOffline();
-    ServicioNube.migrarVariantesAlJSONyCarpetas().then((_) {
-      if (mounted) _cargar(); // Recargamos visualmente si hubo cambios
-    });
-    _cargarConfig();
-    _cargar();
-    _intentarSincronizacionNube();
-    _escucharSolicitudes();
+    _inicializarTodo(); // 🔥 INICIALIZACIÓN SECUENCIAL SIN CONCURRENCIA
     WidgetsBinding.instance.addObserver(this);
   }
 
+  // 🔥 INICIALIZACIÓN SECUENCIAL ULTRA RÁPIDA (La migración pesada ya se hizo en el Splash)
+  Future<void> _inicializarTodo() async {
+    try {
+      await ServicioNotificaciones.inicializar();
+      await _cargarConfig();
+      await _cargar(); // Carga de SQLite instantánea en 0.01 segundos
+      
+      await _intentarSincronizacionNube(); // Sincroniza la nube de forma segura
+      _escucharSolicitudes();
+    } catch (e) {
+      debugPrint("Error en inicialización secuencial: $e");
+    }
+  }
+  
   @override
   void dispose() {
     _dragCollapseTimer?.cancel(); 
@@ -149,13 +156,30 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       await prefs.setString('user_uid', user.uid);
     }
     FirebaseAnalytics.instance.logAppOpen();
+    
+    // 🔥 NUEVO: Cargar la ruta dinámica unificada
+    _localBoxiPath = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
+    
     String nombre = prefs.getString('nombre_negocio') ?? "MI NEGOCIO";
     String nuevaPath = prefs.getString('logo_path') ?? "";
     bool nuevoPremium = prefs.getBool('es_premium') ?? false;
 
     if (nuevaPath != _logoPath || _logoImageCached == null) {
       if (nuevaPath.isNotEmpty) {
-        if (nuevaPath.length > 500) {
+        if (nuevaPath.startsWith('http')) {
+          // 🔥 INTERCEPTOR OFFLINE PARA EL LOGO
+          String name = nuevaPath.split('/').last;
+          if (!name.contains('.')) name += '.png';
+          File fLogo = File('$_localBoxiPath/$name');
+
+          if (fLogo.existsSync()) {
+            _logoImageCached = FileImage(fLogo); // Carga local si no hay internet
+          } else {
+            _logoImageCached = NetworkImage(nuevaPath);
+            // Lo descarga de fondo para que funcione offline la próxima vez
+            ServicioNube.descargarFotoIndividualEnSegundoPlano(nuevaPath, _localBoxiPath);
+          }
+        } else if (nuevaPath.length > 500) {
           try {
             _logoImageCached = MemoryImage(base64Decode(nuevaPath));
           } catch (e) {
@@ -1438,6 +1462,8 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     if (_esPremium && !yaDescargoTodo && await ServicioNube.tieneInternet()) {
       try {
         await ServicioNube.descargarTodoDesdeNube();
+        await prefs.setBool('migracion_definitiva_completa_v6', false);
+        await ServicioNube.migrarVariantesAlJSONyCarpetas();
         await ServicioNube.limpiarFantasmasNubeYLocal(user.uid); 
         await prefs.setBool("descarga_completa_${user.uid}", true);
         await prefs.setBool("primera_carga_completada_${user.uid}", true);
@@ -1619,6 +1645,36 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                 await prefs.remove('ultima_mod_pedidos_local_${user.uid}');
                 await prefs.remove('ultima_mod_categorias_local_${user.uid}');
                 debugPrint("🗑️ Banderas eliminadas para el usuario ${user.uid}");
+              }
+
+              // 🔥 1. RESET DE BANDERA DE MIGRACIÓN PARA EL PRÓXIMO INGRESO
+              await prefs.remove('migracion_definitiva_completa_v6');
+
+              // 🔥 2. LIMPIEZA FÍSICA AGRESIVA DE LA GALERÍA (Privada y Pública)
+              try {
+                String pathBoxi = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
+                final boxiDir = Directory(pathBoxi);
+                if (await boxiDir.exists()) {
+                  // Vaciamos archivos internos primero (Ayuda con permisos en Android 11+)
+                  final List<FileSystemEntity> entities = await boxiDir.list(recursive: true).toList();
+                  for (FileSystemEntity entity in entities) {
+                    if (entity is File) await entity.delete();
+                  }
+                  await boxiDir.delete(recursive: true);
+                }
+                
+                // Forzamos también el borrado explícito de la pública por si quedó huérfana
+                final pubDir = Directory('/storage/emulated/0/Pictures/Boxi');
+                if (await pubDir.exists()) {
+                  final List<FileSystemEntity> entities = await pubDir.list(recursive: true).toList();
+                  for (FileSystemEntity entity in entities) {
+                    if (entity is File) await entity.delete();
+                  }
+                  await pubDir.delete(recursive: true);
+                }
+                debugPrint("🗑️ Carpetas Boxi vaciadas y eliminadas físicamente.");
+              } catch (e) {
+                debugPrint("Error eliminando carpeta Boxi: $e");
               }
               Navigator.pop(ctx);
               
@@ -2499,7 +2555,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                           onTap: () => _ampliarImagen(context, () {
                             String name = fotoPath.split('/').last;
                             if (!name.contains('.')) name += '.jpg';
-                            File f = File('/storage/emulated/0/Pictures/Boxi/$name');
+                            File f = File('$_localBoxiPath/$name');
                             return f.existsSync() ? f.path : fotoPath;
                           }(), nombreProd),
                           child: Container(
@@ -2509,7 +2565,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                             child: () {
                               String name = fotoPath.split('/').last;
                               if (!name.contains('.')) name += '.jpg';
-                              File f = File('/storage/emulated/0/Pictures/Boxi/$name');
+                              File f = File('$_localBoxiPath/$name');
                               if (f.existsSync()) {
                                 return Image.file(f, fit: BoxFit.contain);
                               }
@@ -3705,13 +3761,17 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     
     try {
       if (data.startsWith('http')) {
-        // Interceptor offline
+        // Interceptor offline usando la ruta dinámica
         String name = data.split('/').last;
         if (!name.contains('.')) name += '.jpg';
-        File fPub = File('/storage/emulated/0/Pictures/Boxi/$name');
+        File fPub = File('$_localBoxiPath/$name');
+        
         if (fPub.existsSync()) {
           return Image.file(fPub, fit: BoxFit.cover, width: double.infinity, height: double.infinity, gaplessPlayback: true);
         }
+        
+        ServicioNube.descargarFotoIndividualEnSegundoPlano(data, _localBoxiPath);
+        
         return Image.network(data, fit: BoxFit.cover, width: double.infinity, height: double.infinity, gaplessPlayback: true, errorBuilder: (c,e,s) => const Icon(Icons.broken_image));
       }
       if (data.length > 500) {
@@ -3724,7 +3784,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     
     return const Icon(Icons.broken_image, color: Colors.red);
   }
-
+  
   void _detenerArrastreGlobal() {
     _dragTimer?.cancel();
     _autoScrollTimer?.cancel();
@@ -4394,6 +4454,9 @@ class _DialogoVariantesState extends State<_DialogoVariantes> {
   }
 
   Future<void> _cargarFotosDeDB() async {
+    final prefs = await SharedPreferences.getInstance();
+    String pathBoxi = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
+
     for (int gIdx = 0; gIdx < widget.gruposVariantes.length; gIdx++) {
       var opciones = widget.gruposVariantes[gIdx]['opciones'] ?? [];
       for (int oIdx = 0; oIdx < opciones.length; oIdx++) {
@@ -4403,9 +4466,16 @@ class _DialogoVariantesState extends State<_DialogoVariantes> {
         if (fotoData.startsWith('http')) {
           String name = fotoData.split('/').last;
           if (!name.contains('.')) name += '.jpg';
-          File fPub = File('/storage/emulated/0/Pictures/Boxi/Variantes/$name');
-          if (fPub.existsSync()) {
-            _fotosProcesadas[key] = fPub.path;
+          
+          // 🔥 Buscamos en Variantes y en la raíz por si el auto-curador la guardó ahí
+          File fVar = File('$pathBoxi/Variantes/$name');
+          File fRoot = File('$pathBoxi/$name');
+          
+          if (fVar.existsSync()) {
+            _fotosProcesadas[key] = fVar.path;
+            continue;
+          } else if (fRoot.existsSync()) {
+            _fotosProcesadas[key] = fRoot.path;
             continue;
           }
         }

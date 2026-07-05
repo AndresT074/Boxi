@@ -199,6 +199,7 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
     _sincronizarAlEntrar();
     _verificarReembolsosEnSilencio();
   }
+
   @override
   void dispose() {
     _controller.dispose();
@@ -210,14 +211,43 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
     final prefs = await SharedPreferences.getInstance();
     if (!mounted) return;
 
-    String nuevoNombre =
-        prefs.getString('nombre_negocio') ?? "NOMBREDETUNEGOCIOAQUI";
+    // 🔥 RESOLVER Y UNIFICAR LA RUTA DE CARPETA BOXI (PÚBLICA O PRIVADA)
+    final appDir = await getApplicationDocumentsDirectory();
+    String rutaFinal = '${appDir.path}/Boxi';
+    try {
+      final pubDir = Directory('/storage/emulated/0/Pictures/Boxi');
+      if (!await pubDir.exists()) await pubDir.create(recursive: true);
+      
+      // Usamos .png para que Android 11+ (MediaStore) no bloquee la prueba de escritura
+      final test = File('${pubDir.path}/test.png');
+      await test.writeAsBytes([0]); 
+      await test.delete();
+      rutaFinal = pubDir.path; // ¡Éxito! Tenemos acceso a la galería pública
+    } catch (e) {
+      debugPrint("No se pudo usar Pictures/Boxi: $e");
+    }
+    await prefs.setString('local_boxi_path', rutaFinal);
+
+    String nuevoNombre = prefs.getString('nombre_negocio') ?? "NOMBREDETUNEGOCIOAQUI";
     String nuevaPath = prefs.getString('logo_path') ?? "";
     bool nuevoPremium = prefs.getBool('es_premium') ?? false;
 
     if (nuevaPath != _logoPath || _imageCached == null) {
       if (nuevaPath.isNotEmpty) {
-        if (nuevaPath.length > 500) {
+        if (nuevaPath.startsWith('http')) {
+          // 🔥 INTERCEPTOR OFFLINE PARA EL LOGO
+          String name = nuevaPath.split('/').last;
+          if (!name.contains('.')) name += '.png';
+          File fLogo = File('$rutaFinal/$name');
+          
+          if (fLogo.existsSync()) {
+            _imageCached = FileImage(fLogo); // Carga local si no hay internet
+          } else {
+            _imageCached = NetworkImage(nuevaPath); 
+            // Lo descarga de fondo para que funcione offline la próxima vez
+            ServicioNube.descargarFotoIndividualEnSegundoPlano(nuevaPath, rutaFinal);
+          }
+        } else if (nuevaPath.length > 500) {
           try {
             _imageCached = MemoryImage(base64Decode(nuevaPath));
           } catch (e) {
@@ -260,7 +290,6 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
 
   Future<void> _sincronizacionSilenciosa(User user) async {
     try {
-      // 🔥 EVITA QUE SE QUEDE CARGANDO INDEFINIDAMENTE SI NO HAY INTERNET
       if (!await ServicioNube.tieneInternet()) {
         debugPrint("Sin conexión a internet. Saltando sincronización silenciosa.");
         return; 
@@ -292,7 +321,13 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
         String llaveDescarga = "descarga_completa_${user.uid}";
         bool yaDescargoTodo = prefs.getBool(llaveDescarga) ?? false;
         if (!yaDescargoTodo) {
+          // Descarga base de datos de Realtime + Firestore
           await ServicioNube.descargarTodoDesdeNube();
+          
+          // 🔥 BLOQUEANTE: Forzamos la descarga de imágenes en la pantalla de bienvenida al iniciar sesión
+          await prefs.setBool('migracion_definitiva_completa_v6', false); // Reseteamos bandera
+          await ServicioNube.migrarVariantesAlJSONyCarpetas(); // Descarga secuencial 1 por 1
+          
           await prefs.setBool(llaveDescarga, true);
           await prefs.setBool('primera_carga_completada_${user.uid}', true);
           final userDoc = await FirebaseFirestore.instance
@@ -318,7 +353,6 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
           }
         }
         
-        // 🔥 LANZAR MIGRACIÓN AUTOMÁTICA EN INICIO PARA PREMIUMS (RÁPIDA Y SILENCIOSA)
         await ServicioNube.migrarTodoACloudinary();
       }
       if (mounted) setState(() {});
@@ -811,6 +845,37 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
               await prefs.remove('admin_pregunta');
               await prefs.remove('admin_respuesta');
               await prefs.remove('admin_biometria_activa');
+
+              // 🔥 1. RESET DE BANDERA DE MIGRACIÓN PARA EL PRÓXIMO INGRESO
+              await prefs.remove('migracion_definitiva_completa_v6');
+
+              // 🔥 2. LIMPIEZA FÍSICA AGRESIVA DE LA GALERÍA (Privada y Pública)
+              try {
+                String pathBoxi = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
+                final boxiDir = Directory(pathBoxi);
+                if (await boxiDir.exists()) {
+                  // Vaciamos archivos internos primero (Ayuda con permisos en Android 11+)
+                  final List<FileSystemEntity> entities = await boxiDir.list(recursive: true).toList();
+                  for (FileSystemEntity entity in entities) {
+                    if (entity is File) await entity.delete();
+                  }
+                  await boxiDir.delete(recursive: true);
+                }
+                
+                // Forzamos también el borrado explícito de la pública por si quedó huérfana
+                final pubDir = Directory('/storage/emulated/0/Pictures/Boxi');
+                if (await pubDir.exists()) {
+                  final List<FileSystemEntity> entities = await pubDir.list(recursive: true).toList();
+                  for (FileSystemEntity entity in entities) {
+                    if (entity is File) await entity.delete();
+                  }
+                  await pubDir.delete(recursive: true);
+                }
+                debugPrint("🗑️ Carpetas Boxi vaciadas y eliminadas físicamente.");
+              } catch (e) {
+                debugPrint("Error eliminando carpeta Boxi: $e");
+              }
+
               Navigator.pop(ctx);
               
               // Se limpian siempre las tablas locales para garantizar una sincronización limpia al volver a ingresar
