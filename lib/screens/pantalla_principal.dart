@@ -2491,6 +2491,9 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       sb.writeln("📂 *CATEGORÍA: ${categoriaNombre.toUpperCase()}*");
       sb.writeln("━━━━━━━━━━━━━━━━━━━━\n");
 
+      // 🔥 OBTENEMOS EL DIRECTORIO AUTORIZADO PARA COMPARTIR
+      final tempDir = await getTemporaryDirectory();
+
       for (var p in seleccionados) {
         String nombre = p['nombre']?.toString() ?? "Producto";
         String descPct = p['descuento']?.toString() ?? "0";
@@ -2513,7 +2516,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
           try {
             Uint8List? bytesImagen;
             
-            // 🔥 OFFLINE-FIRST: Buscamos primero la ruta legible (Original o _safe) en el dispositivo
+            // 🔥 OFFLINE-FIRST: Buscamos primero la ruta legible
             String? rutaSegura = await ServicioNube.obtenerRutaLegibleSegura(imgData);
             if (rutaSegura != null) {
               bytesImagen = await File(rutaSegura).readAsBytes();
@@ -2535,8 +2538,8 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
               // Estampamos el nombre del producto en la imagen
               Uint8List bytesConTexto = await _escribirNombreEnImagen(bytesImagen, nombre);
 
-              // Todo va a systemTemp para evitar el bloqueo de WhatsApp
-              final file = File('${Directory.systemTemp.path}/share_${p['id']}.png');
+              // 🔥 SE GUARDA EN LA CARPETA PERMITIDA POR ANDROID/IOS
+              final file = File('${tempDir.path}/share_${p['id']}_${DateTime.now().millisecondsSinceEpoch}.png');
               await file.writeAsBytes(bytesConTexto);
               files.add(XFile(file.path));
             }
@@ -2546,7 +2549,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         }
       }
 
-      Navigator.pop(context); // Cerrar diálogo de carga
+      if (mounted) Navigator.pop(context); // Cerrar diálogo de carga
 
       if (files.isNotEmpty) {
         await Share.shareXFiles(files, text: sb.toString());
@@ -2554,7 +2557,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         await Share.share(sb.toString());
       }
     } catch (e) {
-      Navigator.pop(context); // Asegurar cierre del diálogo de carga
+      if (mounted) Navigator.pop(context); // Asegurar cierre del diálogo de carga
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Error al empaquetar imágenes")));
     }
   }
@@ -3020,7 +3023,9 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       if (!procederACompartir) return; 
 
       List<XFile> files = [];
-      final tempDir = Directory.systemTemp; 
+      // 🔥 REEMPLAZO CLAVE: Directorio autorizado en vez de Directory.systemTemp
+      final tempDir = await getTemporaryDirectory(); 
+      final String timestamp = DateTime.now().millisecondsSinceEpoch.toString();
       
       if (compartirSeleccion == false || compartirSeleccion == null) {
         // Opción A: Solo foto principal
@@ -3028,7 +3033,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
           try {
             Uint8List? bytesP;
             
-            // 🔥 OFFLINE-FIRST: Buscamos primero la foto principal guardada de forma local
+            // 🔥 OFFLINE-FIRST
             String? rutaSegura = await ServicioNube.obtenerRutaLegibleSegura(imgData);
             if (rutaSegura != null) {
               bytesP = await File(rutaSegura).readAsBytes();
@@ -3047,7 +3052,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
             }
 
             if (bytesP != null) {
-              final file = File('${tempDir.path}/prod_share_${p['id']}.png');
+              final file = File('${tempDir.path}/prod_share_${p['id']}_$timestamp.png');
               await file.writeAsBytes(bytesP);
               files.add(XFile(file.path));
             }
@@ -3060,7 +3065,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
             String fVarUrl = fotosSeleccionadasBase64[i];
             Uint8List? bytesVar;
 
-            // 🔥 OFFLINE-FIRST: Buscamos primero la foto de variante guardada de forma local
+            // 🔥 OFFLINE-FIRST
             String? rutaSeguraVar = await ServicioNube.obtenerRutaLegibleSegura(fVarUrl);
             if (rutaSeguraVar != null) {
               bytesVar = await File(rutaSeguraVar).readAsBytes();
@@ -3079,7 +3084,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
             }
 
             if (bytesVar != null) {
-              final file = File('${tempDir.path}/var_share_${p['id']}_$i.png');
+              final file = File('${tempDir.path}/var_share_${p['id']}_${i}_$timestamp.png');
               await file.writeAsBytes(bytesVar);
               files.add(XFile(file.path));
             }

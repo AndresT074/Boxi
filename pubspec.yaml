@@ -2,7 +2,7 @@ name: Boxi
 description: "A new Flutter project."
 publish_to: 'none' 
 
-version: 1.2.8+48
+version: 1.2.9+49
 
 environment:
   sdk: ^3.11.4
