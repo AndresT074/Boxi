@@ -72,11 +72,8 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   bool _estaBuscando = false;
   bool _procesandoImagen = false;
   bool _mostrarAvisoReorganizar = true;
-  bool _estaArrastrandoCategoria = false;
-  Map<String, bool> _categoriasExpandidasBackup = {};
-  Timer? _dragCollapseTimer;
-  bool _dragTriggered = false;
   Timer? _timerReorden;
+  Map<String, bool> _categoriasExpandidasBackup = {}; // 🔥 Almacena el estado de expansión previo
   double _alturaCarrito = 150.0;
   bool _isDraggingCarrito = false;
   final double _minAltura = 0;
@@ -124,7 +121,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   
   @override
   void dispose() {
-    _dragCollapseTimer?.cancel(); 
     _nombreController.dispose();
     _timerReorden?.cancel();
     _subSolicitudes?.cancel();
@@ -157,7 +153,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     }
     FirebaseAnalytics.instance.logAppOpen();
     
-    // 🔥 NUEVO: Cargar la ruta dinámica unificada
+    // Leemos la ruta que ya resolvió la bienvenida
     _localBoxiPath = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
     
     String nombre = prefs.getString('nombre_negocio') ?? "MI NEGOCIO";
@@ -166,27 +162,21 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
 
     if (nuevaPath != _logoPath || _logoImageCached == null) {
       if (nuevaPath.isNotEmpty) {
-        if (nuevaPath.startsWith('http')) {
-          // 🔥 INTERCEPTOR OFFLINE PARA EL LOGO
-          String name = nuevaPath.split('/').last;
-          if (!name.contains('.')) name += '.png';
-          File fLogo = File('$_localBoxiPath/$name');
+        // 🔥 Comprobamos asincrónicamente sin congelar el hilo principal
+        String? rutaSegura = await ServicioNube.obtenerRutaLegibleSegura(nuevaPath);
 
-          if (fLogo.existsSync()) {
-            _logoImageCached = FileImage(fLogo); // Carga local si no hay internet
-          } else {
+        if (rutaSegura != null) {
+          _logoImageCached = FileImage(File(rutaSegura));
+        } else {
+          if (nuevaPath.startsWith('http')) {
             _logoImageCached = NetworkImage(nuevaPath);
-            // Lo descarga de fondo para que funcione offline la próxima vez
-            ServicioNube.descargarFotoIndividualEnSegundoPlano(nuevaPath, _localBoxiPath);
-          }
-        } else if (nuevaPath.length > 500) {
-          try {
-            _logoImageCached = MemoryImage(base64Decode(nuevaPath));
-          } catch (e) {
+            final appDir = await getApplicationDocumentsDirectory();
+            ServicioNube.descargarFotoIndividualEnSegundoPlano(nuevaPath, '${appDir.path}/Boxi');
+          } else if (nuevaPath.length > 500) {
+            try { _logoImageCached = MemoryImage(base64Decode(nuevaPath)); } catch (_) { _logoImageCached = null; }
+          } else {
             _logoImageCached = null;
           }
-        } else if (File(nuevaPath).existsSync()) {
-          _logoImageCached = FileImage(File(nuevaPath));
         }
       } else {
         _logoImageCached = null;
@@ -198,10 +188,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       _logoPath = nuevaPath;
       _esPremium = nuevoPremium;
     });
-    FirebaseAnalytics.instance.setUserProperty(
-      name: 'nombre_negocio', 
-      value: _nombreNegocio
-    );
+    FirebaseAnalytics.instance.setUserProperty(name: 'nombre_negocio', value: _nombreNegocio);
   }
 
   Future<void> _cargar() async {
@@ -274,6 +261,47 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       _badgePedidos = pedidosAtascados;
       _aplicarFiltro();
     });
+  }
+
+  // 🔥 NUEVO: Buscador ultra rápido O(1) de archivos locales fijos para la cuadrícula
+  String? _obtenerRutaFisicaLegibleSync(String urlOPath) {
+    if (urlOPath.isEmpty) return null;
+    if (!urlOPath.startsWith('http')) {
+      try {
+        final f = File(urlOPath);
+        if (f.existsSync()) {
+          final raf = f.openSync();
+          raf.readSync(1);
+          raf.closeSync();
+          return urlOPath;
+        }
+      } catch (_) {}
+      return null;
+    }
+
+    String name = urlOPath.split('/').last;
+    String ext = name.contains('.') ? name.split('.').last : 'jpg';
+    String id = name.split('.').first;
+
+    // Evaluamos rutas específicas fijas (Instantáneo, nunca congela la UI)
+    final candidatos = [
+      File('$_localBoxiPath/$name'),
+      File('$_localBoxiPath/${id}_safe.$ext'),
+      File('$_localBoxiPath/Variantes/$name'),
+      File('$_localBoxiPath/Variantes/${id}_safe.$ext'),
+    ];
+
+    for (var f in candidatos) {
+      try {
+        if (f.existsSync()) {
+          final raf = f.openSync();
+          raf.readSync(1);
+          raf.closeSync();
+          return f.path; // Retorna si tiene acceso y legibilidad real
+        }
+      } catch (_) {}
+    }
+    return null;
   }
 
   void _escucharSolicitudes() {
@@ -1463,7 +1491,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       try {
         await ServicioNube.descargarTodoDesdeNube();
         await prefs.setBool('migracion_definitiva_completa_v6', false);
-        await ServicioNube.migrarVariantesAlJSONyCarpetas();
+        ServicioNube.migrarVariantesAlJSONyCarpetas();
         await ServicioNube.limpiarFantasmasNubeYLocal(user.uid); 
         await prefs.setBool("descarga_completa_${user.uid}", true);
         await prefs.setBool("primera_carga_completada_${user.uid}", true);
@@ -1650,36 +1678,49 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
               // 🔥 1. RESET DE BANDERA DE MIGRACIÓN PARA EL PRÓXIMO INGRESO
               await prefs.remove('migracion_definitiva_completa_v6');
 
-              // 🔥 2. LIMPIEZA FÍSICA AGRESIVA DE LA GALERÍA (Privada y Pública)
+              // 🔥 2. LIMPIEZA FÍSICA Y BASE DE DATOS ULTRA SEGURA (Inmune a bloqueos de Android)
               try {
                 String pathBoxi = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
-                final boxiDir = Directory(pathBoxi);
-                if (await boxiDir.exists()) {
-                  // Vaciamos archivos internos primero (Ayuda con permisos en Android 11+)
-                  final List<FileSystemEntity> entities = await boxiDir.list(recursive: true).toList();
-                  for (FileSystemEntity entity in entities) {
-                    if (entity is File) await entity.delete();
-                  }
-                  await boxiDir.delete(recursive: true);
-                }
                 
-                // Forzamos también el borrado explícito de la pública por si quedó huérfana
-                final pubDir = Directory('/storage/emulated/0/Pictures/Boxi');
-                if (await pubDir.exists()) {
-                  final List<FileSystemEntity> entities = await pubDir.list(recursive: true).toList();
-                  for (FileSystemEntity entity in entities) {
-                    if (entity is File) await entity.delete();
-                  }
-                  await pubDir.delete(recursive: true);
+                void borrarDirectorioSeguroSync(Directory dir) {
+                  if (!dir.existsSync()) return;
+                  try {
+                    final List<FileSystemEntity> entities = dir.listSync(recursive: true);
+                    
+                    // Borramos cada archivo de forma individual
+                    for (FileSystemEntity entity in entities) {
+                      if (entity is File) {
+                        try {
+                          entity.deleteSync();
+                        } catch (_) {
+                          // Si un archivo está bloqueado por el OS, lo salta y continúa con los demás
+                        }
+                      }
+                    }
+                    
+                    // Finalmente intentamos borrar el directorio raíz ya vacío
+                    try {
+                      dir.deleteSync(recursive: true);
+                    } catch (_) {}
+                  } catch (_) {}
                 }
-                debugPrint("🗑️ Carpetas Boxi vaciadas y eliminadas físicamente.");
+
+                // Borramos la carpeta activa y la pública por si acaso
+                borrarDirectorioSeguroSync(Directory(pathBoxi));
+                borrarDirectorioSeguroSync(Directory('/storage/emulated/0/Pictures/Boxi'));
+                
+                debugPrint("🗑️ Carpetas Boxi vaciadas y eliminadas de forma segura.");
               } catch (e) {
-                debugPrint("Error eliminando carpeta Boxi: $e");
+                debugPrint("Error eliminando carpetas: $e");
               }
               Navigator.pop(ctx);
               
-              // Limpieza local de tablas
-              await DBHelper.instance.limpiarTablas();
+              // Limpieza local de tablas protegida
+              try {
+                await DBHelper.instance.limpiarTablas();
+              } catch (e) {
+                debugPrint("Error limpiando BD local: $e");
+              }
               await prefs.remove('datos_descargados');
               
               await ServicioAuth.cerrarSesion();
@@ -2242,7 +2283,28 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
               children: [
                 Text("Compartir de: $categoriaNombre", style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
                 const SizedBox(height: 6),
-                const Text("Selecciona los productos que deseas enviar:", style: TextStyle(fontSize: 12, color: Colors.grey)),
+                Wrap(
+                  alignment: WrapAlignment.spaceBetween,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 10,
+                  children: [
+                    const Text("Selecciona para enviar:", style: TextStyle(fontSize: 12, color: Colors.grey)),
+                    TextButton.icon(
+                      onPressed: () {
+                        setStateDialog(() {
+                          if (seleccionados.length == prods.length) {
+                            seleccionados.clear(); // Deseleccionar todos
+                          } else {
+                            seleccionados = prods.map((p) => p['id'] as int).toList(); // Seleccionar todos
+                          }
+                        });
+                      },
+                      icon: Icon(seleccionados.length == prods.length ? Icons.deselect : Icons.select_all, size: 16),
+                      label: Text(seleccionados.length == prods.length ? "Ninguno" : "Todos", style: const TextStyle(fontSize: 12)),
+                      style: TextButton.styleFrom(padding: EdgeInsets.zero, minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                    )
+                  ],
+                ),
               ],
             ),
             content: SizedBox(
@@ -2289,13 +2351,24 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                           borderRadius: BorderRadius.circular(10),
                         ),
                         clipBehavior: Clip.antiAlias,
-                        child: fotoPath.isEmpty
-                            ? const Icon(Icons.image, color: Colors.grey, size: 20)
-                            : (fotoPath.startsWith('http')
-                                ? Image.network(fotoPath, fit: BoxFit.cover, errorBuilder: (_,__,___) => const Icon(Icons.broken_image))
-                                : (fotoPath.length > 500
-                                    ? Image.memory(base64Decode(fotoPath), fit: BoxFit.cover, gaplessPlayback: true)
-                                    : Image.file(File(fotoPath), fit: BoxFit.cover, gaplessPlayback: true, errorBuilder: (_,__,___) => const Icon(Icons.broken_image, size: 20)))),
+                        child: () {
+                          // 🔥 OFFLINE-FIRST: Buscamos la miniatura física de forma inmediata
+                          String? rutaLegible = _obtenerRutaFisicaLegibleSync(fotoPath);
+                          
+                          if (rutaLegible != null) {
+                            return Image.file(File(rutaLegible), fit: BoxFit.cover, gaplessPlayback: true);
+                          }
+                          if (fotoPath.startsWith('http')) {
+                            return Image.network(fotoPath, fit: BoxFit.cover, errorBuilder: (_,__,___) => const Icon(Icons.image, color: Colors.grey, size: 20));
+                          }
+                          if (fotoPath.length > 500) {
+                            return Image.memory(base64Decode(fotoPath), fit: BoxFit.cover, gaplessPlayback: true);
+                          }
+                          if (fotoPath.isNotEmpty && File(fotoPath).existsSync()) {
+                            return Image.file(File(fotoPath), fit: BoxFit.cover, gaplessPlayback: true);
+                          }
+                          return const Icon(Icons.image, color: Colors.grey, size: 20);
+                        }(),
                       ),
                       title: Text(
                         p['nombre'], 
@@ -2354,7 +2427,40 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       )
     );
   }
-  // 🔥 PROCESADOR MASIVO DE ARCHIVOS E IMÁGENES (Sin advertencias de linter)
+  
+  Future<Uint8List> _escribirNombreEnImagen(Uint8List bytes, String texto) async {
+    final ui.Codec codec = await ui.instantiateImageCodec(bytes);
+    final ui.FrameInfo frameInfo = await codec.getNextFrame();
+    final ui.Image image = frameInfo.image;
+
+    final ui.PictureRecorder recorder = ui.PictureRecorder();
+    final Canvas canvas = Canvas(recorder);
+    
+    // Dibujar imagen original
+    canvas.drawImage(image, Offset.zero, Paint());
+
+    // Dibujar fondo oscuro abajo para que el texto resalte
+    final double altoBarra = image.height * 0.15; // 15% del alto
+    final rect = Rect.fromLTRB(0, image.height - altoBarra, image.width.toDouble(), image.height.toDouble());
+    canvas.drawRect(rect, Paint()..color = Colors.black.withOpacity(0.6));
+
+    // Dibujar texto
+    final textPainter = TextPainter(
+      text: TextSpan(
+        text: texto, 
+        style: TextStyle(color: Colors.white, fontSize: altoBarra * 0.5, fontWeight: FontWeight.bold)
+      ),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+    );
+    textPainter.layout(maxWidth: image.width.toDouble() - 40);
+    textPainter.paint(canvas, Offset(20, image.height - altoBarra + (altoBarra * 0.2)));
+
+    final ui.Image imgConTexto = await recorder.endRecording().toImage(image.width, image.height);
+    final ByteData? byteData = await imgConTexto.toByteData(format: ui.ImageByteFormat.png);
+    return byteData!.buffer.asUint8List();
+  }
+
   Future<void> _compartirMultiplesProductos(String categoriaNombre, List<Map<String, dynamic>> seleccionados) async {
     if (seleccionados.isEmpty) return;
     
@@ -2392,7 +2498,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         double pOriginal = (p['precio_venta'] as num?)?.toDouble() ?? 0.0;
         double pFinal = pOriginal - (pOriginal * (descVal / 100));
 
-        // 🔥 Diseño de viñeta clásico con punto (•) y sin rombos
         if (descVal > 0) {
           sb.writeln("• *$nombre* (En Oferta 🔥)");
           sb.writeln(" ↳ Precio: *${formatMoney(pFinal)}* ~${formatMoney(pOriginal)}~ (-${descVal.toStringAsFixed(0)}%)");
@@ -2402,30 +2507,42 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         }
         sb.writeln(""); // Salto de línea estético
 
-        // Resolver e incorporar imagen física usando directamente Directory.systemTemp.path
+        // Resolve e incorporar imagen física buscando primero de forma local y asíncrona
         String imgData = p['foto_path']?.toString() ?? "";
         if (imgData.isNotEmpty) {
           try {
-            if (imgData.startsWith('http')) {
-              // Descargamos temporalmente de Cloudinary para pasarlo a Share
-              final response = await http.get(Uri.parse(imgData));
-              final file = File('${Directory.systemTemp.path}/shared_web_${p['id']}.png');
-              await file.writeAsBytes(response.bodyBytes);
-              files.add(XFile(file.path));
+            Uint8List? bytesImagen;
+            
+            // 🔥 OFFLINE-FIRST: Buscamos primero la ruta legible (Original o _safe) en el dispositivo
+            String? rutaSegura = await ServicioNube.obtenerRutaLegibleSegura(imgData);
+            if (rutaSegura != null) {
+              bytesImagen = await File(rutaSegura).readAsBytes();
+            } else if (imgData.startsWith('http')) {
+              final response = await http.get(Uri.parse(imgData)).timeout(const Duration(seconds: 10));
+              if (response.statusCode == 200) {
+                bytesImagen = response.bodyBytes;
+              }
             } else if (imgData.length > 500) {
-              // Base64
-              final bytes = base64Decode(imgData);
-              final file = File('${Directory.systemTemp.path}/shared_b64_${p['id']}.png');
-              await file.writeAsBytes(bytes);
-              files.add(XFile(file.path));
+              bytesImagen = base64Decode(imgData);
             } else {
-              // Ruta física local de Pictures/Boxi
-              File file = File(imgData);
-              if (file.existsSync()) {
-                files.add(XFile(imgData));
+              File fileLocal = File(imgData);
+              if (fileLocal.existsSync()) {
+                bytesImagen = await fileLocal.readAsBytes();
               }
             }
-          } catch (_) {}
+
+            if (bytesImagen != null) {
+              // Estampamos el nombre del producto en la imagen
+              Uint8List bytesConTexto = await _escribirNombreEnImagen(bytesImagen, nombre);
+
+              // Todo va a systemTemp para evitar el bloqueo de WhatsApp
+              final file = File('${Directory.systemTemp.path}/share_${p['id']}.png');
+              await file.writeAsBytes(bytesConTexto);
+              files.add(XFile(file.path));
+            }
+          } catch (e) {
+            debugPrint("Error procesando imagen múltiple offline: $e");
+          }
         }
       }
 
@@ -2519,12 +2636,11 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     );
   }
 
-  // 🔥 Nuevo método asíncrono que carga datos completos y muestra el modal
   void _mostrarDetalleProducto(Map<String, dynamic> p_parcial) async {
     final db = await DBHelper.instance.database;
     final res = await db.query('productos', where: 'id = ?', whereArgs: [p_parcial['id']]);
     if (res.isEmpty || !mounted) return;
-    final p = res.first; // Tenemos el producto completo con su foto gigante
+    final p = res.first; // Tenemos el producto completo
 
     double precioOriginal = (p['precio_venta'] as num?)?.toDouble() ?? 0.0;
     double costo = (p['precio_compra'] as num?)?.toDouble() ?? 0.0;
@@ -2536,6 +2652,24 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     String fotoPath = p['foto_path']?.toString() ?? "";
     String nombreProd = p['nombre']?.toString() ?? "Producto sin nombre";
     String descProd = p['descripcion']?.toString() ?? "";
+
+    // 🔥 RESOLUCIÓN DE IMAGEN INTELIGENTE Y SEGURA ANTES DE ABRIR EL DIÁLOGO
+    dynamic imagenAProcesar;
+    if (fotoPath.isNotEmpty) {
+      String? rutaSegura = await ServicioNube.obtenerRutaLegibleSegura(fotoPath);
+      if (rutaSegura != null) {
+        imagenAProcesar = File(rutaSegura); // Archivo local legible y verificado
+      } else {
+        if (fotoPath.startsWith('http')) {
+          imagenAProcesar = fotoPath; // Fallback seguro a Internet
+          final appDir = await getApplicationDocumentsDirectory();
+          // Mandamos a descargar en segundo plano a la zona privada de la app
+          ServicioNube.descargarFotoIndividualEnSegundoPlano(fotoPath, '${appDir.path}/Boxi');
+        } else {
+          imagenAProcesar = null;
+        }
+      }
+    }
 
     showDialog(
       context: context,
@@ -2550,30 +2684,19 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
             children: [
               Stack(
                 children: [
-                  fotoPath.startsWith('http')
+                  imagenAProcesar != null
                       ? GestureDetector(
-                          onTap: () => _ampliarImagen(context, () {
-                            String name = fotoPath.split('/').last;
-                            if (!name.contains('.')) name += '.jpg';
-                            File f = File('$_localBoxiPath/$name');
-                            return f.existsSync() ? f.path : fotoPath;
-                          }(), nombreProd),
+                          onTap: () => _ampliarImagen(context, imagenAProcesar is File ? imagenAProcesar.path : imagenAProcesar, nombreProd),
                           child: Container(
                             color: Colors.black, 
                             width: double.infinity, 
                             height: 280, 
-                            child: () {
-                              String name = fotoPath.split('/').last;
-                              if (!name.contains('.')) name += '.jpg';
-                              File f = File('$_localBoxiPath/$name');
-                              if (f.existsSync()) {
-                                return Image.file(f, fit: BoxFit.contain);
-                              }
-                              return Image.network(fotoPath, fit: BoxFit.contain, errorBuilder: (_,__,___) => const Icon(Icons.broken_image, color: Colors.white, size: 60));
-                            }()
+                            child: imagenAProcesar is File
+                                ? Image.file(imagenAProcesar, fit: BoxFit.contain)
+                                : Image.network(imagenAProcesar.toString(), fit: BoxFit.contain, errorBuilder: (_,__,___) => const Icon(Icons.broken_image, color: Colors.white, size: 60)),
                           ),
                         )
-                          : Container(height: 250, width: double.infinity, color: isOscuro ? Colors.white10 : Colors.grey.shade200, child: const Icon(Icons.image, size: 60, color: Colors.grey)),
+                      : Container(height: 250, width: double.infinity, color: isOscuro ? Colors.white10 : Colors.grey.shade200, child: const Icon(Icons.image, size: 60, color: Colors.grey)),
                   if (descPct > 0)
                     Positioned(
                       top: 15, left: 15,
@@ -2594,7 +2717,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Expanded(
-                          // 🔥 TOQUE PARA COPIAR TÍTULO
                           child: GestureDetector(
                             onTap: () {
                               Clipboard.setData(ClipboardData(text: nombreProd));
@@ -2662,7 +2784,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                     const SizedBox(height: 25),
                     Text("Descripción (Toca para copiar):", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: isOscuro ? Colors.blue.shade200 : Colors.blueGrey)),
                     const SizedBox(height: 8),
-                    // 🔥 TOQUE PARA COPIAR DESCRIPCIÓN
                     GestureDetector(
                       onTap: () {
                         if (descProd.trim().isNotEmpty) {
@@ -2762,39 +2883,52 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
           }
         }
 
-        // 2. PRE-DECODIFICAR IMÁGENES UNA SOLA VEZ PARA ELIMINAR EL PARPADEO COMPLETAMENTE
-        // 2. OBTENER IMÁGENES (Soporta Cloudinary, Local y Base64)
+        // 2. OBTENER IMÁGENES DE VARIANTES CON LÓGICA OFFLINE-FIRST SEGURA
         final List<Uint8List> decodedBytesList = [];
         for (var f in fotosFiltradas) {
           String imgData = f['foto_base64'] as String? ?? '';
-          if (imgData.startsWith('http')) {
+          Uint8List? bytes;
+
+          // A. Intentamos cargar localmente primero
+          String? rutaSegura = await ServicioNube.obtenerRutaLegibleSegura(imgData);
+          if (rutaSegura != null) {
             try {
-              // Si es Cloudinary, la descargamos temporalmente para mostrarla
-              final response = await http.get(Uri.parse(imgData));
-              decodedBytesList.add(response.bodyBytes);
-            } catch (e) {
-              decodedBytesList.add(Uint8List(0)); // Placeholder vacío si falla internet
-            }
-          } else if (imgData.length > 500) {
-            // Si es Base64
-            decodedBytesList.add(base64Decode(imgData));
-          } else {
-            // Si es usuario gratuito (Ruta local)
-            File file = File(imgData);
-            if (file.existsSync()) {
-              decodedBytesList.add(await file.readAsBytes());
-            } else {
-              decodedBytesList.add(Uint8List(0));
+              bytes = await File(rutaSegura).readAsBytes();
+            } catch (_) {}
+          }
+
+          // B. Si falla y es URL de red, descargamos (solo si hay internet)
+          if (bytes == null && imgData.startsWith('http')) {
+            try {
+              final response = await http.get(Uri.parse(imgData)).timeout(const Duration(seconds: 8));
+              if (response.statusCode == 200) {
+                bytes = response.bodyBytes;
+              }
+            } catch (_) {}
+          }
+
+          // C. Fallback para Base64 o rutas directas
+          if (bytes == null) {
+            if (imgData.length > 500) {
+              try { bytes = base64Decode(imgData); } catch (_) {}
+            } else if (imgData.isNotEmpty) {
+              try {
+                File file = File(imgData);
+                if (file.existsSync()) bytes = await file.readAsBytes();
+              } catch (_) {}
             }
           }
+
+          // Si todo falló, guardamos un arreglo vacío seguro de longitud 0
+          decodedBytesList.add(bytes ?? Uint8List(0));
         }
 
         final Map<int, bool> seleccionadas = {};
         for (int i = 0; i < fotosFiltradas.length; i++) {
-          seleccionadas[i] = true; // Todo seleccionado por defecto
+          seleccionadas[i] = true; // Seleccionado por defecto
         }
 
-        // Diálogo refinado
+        // Diálogo refinado e inmune a crashes
         compartirSeleccion = await showDialog<bool?>(
           context: context,
           barrierDismissible: false,
@@ -2822,11 +2956,15 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                             border: Border.all(color: Colors.grey.shade300),
                           ),
                           clipBehavior: Clip.antiAlias,
-                          child: Image.memory(
-                            decodedBytesList[idx], // USA EL LOGOTIPO PRE-DECODIFICADO (Cero parpadeos)
-                            fit: BoxFit.cover,
-                            gaplessPlayback: true,
-                          ),
+                          // 🔥 PROTECCIÓN ANTIMOTOR GRÁFICO: Si los bytes están vacíos o corruptos, mostramos un ícono y evitamos llamar a Image.memory
+                          child: decodedBytesList[idx].length < 100
+                              ? const Icon(Icons.image, color: Colors.grey, size: 20)
+                              : Image.memory(
+                                  decodedBytesList[idx],
+                                  fit: BoxFit.cover,
+                                  gaplessPlayback: true,
+                                  errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, color: Colors.grey, size: 20),
+                                ),
                         ),
                         title: Text(nombreVar, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
                         value: seleccionadas[idx] ?? false,
@@ -2856,7 +2994,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                         child: const Text("SÓLO FOTO PRINCIPAL", style: TextStyle(fontWeight: FontWeight.bold)),
                       ),
                       TextButton(
-                        onPressed: () => Navigator.pop(ctx, null), // CANCELA TODO EL FLUJO
+                        onPressed: () => Navigator.pop(ctx, null), // Cancelar
                         child: const Text("CANCELAR", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold)),
                       ),
                     ],
@@ -2883,31 +3021,74 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
 
       List<XFile> files = [];
       final tempDir = Directory.systemTemp; 
+      
       if (compartirSeleccion == false || compartirSeleccion == null) {
+        // Opción A: Solo foto principal
         if (imgData.isNotEmpty) {
-          if (imgData.length > 500) {
-            final bytes = base64Decode(imgData);
-            final file = File('${tempDir.path}/prod_share_${p['id']}.png');
-            await file.writeAsBytes(bytes);
-            files.add(XFile(file.path));
-          } else if (File(imgData).existsSync()) {
-            files.add(XFile(imgData));
-          }
+          try {
+            Uint8List? bytesP;
+            
+            // 🔥 OFFLINE-FIRST: Buscamos primero la foto principal guardada de forma local
+            String? rutaSegura = await ServicioNube.obtenerRutaLegibleSegura(imgData);
+            if (rutaSegura != null) {
+              bytesP = await File(rutaSegura).readAsBytes();
+            } else if (imgData.startsWith('http')) {
+              final response = await http.get(Uri.parse(imgData)).timeout(const Duration(seconds: 10));
+              if (response.statusCode == 200) {
+                bytesP = response.bodyBytes;
+              }
+            } else if (imgData.length > 500) {
+              bytesP = base64Decode(imgData);
+            } else {
+              File localFile = File(imgData);
+              if (localFile.existsSync()) {
+                bytesP = await localFile.readAsBytes();
+              }
+            }
+
+            if (bytesP != null) {
+              final file = File('${tempDir.path}/prod_share_${p['id']}.png');
+              await file.writeAsBytes(bytesP);
+              files.add(XFile(file.path));
+            }
+          } catch (_) {}
         }
       } else {
         // Opción B: Compartimos exclusivamente las variantes seleccionadas
         for (int i = 0; i < fotosSeleccionadasBase64.length; i++) {
           try {
-            final bytes = base64Decode(fotosSeleccionadasBase64[i]);
-            final file = File('${tempDir.path}/var_share_${p['id']}_$i.png');
-            await file.writeAsBytes(bytes);
-            files.add(XFile(file.path));
+            String fVarUrl = fotosSeleccionadasBase64[i];
+            Uint8List? bytesVar;
+
+            // 🔥 OFFLINE-FIRST: Buscamos primero la foto de variante guardada de forma local
+            String? rutaSeguraVar = await ServicioNube.obtenerRutaLegibleSegura(fVarUrl);
+            if (rutaSeguraVar != null) {
+              bytesVar = await File(rutaSeguraVar).readAsBytes();
+            } else if (fVarUrl.startsWith('http')) {
+              final response = await http.get(Uri.parse(fVarUrl)).timeout(const Duration(seconds: 10));
+              if (response.statusCode == 200) {
+                bytesVar = response.bodyBytes;
+              }
+            } else if (fVarUrl.length > 500) {
+              bytesVar = base64Decode(fVarUrl);
+            } else {
+              File localFile = File(fVarUrl);
+              if (localFile.existsSync()) {
+                bytesVar = await localFile.readAsBytes();
+              }
+            }
+
+            if (bytesVar != null) {
+              final file = File('${tempDir.path}/var_share_${p['id']}_$i.png');
+              await file.writeAsBytes(bytesVar);
+              files.add(XFile(file.path));
+            }
           } catch (e) {
             debugPrint("Error escribiendo foto variante temporal: $e");
           }
         }
       }
-
+      
       if (files.isNotEmpty) {
         await Share.shareXFiles(files, text: text);
       } else {
@@ -3337,38 +3518,42 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     return Container(
       color: Theme.of(context).scaffoldBackgroundColor, 
       child: Column(children:[
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          color: isOscuro ? Colors.white.withOpacity(0.05) : Colors.blue.shade50.withOpacity(0.1),
-          child: Row(children:[
-            Icon(
-              Icons.shopping_cart_outlined, 
-              size: 18, 
-              color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)
-            ),
-            const SizedBox(width: 6),
-            Text(
-              'CARRITO', 
-              style: TextStyle(
-                fontWeight: FontWeight.bold, 
+        
+        // 🔥 ANTI-CRASH: Solo se pinta si hay suficiente espacio vertical para evitar el RenderFlex Error
+        if (_alturaCarrito > 45 || esHorizontal)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            color: isOscuro ? Colors.white.withOpacity(0.05) : Colors.blue.shade50.withOpacity(0.1),
+            child: Row(children:[
+              Icon(
+                Icons.shopping_cart_outlined, 
+                size: 18, 
                 color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)
-              )
-            ),
-            const Spacer(),
-            if (widget.esAdmin && _cantidadSolicitudes > 0)
-              ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.orangeAccent, 
-                  foregroundColor: Colors.white, 
-                  minimumSize: const Size(0, 30), 
-                  shape: const StadiumBorder()
-                ),
-                onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PantallaSolicitudes())),
-                icon: const Icon(Icons.inbox, size: 14),
-                label: Text("$_cantidadSolicitudes WEB", style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold)),
               ),
-          ]),
-        ),
+              const SizedBox(width: 6),
+              Text(
+                'CARRITO', 
+                style: TextStyle(
+                  fontWeight: FontWeight.bold, 
+                  color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)
+                )
+              ),
+              const Spacer(),
+              if (widget.esAdmin && _cantidadSolicitudes > 0)
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.orangeAccent, 
+                    foregroundColor: Colors.white, 
+                    minimumSize: const Size(0, 30), 
+                    shape: const StadiumBorder()
+                  ),
+                  onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PantallaSolicitudes())),
+                  icon: const Icon(Icons.inbox, size: 14),
+                  label: Text("$_cantidadSolicitudes WEB", style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold)),
+                ),
+            ]),
+          ),
+          
         Expanded(
           child: ClipRect(
             child: carrito.isEmpty 
@@ -3756,30 +3941,53 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   Widget _foto(int id, String data) {
     final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
     if (data.isEmpty) {
-      return Container(color: isOscuro ? Colors.white.withOpacity(0.05) : Colors.grey.shade100, child: const Icon(Icons.image, color: Colors.grey, size: 30));
+      return Container(
+        color: isOscuro ? Colors.white.withOpacity(0.05) : Colors.grey.shade100, 
+        child: const Icon(Icons.image, color: Colors.grey, size: 30)
+      );
     }
     
     try {
+      // 🔥 Buscamos de forma síncrona si existe una copia física legible local
+      String? rutaLegible = _obtenerRutaFisicaLegibleSync(data);
+      
+      if (rutaLegible != null) {
+        return Image.file(
+          File(rutaLegible),
+          fit: BoxFit.cover,
+          width: double.infinity,
+          height: double.infinity,
+          gaplessPlayback: true,
+          errorBuilder: (c, e, s) => const Icon(Icons.broken_image),
+        );
+      }
+
+      // Si es URL de red y no hay ninguna copia local legible accesible (Online)
       if (data.startsWith('http')) {
-        // Interceptor offline usando la ruta dinámica
-        String name = data.split('/').last;
-        if (!name.contains('.')) name += '.jpg';
-        File fPub = File('$_localBoxiPath/$name');
-        
-        if (fPub.existsSync()) {
-          return Image.file(fPub, fit: BoxFit.cover, width: double.infinity, height: double.infinity, gaplessPlayback: true);
-        }
-        
+        // Desencadenamos descarga silenciosa de fondo
         ServicioNube.descargarFotoIndividualEnSegundoPlano(data, _localBoxiPath);
         
-        return Image.network(data, fit: BoxFit.cover, width: double.infinity, height: double.infinity, gaplessPlayback: true, errorBuilder: (c,e,s) => const Icon(Icons.broken_image));
+        return Image.network(
+          data, 
+          fit: BoxFit.cover, 
+          width: double.infinity, 
+          height: double.infinity, 
+          gaplessPlayback: true, 
+          errorBuilder: (c, e, s) => const Icon(Icons.broken_image)
+        );
       }
+      
       if (data.length > 500) {
         _fotoCache[id] = base64Decode(data);
-        return Image.memory(_fotoCache[id]!, fit: BoxFit.cover, width: double.infinity, height: double.infinity, gaplessPlayback: true, errorBuilder: (c,e,s) => const Icon(Icons.broken_image));
+        return Image.memory(
+          _fotoCache[id]!, 
+          fit: BoxFit.cover, 
+          width: double.infinity, 
+          height: double.infinity, 
+          gaplessPlayback: true, 
+          errorBuilder: (c, e, s) => const Icon(Icons.broken_image)
+        );
       }
-      final file = File(data);
-      if (file.existsSync()) return Image.file(file, fit: BoxFit.cover, width: double.infinity, height: double.infinity, gaplessPlayback: true, errorBuilder: (c,e,s) => const Icon(Icons.broken_image));
     } catch (e) {}
     
     return const Icon(Icons.broken_image, color: Colors.red);
@@ -3788,15 +3996,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   void _detenerArrastreGlobal() {
     _dragTimer?.cancel();
     _autoScrollTimer?.cancel();
-    _dragCollapseTimer?.cancel();
     _isDragging = false;
-    if (_estaArrastrandoCategoria) {
-      setState(() {
-        _estaArrastrandoCategoria = false;
-        // Restauramos los estados de expansión exactamente como estaban antes de arrastrar
-        categoriasExpandidas = Map<String, bool>.from(_categoriasExpandidasBackup);
-      });
-    }
   }
 
   Widget _construirVistaProductos(int columnas, bool esHorizontal) {
@@ -3964,6 +4164,37 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         scrollController: _mainScroll,
         physics: const BouncingScrollPhysics(),
         buildDefaultDragHandles: false,
+        proxyDecorator: (Widget child, int index, Animation<double> animation) {
+          return AnimatedBuilder(
+            animation: animation,
+            builder: (BuildContext context, Widget? childWidget) {
+              final double animValue = Curves.easeInOut.transform(animation.value);
+              final double elevation = ui.lerpDouble(0, 8, animValue)!;
+              return Material(
+                elevation: elevation,
+                color: Colors.transparent,
+                shadowColor: Colors.black.withOpacity(0.35),
+                child: childWidget ?? child,
+              );
+            },
+            child: child,
+          );
+        },
+        // 🔥 1. LA FOTO FANTASMA YA SE TOMÓ PEQUEÑA. AHORA CONTRAEMOS EL RESTO.
+        onReorderStart: (int index) {
+          setState(() {
+            for (var c in categorias) {
+              categoriasExpandidas[c['nombre']] = false;
+            }
+          });
+        },
+        // 🔥 2. SI CANCELAS O SUELTAS EN EL MISMO LUGAR, RESTAURA TODO
+        onReorderEnd: (int index) {
+          setState(() {
+            categoriasExpandidas = Map<String, bool>.from(_categoriasExpandidasBackup);
+          });
+        },
+        // 🔥 3. SI LA CAMBIAS DE POSICIÓN, GUARDA Y RESTAURA TODO
         onReorder: (oldIndex, newIndex) {
           if (oldIndex < offsetTopItems || newIndex < offsetTopItems) return;
           if (oldIndex >= offsetTopItems + categorias.length) return;
@@ -3978,6 +4209,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
           setState(() {
             final cat = categorias.removeAt(oldCatIdx);
             categorias.insert(newCatIdx, cat);
+            categoriasExpandidas = Map<String, bool>.from(_categoriasExpandidasBackup);
           });
           _guardarOrdenCategorias();
         },
@@ -4107,43 +4339,66 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                                 const SizedBox(width: 4),
                                 if (widget.esAdmin) ...[
                                   const SizedBox(width: 2),
-                                  // Arrastre optimizado que guarda el estado de expansión previo antes de contraer
-                                  Listener(
-                                    onPointerDown: (_) {
-                                      _dragTriggered = false;
-                                      _dragCollapseTimer?.cancel();
-                                      _dragCollapseTimer = Timer(const Duration(milliseconds: 180), () {
-                                        _dragTriggered = true;
-                                        if (mounted) {
-                                          setState(() {
-                                            _estaArrastrandoCategoria = true;
-                                            // Respaldamos el estado original antes de contraer todas
-                                            _categoriasExpandidasBackup = Map<String, bool>.from(categoriasExpandidas);
-                                            for (var c in categorias) {
-                                              categoriasExpandidas[c['nombre']] = false;
+                                  // 🔥 Tocar alterna y muestra globo, Mantener presiona contrae y arrastra
+                                  StatefulBuilder(
+                                    builder: (context, setInnerState) {
+                                      Timer? preDragTimer;
+                                      return Listener(
+                                        onPointerDown: (_) {
+                                          // Si el usuario mantiene presionado 250ms, consideramos que va a arrastrar
+                                          // y contraemos la categoría para que el fantasma salga pequeño.
+                                          preDragTimer = Timer(const Duration(milliseconds: 250), () {
+                                            if (mounted) {
+                                              setState(() {
+                                                _categoriasExpandidasBackup = Map<String, bool>.from(categoriasExpandidas);
+                                                categoriasExpandidas[nombre] = false;
+                                              });
                                             }
                                           });
-                                        }
-                                      });
-                                    },
-                                    onPointerUp: (_) {
-                                      _dragCollapseTimer?.cancel();
-                                      if (!_dragTriggered) {
-                                        ScaffoldMessenger.of(context).showSnackBar(
-                                          const SnackBar(
-                                            content: Text("Mantén presionado para arrastrar"),
-                                            duration: Duration(milliseconds: 3000),
+                                        },
+                                        onPointerUp: (_) {
+                                          // Si soltó antes de los 250ms, es un toque normal (un solo tap).
+                                          // Cancelamos el timer y alternamos (contraer/expandir) manualmente una sola vez.
+                                          if (preDragTimer != null && preDragTimer!.isActive) {
+                                            preDragTimer!.cancel();
+                                            setState(() {
+                                              categoriasExpandidas[nombre] = !isExpanded;
+                                            });
+                                          }
+                                        },
+                                        onPointerCancel: (_) {
+                                          // Si el arrastre inicia o se hace scroll, el gesto se cancela
+                                          if (preDragTimer != null && preDragTimer!.isActive) {
+                                            preDragTimer!.cancel();
+                                          }
+                                        },
+                                        child: Tooltip(
+                                          message: "Mantén presionado para arrastrar",
+                                          triggerMode: TooltipTriggerMode.tap, // Muestra el mensaje con 1 toque
+                                          preferBelow: true,
+                                          decoration: BoxDecoration(
+                                            // 🔥 Color que cambia según el tema (Oscuro: Cyan, Claro: Azul Profundo)
+                                            color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1), 
+                                            borderRadius: BorderRadius.circular(8),
+                                            boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(0, 2))],
                                           ),
-                                        );
-                                      }
-                                    },
-                                    child: ReorderableDragStartListener(
-                                      index: globalIndex,
-                                      child: const Padding(
-                                        padding: EdgeInsets.only(left: 4.0, right: 2.0, top: 6.0, bottom: 6.0),
-                                        child: Icon(Icons.swap_vert_rounded, color: Colors.grey, size: 24),
-                                      ),
-                                    ),
+                                          textStyle: TextStyle(
+                                            // 🔥 Letras de alto contraste según el fondo
+                                            color: isOscuro ? Colors.black : Colors.white, 
+                                            fontWeight: FontWeight.w900, 
+                                            fontSize: 12
+                                          ),
+                                          showDuration: const Duration(seconds: 2),
+                                          child: ReorderableDelayedDragStartListener(
+                                            index: globalIndex,
+                                            child: const Padding(
+                                              padding: EdgeInsets.only(left: 4.0, right: 2.0, top: 6.0, bottom: 6.0),
+                                              child: Icon(Icons.swap_vert_rounded, color: Colors.grey, size: 24),
+                                            ),
+                                          ),
+                                        ),
+                                      );
+                                    }
                                   ),
                                 ],
                               ],
@@ -4284,7 +4539,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
           if (!_esPremium && widget.esAdmin)
             const AnuncioNativoWidget(key: ValueKey('admob_native_ad_key')),
 
-            const SizedBox(key: ValueKey('spacer_end'), height: 100),
+          const SizedBox(key: ValueKey('spacer_end'), height: 100),
         ],
       ),
     );
@@ -4464,20 +4719,39 @@ class _DialogoVariantesState extends State<_DialogoVariantes> {
         String fotoData = opciones[oIdx]['foto_path'] ?? "";
         
         if (fotoData.startsWith('http')) {
-          String name = fotoData.split('/').last;
-          if (!name.contains('.')) name += '.jpg';
+          // 🔥 MEJORA OFFLINE PARA VARIANTES: Busca variaciones y manda a descargar si falta
+          String rawName = fotoData.split('/').last;
+          String cleanRaw = rawName.split('?').first;
+          String decodedName = Uri.decodeComponent(cleanRaw);
           
-          // 🔥 Buscamos en Variantes y en la raíz por si el auto-curador la guardó ahí
-          File fVar = File('$pathBoxi/Variantes/$name');
-          File fRoot = File('$pathBoxi/$name');
+          if (!cleanRaw.contains('.')) cleanRaw += '.jpg';
+          if (!decodedName.contains('.')) decodedName += '.jpg';
           
-          if (fVar.existsSync()) {
-            _fotosProcesadas[key] = fVar.path;
-            continue;
-          } else if (fRoot.existsSync()) {
-            _fotosProcesadas[key] = fRoot.path;
-            continue;
+          List<File> posiblesArchivos = [
+            File('$pathBoxi/Variantes/$decodedName'),
+            File('$pathBoxi/$decodedName'),
+            File('$pathBoxi/Variantes/$cleanRaw'),
+            File('$pathBoxi/$cleanRaw'),
+            File('$pathBoxi/Variantes/$rawName'),
+            File('$pathBoxi/$rawName'),
+          ];
+
+          bool encontrado = false;
+          for (File f in posiblesArchivos) {
+            try {
+              if (f.existsSync()) {
+                f.readAsBytesSync(); // Prueba lectura
+                _fotosProcesadas[key] = f.path;
+                encontrado = true;
+                break;
+              }
+            } catch (_) {}
           }
+
+          if (encontrado) continue;
+          
+          // Si no la encuentra localmente, forzamos su descarga
+          ServicioNube.descargarFotoIndividualEnSegundoPlano(fotoData, "$pathBoxi/Variantes");
         }
         
         if (fotoData.startsWith('http')) {

@@ -211,21 +211,26 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
     final prefs = await SharedPreferences.getInstance();
     if (!mounted) return;
 
-    // 🔥 RESOLVER Y UNIFICAR LA RUTA DE CARPETA BOXI (PÚBLICA O PRIVADA)
+    // 🔥 SOLUCIÓN ESTABLE: Una sola carpeta pública. Si falla, usa la privada.
     final appDir = await getApplicationDocumentsDirectory();
     String rutaFinal = '${appDir.path}/Boxi';
+    
     try {
-      final pubDir = Directory('/storage/emulated/0/Pictures/Boxi');
+      Directory pubDir = Directory('/storage/emulated/0/Pictures/Boxi');
       if (!await pubDir.exists()) await pubDir.create(recursive: true);
       
-      // Usamos .png para que Android 11+ (MediaStore) no bloquee la prueba de escritura
-      final test = File('${pubDir.path}/test.png');
-      await test.writeAsBytes([0]); 
-      await test.delete();
-      rutaFinal = pubDir.path; // ¡Éxito! Tenemos acceso a la galería pública
+      // 🔥 PRUEBA DE ESCRITURA MEJORADA: En Android 11+ los archivos sin extensión 
+      // de imagen son bloqueados en la carpeta Pictures. Usamos un .jpg para la prueba.
+      File testFile = File('${pubDir.path}/test_access.jpg');
+      await testFile.writeAsBytes([0]);
+      await testFile.delete();
+      rutaFinal = pubDir.path; 
     } catch (e) {
-      debugPrint("No se pudo usar Pictures/Boxi: $e");
+      debugPrint("Carpeta pública bloqueada, usando directorio seguro: $e");
+      Directory intDir = Directory(rutaFinal);
+      if (!await intDir.exists()) await intDir.create(recursive: true);
     }
+    
     await prefs.setString('local_boxi_path', rutaFinal);
 
     String nuevoNombre = prefs.getString('nombre_negocio') ?? "NOMBREDETUNEGOCIOAQUI";
@@ -234,27 +239,21 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
 
     if (nuevaPath != _logoPath || _imageCached == null) {
       if (nuevaPath.isNotEmpty) {
-        if (nuevaPath.startsWith('http')) {
-          // 🔥 INTERCEPTOR OFFLINE PARA EL LOGO
-          String name = nuevaPath.split('/').last;
-          if (!name.contains('.')) name += '.png';
-          File fLogo = File('$rutaFinal/$name');
-          
-          if (fLogo.existsSync()) {
-            _imageCached = FileImage(fLogo); // Carga local si no hay internet
-          } else {
-            _imageCached = NetworkImage(nuevaPath); 
-            // Lo descarga de fondo para que funcione offline la próxima vez
+        // 🔥 Buscamos la ruta segura y legible de forma no bloqueante y unificada
+        String? rutaSegura = await ServicioNube.obtenerRutaLegibleSegura(nuevaPath);
+
+        if (rutaSegura != null) {
+          _imageCached = FileImage(File(rutaSegura));
+        } else {
+          if (nuevaPath.startsWith('http')) {
+            _imageCached = NetworkImage(nuevaPath);
+            // Si no existe localmente, mandamos a descargar de fondo
             ServicioNube.descargarFotoIndividualEnSegundoPlano(nuevaPath, rutaFinal);
-          }
-        } else if (nuevaPath.length > 500) {
-          try {
-            _imageCached = MemoryImage(base64Decode(nuevaPath));
-          } catch (e) {
+          } else if (nuevaPath.length > 500) {
+            try { _imageCached = MemoryImage(base64Decode(nuevaPath)); } catch (_) { _imageCached = null; }
+          } else {
             _imageCached = null;
           }
-        } else if (File(nuevaPath).existsSync()) {
-          _imageCached = FileImage(File(nuevaPath));
         }
       } else {
         _imageCached = null;
@@ -262,9 +261,7 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
     }
 
     setState(() {
-      _nombreNegocio = (nuevoNombre == "nombredenegocioaqui")
-          ? "NOMBREDETUNEGOCIOAQUI"
-          : nuevoNombre;
+      _nombreNegocio = (nuevoNombre == "nombredenegocioaqui") ? "NOMBREDETUNEGOCIOAQUI" : nuevoNombre;
       _logoPath = nuevaPath;
       _esPremium = nuevoPremium;
     });
@@ -321,36 +318,27 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
         String llaveDescarga = "descarga_completa_${user.uid}";
         bool yaDescargoTodo = prefs.getBool(llaveDescarga) ?? false;
         if (!yaDescargoTodo) {
-          // Descarga base de datos de Realtime + Firestore
+          // Descarga base de datos de Realtime + Firestore (Ahora incluye los inactivos)
           await ServicioNube.descargarTodoDesdeNube();
           
           // 🔥 BLOQUEANTE: Forzamos la descarga de imágenes en la pantalla de bienvenida al iniciar sesión
-          await prefs.setBool('migracion_definitiva_completa_v6', false); // Reseteamos bandera
-          await ServicioNube.migrarVariantesAlJSONyCarpetas(); // Descarga secuencial 1 por 1
+          await prefs.setBool('migracion_definitiva_completa_v6', false); 
+          await ServicioNube.migrarVariantesAlJSONyCarpetas(); 
           
           await prefs.setBool(llaveDescarga, true);
           await prefs.setBool('primera_carga_completada_${user.uid}', true);
-          final userDoc = await FirebaseFirestore.instance
-              .collection('usuarios')
-              .doc(user.uid)
-              .get();
+          final userDoc = await FirebaseFirestore.instance.collection('usuarios').doc(user.uid).get();
           if (userDoc.exists) {
             final data = userDoc.data() as Map<String, dynamic>;
-            final modProd = (data['ultima_mod_productos'] as Timestamp?)
-                ?.toDate()
-                .toIso8601String();
-            final modPed = (data['ultima_mod_pedidos'] as Timestamp?)
-                ?.toDate()
-                .toIso8601String();
-            if (modProd != null) {
-              await prefs.setString(
-                  'ultima_mod_productos_local_${user.uid}', modProd);
-            }
-            if (modPed != null) {
-              await prefs.setString(
-                  'ultima_mod_pedidos_local_${user.uid}', modPed);
-            }
+            final modProd = (data['ultima_mod_productos'] as Timestamp?)?.toDate().toIso8601String();
+            final modPed = (data['ultima_mod_pedidos'] as Timestamp?)?.toDate().toIso8601String();
+            if (modProd != null) await prefs.setString('ultima_mod_productos_local_${user.uid}', modProd);
+            if (modPed != null) await prefs.setString('ultima_mod_pedidos_local_${user.uid}', modPed);
           }
+        } else {
+          // 🔥 NUEVO: Para usuarios que ya tienen la app instalada, rescatamos los inactivos perdidos.
+          // Esto solo se correrá 1 vez y dejará el inventario completo.
+          await ServicioNube.rescatarDatosPerdidosFirestore(user.uid);
         }
         
         await ServicioNube.migrarTodoACloudinary();
@@ -849,37 +837,50 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
               // 🔥 1. RESET DE BANDERA DE MIGRACIÓN PARA EL PRÓXIMO INGRESO
               await prefs.remove('migracion_definitiva_completa_v6');
 
-              // 🔥 2. LIMPIEZA FÍSICA AGRESIVA DE LA GALERÍA (Privada y Pública)
+              // 🔥 2. LIMPIEZA FÍSICA Y BASE DE DATOS ULTRA SEGURA (Inmune a bloqueos de Android)
               try {
                 String pathBoxi = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
-                final boxiDir = Directory(pathBoxi);
-                if (await boxiDir.exists()) {
-                  // Vaciamos archivos internos primero (Ayuda con permisos en Android 11+)
-                  final List<FileSystemEntity> entities = await boxiDir.list(recursive: true).toList();
-                  for (FileSystemEntity entity in entities) {
-                    if (entity is File) await entity.delete();
-                  }
-                  await boxiDir.delete(recursive: true);
-                }
                 
-                // Forzamos también el borrado explícito de la pública por si quedó huérfana
-                final pubDir = Directory('/storage/emulated/0/Pictures/Boxi');
-                if (await pubDir.exists()) {
-                  final List<FileSystemEntity> entities = await pubDir.list(recursive: true).toList();
-                  for (FileSystemEntity entity in entities) {
-                    if (entity is File) await entity.delete();
-                  }
-                  await pubDir.delete(recursive: true);
+                void borrarDirectorioSeguroSync(Directory dir) {
+                  if (!dir.existsSync()) return;
+                  try {
+                    final List<FileSystemEntity> entities = dir.listSync(recursive: true);
+                    
+                    // Borramos cada archivo de forma individual
+                    for (FileSystemEntity entity in entities) {
+                      if (entity is File) {
+                        try {
+                          entity.deleteSync();
+                        } catch (_) {
+                          // Si un archivo está bloqueado por el OS, lo salta y continúa con los demás
+                        }
+                      }
+                    }
+                    
+                    // Finalmente intentamos borrar el directorio raíz ya vacío
+                    try {
+                      dir.deleteSync(recursive: true);
+                    } catch (_) {}
+                  } catch (_) {}
                 }
-                debugPrint("🗑️ Carpetas Boxi vaciadas y eliminadas físicamente.");
+
+                // Borramos la carpeta activa y la pública por si acaso
+                borrarDirectorioSeguroSync(Directory(pathBoxi));
+                borrarDirectorioSeguroSync(Directory('/storage/emulated/0/Pictures/Boxi'));
+                
+                debugPrint("🗑️ Carpetas Boxi vaciadas y eliminadas de forma segura.");
               } catch (e) {
-                debugPrint("Error eliminando carpeta Boxi: $e");
+                debugPrint("Error eliminando carpetas: $e");
               }
 
               Navigator.pop(ctx);
               
-              // Se limpian siempre las tablas locales para garantizar una sincronización limpia al volver a ingresar
-              await DBHelper.instance.limpiarTablas();
+              // Se limpian siempre las tablas locales para garantizar una sincronización limpia
+              try {
+                await DBHelper.instance.limpiarTablas();
+              } catch (e) {
+                debugPrint("Error limpiando BD local: $e");
+              }
               await prefs.remove('datos_descargados');
               
               await ServicioAuth.cerrarSesion();

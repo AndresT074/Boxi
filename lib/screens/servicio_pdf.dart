@@ -6,9 +6,12 @@ import 'package:pdf/pdf.dart';
 import 'package:printing/printing.dart';
 import 'package:path_provider/path_provider.dart'; // Para directorio temporal
 import 'package:share_plus/share_plus.dart'; // Para compartir
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 class ServicioPdf {
-  // 1. MÉTODO INTERNO PRIVADO: Diseña la factura una sola vez (Evita duplicar código)
+  // 1. MÉTODO INTERNO PRIVADO: Diseña la factura una sola vez
+  // 1. MÉTODO INTERNO PRIVADO: Diseña la factura una sola vez
   static Future<pw.Document> _crearDocumentoPdf({
     required Map<String, dynamic> pedido,
     required List<Map<String, dynamic>> detalles,
@@ -18,28 +21,74 @@ class ServicioPdf {
   }) async {
     final pdf = pw.Document();
 
-    // Procesar Logo
+    // 🔥 1. EXTRACCIÓN DE DATOS BLINDADA (Usa el historial si el cliente fue borrado)
+    String cNombre = pedido['cliente_nombre'] ?? pedido['cliente_nombre_snapshot'] ?? 'Cliente General';
+    if (cNombre.trim().isEmpty || cNombre == "null") cNombre = 'Cliente General';
+
+    String cNegocio = pedido['negocio_nombre']?.toString() ?? '';
+    if (cNegocio.trim().isEmpty || cNegocio == "null") cNegocio = 'N/A';
+
+    String cDireccion = pedido['cliente_direccion']?.toString() ?? '';
+    if (cDireccion.trim().isEmpty || cDireccion == "null") cDireccion = 'N/A';
+
+    String cCiudad = pedido['cliente_ciudad']?.toString() ?? pedido['ciudad']?.toString() ?? '';
+    if (cCiudad.trim().isEmpty || cCiudad == "null") cCiudad = 'N/A';
+
+    String vNombre = pedido['vendedor_nombre'] ?? pedido['vendedor']?['nombre'] ?? pedido['vendedor'] ?? 'N/A';
+    if (vNombre.trim().isEmpty || vNombre == "null") vNombre = 'N/A';
+
+    String vTel = pedido['vendedor_telefono'] ?? pedido['vendedor']?['telefono'] ?? pedido['telefono_vendedor'] ?? 'N/A';
+    if (vTel.trim().isEmpty || vTel == "null") vTel = 'N/A';
+
+    // 🔥 2. PROCESAR LOGO COMPATIBLE CON MODO OFFLINE Y ONLINE
     pw.Widget? logoWidget;
     if (mostrarLogo && logoPath != null && logoPath.isNotEmpty) {
       try {
         Uint8List? imageBytes;
-        if (logoPath.length > 500) {
-          imageBytes = base64Decode(logoPath);
+        
+        if (logoPath.startsWith('http')) {
+          // Intentar cargar localmente desde la carpeta segura de Boxi (Para modo Offline)
+          final prefs = await SharedPreferences.getInstance();
+          String? localBoxiPath = prefs.getString('local_boxi_path');
+          
+          if (localBoxiPath != null) {
+            String name = logoPath.split('/').last;
+            if (!name.contains('.')) name += '.png';
+            File localLogoFile = File('$localBoxiPath/$name');
+            
+            if (localLogoFile.existsSync()) {
+              imageBytes = await localLogoFile.readAsBytes();
+            }
+          }
+          
+          // Si no existe local, lo descarga (Para modo Online)
+          if (imageBytes == null) {
+            final response = await http.get(Uri.parse(logoPath)).timeout(const Duration(seconds: 4));
+            if (response.statusCode == 200) {
+              imageBytes = response.bodyBytes;
+            }
+          }
+        } else if (logoPath.length > 500) {
+          String cleanBase64 = logoPath;
+          if (cleanBase64.contains(',')) cleanBase64 = cleanBase64.split(',').last;
+          cleanBase64 = cleanBase64.replaceAll(RegExp(r'\s+'), '');
+          imageBytes = base64Decode(cleanBase64);
         } else {
           final file = File(logoPath);
           if (await file.exists()) {
             imageBytes = await file.readAsBytes();
           }
         }
+        
         if (imageBytes != null) {
           logoWidget = pw.Image(pw.MemoryImage(imageBytes), width: 70, height: 70);
         }
       } catch (e) {
-        print("Error cargando logo: $e");
+        print("Error cargando logo en PDF: $e");
       }
     }
 
-    // Procesar Firma
+    // 3. Procesar Firma
     Uint8List? firmaBytes;
     if (pedido['firma'] != null) {
       try {
@@ -53,14 +102,52 @@ class ServicioPdf {
       }
     }
 
-    // Cálculos de pie de página
+    // 4. Cálculos de pie de página
     double valorDomicilio = (pedido['valor_domicilio'] ?? 0).toDouble();
     double subtotalProductos = detalles.fold(0, (sum, item) => sum + (item['subtotal'] as num).toDouble());
 
+    // 🔥 DEFINICIÓN DE MARCA DE AGUA ESTILO SEGURIDAD (Ultra tenue y limpia)
+    String estado = pedido['estado']?.toString() ?? 'Pendiente';
+    String watermarkText = "";
+    
+    const watermarkColor = PdfColor(0.85, 0.85, 0.85);
+
+    if (estado == 'Pendiente' || estado == 'Entregado sin Pago') {
+      watermarkText = "PENDIENTE DE PAGO";
+    } else if (estado == 'Completado') {
+      watermarkText = "PAGADO";
+    } else if (estado == 'Cancelado') {
+      watermarkText = "CANCELADO";
+    }
+
+    // 🔥 6. ARMADO DE LA HOJA (Diseño plano de alta gama sin cortes)
     pdf.addPage(
       pw.Page(
-        pageFormat: PdfPageFormat.a4,
-        margin: const pw.EdgeInsets.all(35),
+        pageTheme: pw.PageTheme(
+          pageFormat: PdfPageFormat.a4,
+          margin: const pw.EdgeInsets.all(35),
+          buildBackground: (pw.Context context) {
+            if (watermarkText.isEmpty) return pw.SizedBox();
+            return pw.Center(
+              child: pw.Container(
+                width: 480, // Ancho límite seguro en la hoja
+                child: pw.FittedBox(
+                  fit: pw.BoxFit.scaleDown, // 🔥 Encoge la palabra automáticamente para que NUNCA se corte
+                  child: pw.Text(
+                    watermarkText,
+                    style: pw.TextStyle(
+                      fontSize: 85, // Tamaño gigante base
+                      fontWeight: pw.FontWeight.bold,
+                      color: watermarkColor,
+                      letterSpacing: 6.0, // Espaciado premium idéntico al de tu imagen
+                    ),
+                    maxLines: 1,
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
         build: (pw.Context context) {
           return pw.Column(
             crossAxisAlignment: pw.CrossAxisAlignment.start,
@@ -81,10 +168,8 @@ class ServicioPdf {
                   pw.Column(
                     crossAxisAlignment: pw.CrossAxisAlignment.end,
                     children: [
-                      // 🔥 CORREGIDO: Removido "const" del estilo con color dinámico
                       pw.Text("COMPROBANTE DE VENTA", style: pw.TextStyle(fontSize: 10, color: PdfColors.grey700)),
-                      pw.Text("No. ${pedido['id']}", 
-                        style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
+                      pw.Text("No. ${pedido['id']}", style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
                       pw.Text("FECHA: ${pedido['fecha_hora'] ?? 'S/F'}", style: const pw.TextStyle(fontSize: 10)),
                     ],
                   ),
@@ -101,13 +186,12 @@ class ServicioPdf {
                     child: pw.Column(
                       crossAxisAlignment: pw.CrossAxisAlignment.start,
                       children: [
-                        pw.Text("DATOS DEL CLIENTE", 
-                          style: pw.TextStyle(fontSize: 8, fontWeight: pw.FontWeight.bold, color: PdfColors.blueGrey700)),
+                        pw.Text("DATOS DEL CLIENTE", style: pw.TextStyle(fontSize: 8, fontWeight: pw.FontWeight.bold, color: PdfColors.blueGrey700)),
                         pw.SizedBox(height: 4),
-                        pw.Text(pedido['cliente_nombre'] ?? 'N/A', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
-                        pw.Text("Negocio: ${ (pedido['negocio_nombre']?.toString().trim().isEmpty ?? true) || pedido['negocio_nombre'] == "null" ? 'N/A' : pedido['negocio_nombre']}", style: const pw.TextStyle(fontSize: 9)),
-                        pw.Text("Dirección: ${ (pedido['cliente_direccion']?.toString().trim().isEmpty ?? true) || pedido['cliente_direccion'] == "null" ? 'N/A' : pedido['cliente_direccion']}", style: const pw.TextStyle(fontSize: 9)),
-                        pw.Text("Ciudad: ${ (pedido['cliente_ciudad']?.toString().trim().isEmpty ?? true) || pedido['cliente_ciudad'] == "null" ? 'N/A' : pedido['cliente_ciudad']}", style: const pw.TextStyle(fontSize: 9)),
+                        pw.Text(cNombre, style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                        pw.Text("Negocio: $cNegocio", style: const pw.TextStyle(fontSize: 9)),
+                        pw.Text("Dirección: $cDireccion", style: const pw.TextStyle(fontSize: 9)),
+                        pw.Text("Ciudad: $cCiudad", style: const pw.TextStyle(fontSize: 9)),
                       ],
                     ),
                   ),
@@ -115,11 +199,10 @@ class ServicioPdf {
                     child: pw.Column(
                       crossAxisAlignment: pw.CrossAxisAlignment.end,
                       children: [
-                        pw.Text("VENDEDOR", 
-                          style: pw.TextStyle(fontSize: 8, fontWeight: pw.FontWeight.bold, color: PdfColors.blueGrey700)),
+                        pw.Text("VENDEDOR", style: pw.TextStyle(fontSize: 8, fontWeight: pw.FontWeight.bold, color: PdfColors.blueGrey700)),
                         pw.SizedBox(height: 4),
-                        pw.Text(pedido['vendedor_nombre'] ?? 'N/A', style: const pw.TextStyle(fontSize: 9)),
-                        pw.Text("Tel: ${pedido['vendedor_telefono'] ?? 'N/A'}", style: const pw.TextStyle(fontSize: 9)),
+                        pw.Text(vNombre, style: const pw.TextStyle(fontSize: 9)),
+                        pw.Text("Tel: $vTel", style: const pw.TextStyle(fontSize: 9)),
                       ],
                     ),
                   ),
@@ -129,8 +212,7 @@ class ServicioPdf {
 
               // TABLA DE PRODUCTOS
               pw.TableHelper.fromTextArray(
-                // 🔥 CORREGIDO: Removido "const" de la decoración con color dinámico
-                headerDecoration: pw.BoxDecoration(color: PdfColors.blueGrey900),
+                headerDecoration: const pw.BoxDecoration(color: PdfColors.blueGrey900),
                 headerStyle: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold, fontSize: 9),
                 cellStyle: const pw.TextStyle(fontSize: 9),
                 columnWidths: {
@@ -143,10 +225,7 @@ class ServicioPdf {
                 data: detalles.map((d) {
                   double desc = (d['descuento'] ?? 0).toDouble();
                   String nombreFinal = (d['nombre_snapshot'] ?? d['nombre'] ?? 'PRODUCTO').toString().toUpperCase();
-                  
-                  if (desc > 0) {
-                    nombreFinal += " (-${desc.toStringAsFixed(0)}%)";
-                  }
+                  if (desc > 0) nombreFinal += " (-${desc.toStringAsFixed(0)}%)";
 
                   return [
                     d['cantidad'].toString(), 
@@ -214,7 +293,6 @@ class ServicioPdf {
                       width: 180, 
                       decoration: const pw.BoxDecoration(border: pw.Border(top: pw.BorderSide(width: 1, color: PdfColors.black)))
                     ),
-                    // 🔥 CORREGIDO: Removido "const" del estilo con color dinámico
                     pw.Text("FIRMA DE RECIBIDO (CLIENTE)", style: pw.TextStyle(fontSize: 7, color: PdfColors.grey700)),
                   ],
                 ),
@@ -248,13 +326,16 @@ class ServicioPdf {
       mostrarLogo: mostrarLogo,
     );
 
+    String cNombre = pedido['cliente_nombre'] ?? pedido['cliente_nombre_snapshot'] ?? 'Cliente';
+    if (cNombre.trim().isEmpty || cNombre == "null") cNombre = 'Cliente';
+
     await Printing.layoutPdf(
       onLayout: (format) async => pdf.save(), 
-      name: 'Factura_${pedido['id']}_${pedido['cliente_nombre']}.pdf'
+      name: 'Factura_${pedido['id']}_$cNombre.pdf'
     );
   }
 
-  // 3. MÉTODO PARA COMPARTIR FACTURA (WHATSAPP, CORREO, ETC)
+  // 3. MÉTODO PARA COMPARTIR FACTURA
   static Future<void> compartirFactura({
     required Map<String, dynamic> pedido,
     required List<Map<String, dynamic>> detalles,
@@ -272,17 +353,20 @@ class ServicioPdf {
 
     final bytes = await pdf.save();
     final dir = await getTemporaryDirectory();
-    final file = File("${dir.path}/Factura_${pedido['id']}_${pedido['cliente_nombre'] ?? 'Cliente'}.pdf");
-    
+
+    String cNombre = pedido['cliente_nombre'] ?? pedido['cliente_nombre_snapshot'] ?? 'Cliente';
+    if (cNombre.trim().isEmpty || cNombre == "null") cNombre = 'Cliente';
+
+    final file = File("${dir.path}/Factura_${pedido['id']}_$cNombre.pdf");
     await file.writeAsBytes(bytes);
 
     await Share.shareXFiles(
       [XFile(file.path)], 
-      text: 'Hola ${pedido['cliente_nombre'] ?? 'Cliente'}, adjunto tu comprobante de venta de $nombreNegocio. 📦'
+      text: 'Hola $cNombre, adjunto tu comprobante de venta de $nombreNegocio. 📦'
     );
   }
 
-  // 4. NUEVO MÉTODO PREMIUM: Genera y comparte reportes con diseño de alta gama
+  // 4. MÉTODO PARA COMPARTIR REPORTES
   static Future<void> compartirReporte({
     required String titulo,
     required double totalCaja,
@@ -291,27 +375,28 @@ class ServicioPdf {
     required String nombreNegocio,
     String? logoPath,
     bool mostrarLogo = true,
-    List<dynamic>? ajustes,             // 🔥 NUEVO: Recibe movimientos de capital por separado
-    double? capitalReinversion,        // 🔥 NUEVO: Recibe capital global real independiente
+    List<dynamic>? ajustes,
+    double? capitalReinversion,
   }) async {
     final pdf = pw.Document();
 
-    // Procesar Logo
     pw.Widget? logoWidget;
     if (mostrarLogo && logoPath != null && logoPath.isNotEmpty) {
       try {
         Uint8List? imageBytes;
-        if (logoPath.length > 500) {
-          imageBytes = base64Decode(logoPath);
+        if (logoPath.startsWith('http')) {
+          final response = await http.get(Uri.parse(logoPath)).timeout(const Duration(seconds: 10));
+          if (response.statusCode == 200) imageBytes = response.bodyBytes;
+        } else if (logoPath.length > 500) {
+          String cleanBase64 = logoPath;
+          if (cleanBase64.contains(',')) cleanBase64 = cleanBase64.split(',').last;
+          cleanBase64 = cleanBase64.replaceAll(RegExp(r'\s+'), '');
+          imageBytes = base64Decode(cleanBase64);
         } else {
           final file = File(logoPath);
-          if (await file.exists()) {
-            imageBytes = await file.readAsBytes();
-          }
+          if (await file.exists()) imageBytes = await file.readAsBytes();
         }
-        if (imageBytes != null) {
-          logoWidget = pw.Image(pw.MemoryImage(imageBytes), width: 65, height: 65);
-        }
+        if (imageBytes != null) logoWidget = pw.Image(pw.MemoryImage(imageBytes), width: 65, height: 65);
       } catch (e) {
         print("Error cargando logo en reporte: $e");
       }
@@ -323,15 +408,12 @@ class ServicioPdf {
         margin: const pw.EdgeInsets.all(35),
         build: (pw.Context context) {
           return [
-            // Barra superior de acento de color de alta gama
             pw.Container(
               height: 6,
               width: double.infinity,
               color: PdfColors.blueGrey900,
               margin: const pw.EdgeInsets.only(bottom: 20),
             ),
-            
-            // ENCABEZADO PRINCIPAL DEL REPORTE
             pw.Row(
               mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
               crossAxisAlignment: pw.CrossAxisAlignment.start,
@@ -339,40 +421,23 @@ class ServicioPdf {
                 pw.Column(
                   crossAxisAlignment: pw.CrossAxisAlignment.start,
                   children: [
-                    pw.Text(
-                      nombreNegocio.toUpperCase(), 
-                      style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold, color: PdfColors.blueGrey900)
-                    ),
+                    pw.Text(nombreNegocio.toUpperCase(), style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold, color: PdfColors.blueGrey900)),
                     pw.SizedBox(height: 4),
-                    pw.Text(
-                      titulo.toUpperCase(), 
-                      style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold, color: PdfColors.orange800, letterSpacing: 0.5)
-                    ),
+                    pw.Text(titulo.toUpperCase(), style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold, color: PdfColors.orange800, letterSpacing: 0.5)),
                     pw.SizedBox(height: 4),
-                    pw.Text(
-                      "Fecha de Emisión: ${DateTime.now().day}/${DateTime.now().month}/${DateTime.now().year}", 
-                      style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey600)
-                    ),
+                    pw.Text("Fecha de Emisión: ${DateTime.now().day}/${DateTime.now().month}/${DateTime.now().year}", style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey600)),
                   ],
                 ),
                 if (logoWidget != null) logoWidget,
               ],
             ),
-            
             pw.SizedBox(height: 20),
             pw.Divider(thickness: 1, color: PdfColors.grey300),
             pw.SizedBox(height: 10),
-
-            // TÍTULO DE SECCIÓN: VENTAS
-            pw.Text(
-              "DESGLOSE DETALLADO DE VENTAS", 
-              style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold, color: PdfColors.blueGrey700, letterSpacing: 0.8)
-            ),
+            pw.Text("DESGLOSE DETALLADO DE VENTAS", style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold, color: PdfColors.blueGrey700, letterSpacing: 0.8)),
             pw.SizedBox(height: 8),
-
-            // TABLA 1: VENTAS (Estricta y Limpia)
             pw.TableHelper.fromTextArray(
-              headerDecoration: pw.BoxDecoration(color: PdfColors.blueGrey900),
+              headerDecoration: const pw.BoxDecoration(color: PdfColors.blueGrey900),
               headerStyle: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold, fontSize: 8),
               cellStyle: const pw.TextStyle(fontSize: 8),
               columnWidths: {
@@ -384,12 +449,9 @@ class ServicioPdf {
               headers: ['FECHA', 'CLIENTE / NEGOCIO', 'RECOGIDO TOTAL', 'GANANCIA REAL'],
               data: ventas.map((v) {
                 String nom = (v['nombre_completo'] ?? 'Cliente Temporal').toString();
-                String neg = (v['nombre_negocio'] != null && v['nombre_negocio'].toString().isNotEmpty && v['nombre_negocio'] != "null") 
-                    ? " (${v['nombre_negocio']})" 
-                    : "";
+                String neg = (v['nombre_negocio'] != null && v['nombre_negocio'].toString().isNotEmpty && v['nombre_negocio'] != "null") ? " (${v['nombre_negocio']})" : "";
                 String fechaRaw = v['fecha_hora']?.toString() ?? '';
                 String fechaFmt = fechaRaw.length >= 10 ? fechaRaw.substring(0, 10) : fechaRaw;
-                
                 return [
                   fechaFmt,
                   "$nom$neg".toUpperCase(),
@@ -398,39 +460,29 @@ class ServicioPdf {
                 ];
               }).toList(),
             ),
-
-            // 🔥 TABLA 2: MOVIMIENTOS DE CAPITAL CON SALDO ANTES Y DESPUÉS
             if (ajustes != null && ajustes.isNotEmpty) ...[
               pw.SizedBox(height: 22),
-              pw.Text(
-                "MOVIMIENTOS DE CAPITAL (REINVERSIONES, INGRESOS Y EGRESOS)", 
-                style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold, color: PdfColors.blueGrey700, letterSpacing: 0.8)
-              ),
+              pw.Text("MOVIMIENTOS DE CAPITAL (REINVERSIONES, INGRESOS Y EGRESOS)", style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold, color: PdfColors.blueGrey700, letterSpacing: 0.8)),
               pw.SizedBox(height: 8),
               pw.TableHelper.fromTextArray(
                 headerDecoration: const pw.BoxDecoration(color: PdfColors.blueGrey800),
                 headerStyle: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold, fontSize: 8),
                 cellStyle: const pw.TextStyle(fontSize: 8),
                 columnWidths: {
-                  0: const pw.FixedColumnWidth(60), // Fecha
-                  1: const pw.FlexColumnWidth(),   // Movimiento
-                  2: const pw.FixedColumnWidth(60), // Antes
-                  3: const pw.FixedColumnWidth(65), // Monto (+ / -)
-                  4: const pw.FixedColumnWidth(60), // Después
+                  0: const pw.FixedColumnWidth(60),
+                  1: const pw.FlexColumnWidth(),
+                  2: const pw.FixedColumnWidth(60),
+                  3: const pw.FixedColumnWidth(65),
+                  4: const pw.FixedColumnWidth(60),
                 },
                 headers: ['FECHA', 'MOVIMIENTO / AJUSTE', 'ANTES', 'MONTO', 'DESPUÉS'],
                 data: ajustes.map((a) {
                   double m = (a['monto'] as num? ?? 0).toDouble();
                   double antes = (a['antes'] as num? ?? 0).toDouble();
                   double despues = (a['despues'] as num? ?? 0).toDouble();
-                  
-                  String montoSigno = m >= 0 
-                      ? "+\$${m.toStringAsFixed(0)}" 
-                      : "-\$${m.abs().toStringAsFixed(0)}";
-                  
+                  String montoSigno = m >= 0 ? "+\$${m.toStringAsFixed(0)}" : "-\$${m.abs().toStringAsFixed(0)}";
                   String fechaRaw = a['fecha_hora']?.toString() ?? '';
                   String fechaFmt = fechaRaw.length >= 10 ? fechaRaw.substring(0, 10) : fechaRaw;
-                  
                   return [
                     fechaFmt,
                     a['descripcion'].toString().toUpperCase(),
@@ -441,75 +493,38 @@ class ServicioPdf {
                 }).toList(),
               ),
             ],
-
             pw.SizedBox(height: 20),
-
-            // TARJETA DE RESUMEN METRICO DE VENTAS (Muestra totales lógicos de venta)
             pw.Row(
               mainAxisAlignment: pw.MainAxisAlignment.end,
               children: [
                 pw.Container(
                   width: 220,
                   padding: const pw.EdgeInsets.all(10),
-                  decoration: pw.BoxDecoration(
-                    color: PdfColors.grey100,
-                    borderRadius: pw.BorderRadius.circular(8),
-                    border: pw.Border.all(color: PdfColors.grey300, width: 1),
-                  ),
+                  decoration: pw.BoxDecoration(color: PdfColors.grey100, borderRadius: pw.BorderRadius.circular(8), border: pw.Border.all(color: PdfColors.grey300, width: 1)),
                   child: pw.Column(
                     crossAxisAlignment: pw.CrossAxisAlignment.end,
                     children: [
-                      pw.Row(
-                        mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-                        children: [
-                          pw.Text("Total Recaudado (Ventas):", style: const pw.TextStyle(fontSize: 9, color: PdfColors.grey700)),
-                          pw.Text("\$${totalCaja.toStringAsFixed(0)}", style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold)),
-                        ],
-                      ),
+                      pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [pw.Text("Total Recaudado (Ventas):", style: const pw.TextStyle(fontSize: 9, color: PdfColors.grey700)), pw.Text("\$${totalCaja.toStringAsFixed(0)}", style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold))]),
                       pw.SizedBox(height: 4),
                       pw.Container(height: 1, color: PdfColors.grey300),
                       pw.SizedBox(height: 4),
-                      pw.Row(
-                        mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-                        children: [
-                          pw.Text("Ganancia Ventas Final:", style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold, color: PdfColors.green800)),
-                          pw.Text("\$${totalUtilidad.toStringAsFixed(0)}", style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold, color: PdfColors.green800)),
-                        ],
-                      ),
+                      pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [pw.Text("Ganancia Ventas Final:", style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold, color: PdfColors.green800)), pw.Text("\$${totalUtilidad.toStringAsFixed(0)}", style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold, color: PdfColors.green800))]),
                     ],
                   ),
                 ),
               ],
             ),
-
-            // 🔥 TARJETA PREMIUM DE CAPITAL GLOBAL DE REINVERSIÓN REAL
             if (capitalReinversion != null) ...[
               pw.SizedBox(height: 15),
               pw.Container(
                 width: double.infinity,
                 padding: const pw.EdgeInsets.all(12),
-                decoration: pw.BoxDecoration(
-                  color: PdfColors.teal50,
-                  borderRadius: pw.BorderRadius.circular(8),
-                  border: pw.Border.all(color: PdfColors.teal200, width: 1),
-                ),
-                child: pw.Row(
-                  mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-                  children: [
-                    pw.Text("CAPITAL DE REINVERSIÓN ACTUAL GLOBAL:", style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 9, color: PdfColors.teal800)),
-                    pw.Text("\$${capitalReinversion.toStringAsFixed(0)}", style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 13, color: PdfColors.teal900)),
-                  ],
-                ),
+                decoration: pw.BoxDecoration(color: PdfColors.teal50, borderRadius: pw.BorderRadius.circular(8), border: pw.Border.all(color: PdfColors.teal200, width: 1)),
+                child: pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [pw.Text("CAPITAL DE REINVERSIÓN ACTUAL GLOBAL:", style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 9, color: PdfColors.teal800)), pw.Text("\$${capitalReinversion.toStringAsFixed(0)}", style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 13, color: PdfColors.teal900))]),
               ),
             ],
-
             pw.SizedBox(height: 30),
-            pw.Center(
-              child: pw.Text(
-                "Reporte de centro financiero generado automáticamente por Boxi · Todos los derechos reservados", 
-                style: pw.TextStyle(fontSize: 7, color: PdfColors.grey500, fontStyle: pw.FontStyle.italic)
-              ),
-            ),
+            pw.Center(child: pw.Text("Reporte de centro financiero generado automáticamente por Boxi · Todos los derechos reservados", style: pw.TextStyle(fontSize: 7, color: PdfColors.grey500, fontStyle: pw.FontStyle.italic))),
           ];
         }
       )
@@ -520,10 +535,6 @@ class ServicioPdf {
     final file = File("${dir.path}/${titulo.replaceAll(' ', '_')}.pdf");
     await file.writeAsBytes(bytes);
 
-    // Comparte el reporte directamente en WhatsApp, Correo, etc.
-    await Share.shareXFiles(
-      [XFile(file.path)], 
-      text: 'Adjunto el $titulo del negocio $nombreNegocio. 📊📈'
-    );
+    await Share.shareXFiles([XFile(file.path)], text: 'Adjunto el $titulo del negocio $nombreNegocio. 📊📈');
   }
 }

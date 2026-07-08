@@ -512,19 +512,80 @@ class ServicioNube {
     }
   }
 
-  // ─────────────────────────────────────────────────────────────
-  //  SUBIDA INICIAL COMPLETA (PARALELA)
-  // ─────────────────────────────────────────────────────────────
-  // ─────────────────────────────────────────────────────────────
-  //  DESCARGA INICIAL COMPLETA (HÍBRIDA RTDB + FIRESTORE)
-  // ─────────────────────────────────────────────────────────────
+  // 🔥 NUEVO: Forzar descarga completa ignorando fechas (rescata inactivos/perdidos)
+  static Future<bool> descargarTablaCompleta(String uid, String tabla) async {
+    if (!await tieneInternet()) return false;
+    try {
+      final dbLocal = await DBHelper.instance.database;
+      final snapshot = await _db.collection('usuarios').doc(uid).collection(tabla).get();
+      if (snapshot.docs.isEmpty) return false;
+
+      final List<Map<String, dynamic>> columnasSQLite = await dbLocal.rawQuery('PRAGMA table_info($tabla)');
+      final Set<String> columnasValidas = columnasSQLite.map((c) => c['name'] as String).toSet();
+
+      int chunkSize = 20; 
+      for (int i = 0; i < snapshot.docs.length; i += chunkSize) {
+        int fin = (i + chunkSize < snapshot.docs.length) ? i + chunkSize : snapshot.docs.length;
+        List<QueryDocumentSnapshot> chunk = snapshot.docs.sublist(i, fin);
+        
+        final Batch batch = dbLocal.batch();
+        for (final doc in chunk) {
+          final Map<String, dynamic> raw = Map<String, dynamic>.from(doc.data() as Map<String, dynamic>);
+          final Map<String, dynamic> mapLocal = {};
+          
+          raw.forEach((key, value) {
+            if (!columnasValidas.contains(key)) return;
+            if (value is Timestamp) {
+              mapLocal[key] = value.toDate().toIso8601String();
+            } else if (value is Blob) {
+              mapLocal[key] = value.bytes;
+            } else if (value is List || value is Map) {
+              mapLocal[key] = jsonEncode(value); // 🔥 Salvavidas por si en Firestore guardó listas
+            } else {
+              mapLocal[key] = value;
+            }
+          });
+          batch.insert(tabla, mapLocal, conflictAlgorithm: ConflictAlgorithm.replace);
+        }
+        await batch.commit(noResult: true);
+      }
+      return true;
+    } catch (e) {
+      debugPrint('❌ Error descargarTablaCompleta ($tabla): $e');
+      return false;
+    }
+  }
+
+  // 🔥 NUEVO: Función para rescatar datos que no se subieron al JSON en su momento
+  static Future<void> rescatarDatosPerdidosFirestore(String uid) async {
+    final prefs = await SharedPreferences.getInstance();
+    bool yaRescatado = prefs.getBool('rescate_inactivos_v1_$uid') ?? false;
+    if (yaRescatado) return;
+
+    if (!await tieneInternet()) return;
+
+    try {
+      debugPrint('🚀 INICIANDO RESCATE DE FIRESTORE (Inactivos perdidos)');
+      await descargarTablaCompleta(uid, 'categorias');
+      await descargarTablaCompleta(uid, 'productos');
+      
+      // Recompilar RTDB con el JSON completo (ahora sí subirá los inactivos)
+      await compilarYSubirCatalogoRTDB();
+      
+      await prefs.setBool('rescate_inactivos_v1_$uid', true);
+      debugPrint('✅ RESCATE COMPLETADO CON ÉXITO');
+    } catch (e) {
+      debugPrint('❌ ERROR EN RESCATE: $e');
+    }
+  }
+
   static Future<void> descargarTodoDesdeNube() async {
     if (_uid == null) return;
     
-    // 1. Descargamos e importamos instantáneamente el catálogo de Realtime (0 lecturas Firestore)
+    // 1. Descargamos e importamos instantáneamente el catálogo de Realtime
     await _importarCatalogoDesdeRTDB(_uid!);
 
-    // 2. Descargamos en paralelo el resto de tablas privadas desde Firestore
+    // 2. Descargamos en paralelo el resto de tablas privadas
     List<Future<bool>> descargas = [];
     const List<String> tablasPrivadas = [
       'vendedores',
@@ -567,10 +628,10 @@ class ServicioNube {
         if (neg['whatsapp_admin'] != null) await prefs.setString('whatsapp_admin', neg['whatsapp_admin']);
       }
 
-      // 🔥 USAMOS UN BATCH DE SQLITE PARA INSERTAR TODO EN UNA SOLA TRANSACCIÓN RÁPIDA (0 bloqueos)
+      // 🔥 UN SOLO BATCH EVITA EL ANR (0 bloqueos de base de datos)
       final Batch batch = dbLocal.batch();
 
-      // 2. Encolar Categorías
+      // 2. Encolar Categorías Activas
       if (datos['categorias'] != null) {
         final cats = List<dynamic>.from(datos['categorias']);
         for (var c in cats) {
@@ -580,10 +641,34 @@ class ServicioNube {
         }
       }
 
-      // 3. Encolar Productos
+      // 2b. Encolar Categorías Inactivas
+      if (datos['categorias_inactivas'] != null) {
+        final catsInactivas = List<dynamic>.from(datos['categorias_inactivas']);
+        for (var c in catsInactivas) {
+          if (c != null) {
+            batch.insert('categorias', Map<String, dynamic>.from(c), conflictAlgorithm: ConflictAlgorithm.replace);
+          }
+        }
+      }
+
+      // 3. Encolar Productos Activos
       if (datos['productos'] != null) {
         final prods = List<dynamic>.from(datos['productos']);
         for (var p in prods) {
+          if (p != null) {
+            final Map<String, dynamic> map = Map<String, dynamic>.from(p);
+            if (map['variantes'] != null && map['variantes'] is! String) {
+              map['variantes'] = jsonEncode(map['variantes']);
+            }
+            batch.insert('productos', map, conflictAlgorithm: ConflictAlgorithm.replace);
+          }
+        }
+      }
+
+      // 3b. Encolar Productos Inactivos (Recuperados de forma segura)
+      if (datos['productos_inactivos'] != null) {
+        final prodsInactivos = List<dynamic>.from(datos['productos_inactivos']);
+        for (var p in prodsInactivos) {
           if (p != null) {
             final Map<String, dynamic> map = Map<String, dynamic>.from(p);
             if (map['variantes'] != null && map['variantes'] is! String) {
@@ -611,10 +696,10 @@ class ServicioNube {
         }
       }
 
-      // 🔥 Guardamos todo el lote de una sola vez en el disco (microsegundos)
+      // Guardamos todo el lote de una sola vez
       await batch.commit(noResult: true);
       
-      debugPrint("✅ Catálogo web importado instantáneamente desde Realtime con BATCH (0 bloqueos).");
+      debugPrint("✅ Catálogo completo importado desde Realtime (0 bloqueos).");
     } catch (e) {
       debugPrint("Error importando desde RTDB con Batch: $e");
     }
@@ -916,10 +1001,7 @@ class ServicioNube {
           String urlLogo = await subirImagenACloudinary(logo);
           if (urlLogo.isNotEmpty) {
             logo = urlLogo;
-            await prefs.setString('logo_path', logo); // Actualiza la caché local
-            
-            // 🔥 SOLUCIÓN AL BUCLE: Guardamos el nuevo link de Cloudinary en Firestore
-            // para que la sincronización de perfil no vuelva a sobreescribirlo con la ruta local.
+            await prefs.setString('logo_path', logo);
             await actualizarPerfilNegocioNube(
               prefs.getString('nombre_negocio') ?? "MI NEGOCIO", 
               logo
@@ -938,20 +1020,24 @@ class ServicioNube {
         'email': user.email ?? "",
         'whatsapp_admin': prefs.getString('whatsapp_admin') ?? ""
       };
-      // 2. Obtener Categorías
+
+      // 2. Obtener Categorías Activas e Inactivas
       final catSnap = await db.query('categorias', orderBy: 'orden ASC');
       List<Map<String, dynamic>> categorias = [];
+      List<Map<String, dynamic>> categoriasInactivas = [];
       for (var row in catSnap) {
         if (row['activo'] == null || row['activo'] == 1 || row['activo'] == '1') {
           categorias.add(Map<String, dynamic>.from(row));
+        } else {
+          categoriasInactivas.add(Map<String, dynamic>.from(row));
         }
       }
 
-      // 3. Obtener Productos (Fotos principales y de variantes desde el JSON)
+      // 3. Obtener Productos Activos
       final prodSnap = await db.query('productos', where: 'activo = 1', orderBy: 'orden ASC, id DESC');
       List<Map<String, dynamic>> productos = [];
       Set<String> catsDesdeProductos = {};
-      Map<String, String> fotosVariantesCache = {}; // Cache retrocompatible para la web
+      Map<String, String> fotosVariantesCache = {}; 
 
       for (var row in prodSnap) {
         var map = Map<String, dynamic>.from(row);
@@ -961,14 +1047,12 @@ class ServicioNube {
           catsDesdeProductos.add(map['categoria'].toString());
         }
 
-        // 🔥 FILTRO ESTRICTO: NO DEJAR PASAR RUTAS LOCALES AL JSON WEB
         if (foto.isNotEmpty && !foto.startsWith('http')) {
            if (esPremium && hayInternet) {
              String urlFoto = await subirImagenACloudinary(foto);
              if (urlFoto.isNotEmpty) {
                map['foto_path'] = urlFoto;
                await db.update('productos', {'foto_path': urlFoto}, where: 'id = ?', whereArgs: [map['id']]);
-               // También forzamos la corrección en Firestore para la próxima vez
                await FirebaseFirestore.instance.collection('usuarios').doc(user.uid).collection('productos').doc(map['id'].toString()).set({'foto_path': urlFoto}, SetOptions(merge: true));
              } else {
                map['foto_path'] = ""; 
@@ -978,7 +1062,6 @@ class ServicioNube {
            }
         }
 
-        // 4. Extrayendo variantes del JSON local a objetos para RTDB
         if (map['variantes'] != null && map['variantes'].toString().length > 5) {
           List<dynamic> dec = jsonDecode(map['variantes']);
           var grupos = (dec.isNotEmpty && !dec[0].containsKey('grupo')) ? [{'opciones': dec}] : dec;
@@ -1012,13 +1095,76 @@ class ServicioNube {
              await db.update('productos', {'variantes': nuevoJson}, where: 'id = ?', whereArgs: [map['id']]);
              await FirebaseFirestore.instance.collection('usuarios').doc(user.uid).collection('productos').doc(map['id'].toString()).set({'variantes': nuevoJson}, SetOptions(merge: true));
           }
-          map['variantes'] = dec; // Mandamos objeto en vez de string a Firebase
+          map['variantes'] = dec;
         }
 
         productos.add(map);
       }
 
-      // 5. Salvavidas: Si Categorías estaba vacía
+      // 4. Obtener Productos Inactivos (Subiendo fotos pendientes a Cloudinary de forma segura)
+      final prodInactivosSnap = await db.query('productos', where: 'activo = 0', orderBy: 'orden ASC, id DESC');
+      List<Map<String, dynamic>> productosInactivos = [];
+
+      for (var row in prodInactivosSnap) {
+        var map = Map<String, dynamic>.from(row);
+        String foto = map['foto_path']?.toString() ?? "";
+
+        // Si la foto es local/base64, la subimos a Cloudinary para que otros celulares la puedan ver/descargar
+        if (foto.isNotEmpty && !foto.startsWith('http')) {
+           if (esPremium && hayInternet) {
+             String urlFoto = await subirImagenACloudinary(foto);
+             if (urlFoto.isNotEmpty) {
+               map['foto_path'] = urlFoto;
+               await db.update('productos', {'foto_path': urlFoto}, where: 'id = ?', whereArgs: [map['id']]);
+               await FirebaseFirestore.instance.collection('usuarios').doc(user.uid).collection('productos').doc(map['id'].toString()).set({'foto_path': urlFoto}, SetOptions(merge: true));
+             } else {
+               map['foto_path'] = ""; 
+             }
+           } else {
+             map['foto_path'] = "";
+           }
+        }
+
+        // Variantes de productos inactivos
+        if (map['variantes'] != null && map['variantes'].toString().length > 5) {
+          List<dynamic> dec = jsonDecode(map['variantes']);
+          var grupos = (dec.isNotEmpty && !dec[0].containsKey('grupo')) ? [{'opciones': dec}] : dec;
+          bool varActualizada = false;
+          
+          for (int gIdx = 0; gIdx < grupos.length; gIdx++) {
+            for (int oIdx = 0; oIdx < grupos[gIdx]['opciones'].length; oIdx++) {
+              String varFoto = grupos[gIdx]['opciones'][oIdx]['foto_path']?.toString() ?? "";
+              
+              if (varFoto.isNotEmpty && !varFoto.startsWith('http')) {
+                if (esPremium && hayInternet) {
+                  String urlVar = await subirImagenACloudinary(varFoto);
+                  if (urlVar.isNotEmpty) {
+                    grupos[gIdx]['opciones'][oIdx]['foto_path'] = urlVar;
+                    fotosVariantesCache["${map['id']}_${gIdx}_${oIdx}"] = urlVar;
+                    varActualizada = true;
+                  } else {
+                    grupos[gIdx]['opciones'][oIdx]['foto_path'] = "";
+                  }
+                } else {
+                  grupos[gIdx]['opciones'][oIdx]['foto_path'] = "";
+                }
+              } else if (varFoto.startsWith('http')) {
+                 fotosVariantesCache["${map['id']}_${gIdx}_${oIdx}"] = varFoto;
+              }
+            }
+          }
+          
+          if (varActualizada) {
+             String nuevoJson = jsonEncode(dec);
+             await db.update('productos', {'variantes': nuevoJson}, where: 'id = ?', whereArgs: [map['id']]);
+             await FirebaseFirestore.instance.collection('usuarios').doc(user.uid).collection('productos').doc(map['id'].toString()).set({'variantes': nuevoJson}, SetOptions(merge: true));
+          }
+          map['variantes'] = dec;
+        }
+
+        productosInactivos.add(map);
+      }
+
       if (categorias.isEmpty && catsDesdeProductos.isNotEmpty) {
         int i = 0;
         for (String c in catsDesdeProductos) {
@@ -1031,7 +1177,9 @@ class ServicioNube {
       Map<String, dynamic> superJson = {
         'negocio': negocioData,
         'categorias': categorias,
+        'categorias_inactivas': categoriasInactivas, // 🔥 Ocultas para clientes
         'productos': productos,
+        'productos_inactivos': productosInactivos, // 🔥 Ocultas para clientes
         'fotosVariantesCache': fotosVariantesCache,
         'ultima_actualizacion': DateTime.now().toIso8601String()
       };
@@ -1039,7 +1187,7 @@ class ServicioNube {
       DatabaseReference ref = FirebaseDatabase.instance.ref("catalogos_web/${user.uid}");
       await ref.set(jsonEncode(superJson));
       
-      debugPrint("✅ Catálogo web compilado exitosamente.");
+      debugPrint("✅ Catálogo compilado exitosamente.");
     } catch (e) {
       debugPrint("❌ Error subiendo catálogo a RTDB: $e");
     }
@@ -1139,7 +1287,7 @@ class ServicioNube {
       }
     }
 
-    // --- 2. MOVER CARPETAS A LA GALERÍA PÚBLICA Y DESCARGAR ---
+    // --- 2. MOVER CARPETAS A LA GALERÍA PÚBLICA (OMITIENDO LA DESCARGA CONGELA-APP) ---
     try {
       // 🔥 Leemos la ruta unificada dinámica (pública o interna)
       String pathBoxi = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
@@ -1148,27 +1296,6 @@ class ServicioNube {
       
       final varDir = Directory('${baseDir.path}/Variantes');
       if (!await varDir.exists()) await varDir.create(recursive: true);
-
-      Future<bool> descargarA(String url, Directory dir) async {
-        if (!url.startsWith('http')) return false;
-        try {
-          String name = url.split('/').last;
-          if (!name.contains('.')) name += '.jpg';
-          File f = File('${dir.path}/$name');
-          
-          bool existe = await f.exists();
-          if (!existe || await f.length() == 0) {
-            final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 15));
-            if (res.statusCode == 200) {
-              await f.writeAsBytes(res.bodyBytes);
-              return true;
-            }
-          }
-        } catch (e) {
-          debugPrint("❌ Error descargando variante: $e");
-        }
-        return false;
-      }
 
       final prods = await db.query('productos');
       int fotosMovidas = 0;
@@ -1181,18 +1308,13 @@ class ServicioNube {
         String variantesJson = p['variantes']?.toString() ?? "";
         bool actualizado = false;
         
-        if (foto.isNotEmpty) {
-          if (foto.startsWith('http')) {
-            // 🔥 NO bloqueamos la UI. Se descarga silenciosamente en segundo plano.
-            descargarA(foto, baseDir).then((ok) { if(ok) debugPrint("📥 Foto principal en caché"); });
-          } else if (foto.length < 500 && !foto.contains(baseDir.path)) {
-            File oldFile = File(foto);
-            if (await oldFile.exists()) {
-              File newFile = await oldFile.copy('${baseDir.path}/${foto.split('/').last}');
-              foto = newFile.path;
-              actualizado = true;
-              fotosMovidas++;
-            }
+        if (foto.isNotEmpty && !foto.startsWith('http') && foto.length < 500 && !foto.contains(baseDir.path)) {
+          File oldFile = File(foto);
+          if (await oldFile.exists()) {
+            File newFile = await oldFile.copy('${baseDir.path}/${foto.split('/').last}');
+            foto = newFile.path;
+            actualizado = true;
+            fotosMovidas++;
           }
         }
 
@@ -1203,19 +1325,14 @@ class ServicioNube {
           for (var g in (dec.isNotEmpty && !dec[0].containsKey('grupo') ? [{'opciones': dec}] : dec)) {
              for (var o in g['opciones']) {
                String vFoto = o['foto_path']?.toString() ?? "";
-               if (vFoto.isNotEmpty) {
-                 if (vFoto.startsWith('http')) {
-                   // 🔥 Descarga en segundo plano sin bloquear
-                   descargarA(vFoto, varDir).then((ok) { if(ok) debugPrint("📥 Variante en caché"); });
-                 } else if (vFoto.length < 500 && !vFoto.contains(varDir.path)) {
-                    File oldFile = File(vFoto);
-                    if (await oldFile.exists()) {
-                      File newFile = await oldFile.copy('${varDir.path}/${vFoto.split('/').last}');
-                      o['foto_path'] = newFile.path;
-                      varCambiada = true;
-                      fotosMovidas++;
-                    }
-                 }
+               if (vFoto.isNotEmpty && !vFoto.startsWith('http') && vFoto.length < 500 && !vFoto.contains(varDir.path)) {
+                  File oldFile = File(vFoto);
+                  if (await oldFile.exists()) {
+                    File newFile = await oldFile.copy('${varDir.path}/${vFoto.split('/').last}');
+                    o['foto_path'] = newFile.path;
+                    varCambiada = true;
+                    fotosMovidas++;
+                  }
                }
              }
           }
@@ -1236,31 +1353,90 @@ class ServicioNube {
       }
       
       await prefs.setBool('migracion_definitiva_completa_v6', true);
-      
-      debugPrint("🚀 ==================================================");
-      debugPrint("✅ Respaldo físico en la galería local completado. Total de fotos procesadas: $fotosMovidas");
-      debugPrint("🚀 ==================================================");
+      debugPrint("✅ Saneamiento físico local completado ($fotosMovidas fotos movidas, 0 descargas bloqueantes).");
     } catch (e) {
       debugPrint("❌ Error en respaldo físico: $e");
     }
   }
 
+ // 🔥 NUEVO: Cola en memoria para evitar descargas paralelas idénticas (Evita la clonación)
+  static final Set<String> _descargasActivas = {};
+
+  // 🔥 NUEVO: Validador instantáneo de rutas fijas (Sin listSync pesados)
+  static Future<String?> obtenerRutaLegibleSegura(String urlOPath) async {
+    if (urlOPath.isEmpty) return null;
+    if (!urlOPath.startsWith('http')) {
+      try {
+        final f = File(urlOPath);
+        if (await f.exists()) {
+          final access = await f.open(mode: FileMode.read);
+          await access.close();
+          return urlOPath;
+        }
+      } catch (_) {}
+      return null;
+    }
+
+    String name = urlOPath.split('/').last;
+    String ext = name.contains('.') ? name.split('.').last : 'jpg';
+    String id = name.split('.').first;
+
+    final prefs = await SharedPreferences.getInstance();
+    String pathBoxi = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
+
+    // Generamos candidatos fijos exactos (O(1) en microsegundos, sin congelar la UI)
+    final candidatos = [
+      File('$pathBoxi/$name'),
+      File('$pathBoxi/${id}_safe.$ext'),
+      File('$pathBoxi/Variantes/$name'),
+      File('$pathBoxi/Variantes/${id}_safe.$ext'),
+    ];
+
+    for (var f in candidatos) {
+      try {
+        if (await f.exists()) {
+          final access = await f.open(mode: FileMode.read);
+          await access.close();
+          return f.path; // Retorna el primer archivo legible
+        }
+      } catch (_) {}
+    }
+    return null;
+  }
+
   static Future<void> descargarFotoIndividualEnSegundoPlano(String url, String localPath) async {
     if (!url.startsWith('http')) return;
+    
+    // Evitamos duplicidad de descargas simultáneas en paralelo
+    if (_descargasActivas.contains(url)) return;
+    _descargasActivas.add(url);
+
     try {
       String name = url.split('/').last;
-      if (!name.contains('.')) name += '.jpg';
-      File f = File('$localPath/$name');
-      
-      // Si la borraron, la volvemos a descargar silenciosamente de fondo
-      if (!await f.exists()) {
-        final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 15));
-        if (res.statusCode == 200) {
+      String ext = name.contains('.') ? name.split('.').last : 'jpg';
+      String id = name.split('.').first;
+
+      // 1. Si ya existe físicamente en el celular, cancelamos
+      String? rutaLegible = await obtenerRutaLegibleSegura(url);
+      if (rutaLegible != null) return;
+
+      // 2. Descargamos de internet
+      final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 15));
+      if (res.statusCode == 200) {
+        File f = File('$localPath/$name');
+        try {
           await f.writeAsBytes(res.bodyBytes);
-          debugPrint("🔄 Foto auto-curada y restaurada en galería: ${f.path}");
+          debugPrint("✅ Imagen guardada de forma normal: ${f.path}");
+        } catch (e) {
+          // Si Android bloquea la escritura (Error 13), guardamos con nombre fijos en la misma carpeta
+          File fallback = File('$localPath/${id}_safe.$ext');
+          await fallback.writeAsBytes(res.bodyBytes);
+          debugPrint("🛡️ Imagen guardada en fallback estático seguro: ${fallback.path}");
         }
       }
-    } catch (_) {}
+    } catch (_) {} finally {
+      _descargasActivas.remove(url); // Liberamos de la cola
+    }
   }
   
   static Future<void> guardarProductoNube(Map<String, dynamic> p) async =>

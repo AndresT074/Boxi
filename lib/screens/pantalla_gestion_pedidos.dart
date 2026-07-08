@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
@@ -11,9 +12,10 @@ import 'pantalla_premium.dart';
 import 'package:sqflite/sqflite.dart';
 
 final Map<String, Uint8List> _imageCache = {};
+String _localBoxiPathGlobal = "/storage/emulated/0/Pictures/Boxi"; // 🔥 Añadido para gestionar la ruta offline
 
-Widget _construirMiniatura(String? base64Str, bool isOscuro) {
-  if (base64Str == null || base64Str.trim().isEmpty || base64Str == 'null') {
+Widget _construirMiniatura(String? pathOrBase64, bool isOscuro) {
+  if (pathOrBase64 == null || pathOrBase64.trim().isEmpty || pathOrBase64 == 'null') {
     return Container(
       width: 45, height: 45,
       decoration: BoxDecoration(
@@ -25,49 +27,89 @@ Widget _construirMiniatura(String? base64Str, bool isOscuro) {
     );
   }
 
-  try {
-    String cleanBase64 = base64Str;
-    if (cleanBase64.contains(',')) cleanBase64 = cleanBase64.split(',').last;
-    cleanBase64 = cleanBase64.replaceAll(RegExp(r'\s+'), '');
+  // 🔥 1. SI ES UNA URL DE CLOUDINARY
+  if (pathOrBase64.startsWith('http')) {
+    String name = pathOrBase64.split('/').last;
+    if (!name.contains('.')) name += '.jpg';
+    
+    File fPub = File('$_localBoxiPathGlobal/$name');
+    File fVar = File('$_localBoxiPathGlobal/Variantes/$name');
+    
+    bool fPubLegible = false;
+    try { if (fPub.existsSync()) { fPub.readAsBytesSync(); fPubLegible = true; } } catch(_) {}
+    
+    bool fVarLegible = false;
+    try { if (fVar.existsSync()) { fVar.readAsBytesSync(); fVarLegible = true; } } catch(_) {}
 
-    // 🔥 1. Revisamos si la foto ya fue procesada previamente
-    Uint8List bytes;
-    if (_imageCache.containsKey(cleanBase64)) {
-      bytes = _imageCache[cleanBase64]!;
-    } else {
-      bytes = base64Decode(cleanBase64);
-      if (_imageCache.length > 200) _imageCache.clear(); // Control de memoria
-      _imageCache[cleanBase64] = bytes;
+    if (fVarLegible) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: Image.file(fVar, width: 45, height: 45, fit: BoxFit.cover, gaplessPlayback: true),
+      );
+    } else if (fPubLegible) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: Image.file(fPub, width: 45, height: 45, fit: BoxFit.cover, gaplessPlayback: true),
+      );
     }
-
+    
+    // Si no está offline, cargar de internet
     return ClipRRect(
       borderRadius: BorderRadius.circular(8),
-      child: Image.memory(
-        bytes, // Usamos la foto del caché
-        width: 45, height: 45, fit: BoxFit.cover,
-        gaplessPlayback: true, // 🔥 CLAVE ANTI-PARPADEO: Mantiene la foto vieja mientras actualiza
+      child: Image.network(
+        pathOrBase64, width: 45, height: 45, fit: BoxFit.cover, gaplessPlayback: true,
         errorBuilder: (context, error, stackTrace) => Container(
           width: 45, height: 45,
-          decoration: BoxDecoration(
-            color: isOscuro ? Colors.white10 : Colors.grey.shade200,
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Icon(Icons.broken_image,
-              size: 20, color: isOscuro ? Colors.white38 : Colors.black26),
+          decoration: BoxDecoration(color: isOscuro ? Colors.white10 : Colors.grey.shade200, borderRadius: BorderRadius.circular(8)),
+          child: Icon(Icons.broken_image, size: 20, color: isOscuro ? Colors.white38 : Colors.black26),
         ),
       ),
     );
-  } catch (e) {
-    return Container(
-      width: 45, height: 45,
-      decoration: BoxDecoration(
-        color: isOscuro ? Colors.white10 : Colors.grey.shade200,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Icon(Icons.error_outline,
-          size: 20, color: Colors.redAccent.withOpacity(0.5)),
-    );
   }
+
+  // 🔥 2. SI ES UN TEXTO BASE64 LARGO (Retrocompatibilidad)
+  if (pathOrBase64.length > 500) {
+    try {
+      String cleanBase64 = pathOrBase64;
+      if (cleanBase64.contains(',')) cleanBase64 = cleanBase64.split(',').last;
+      cleanBase64 = cleanBase64.replaceAll(RegExp(r'\s+'), '');
+
+      Uint8List bytes;
+      if (_imageCache.containsKey(cleanBase64)) {
+        bytes = _imageCache[cleanBase64]!;
+      } else {
+        bytes = base64Decode(cleanBase64);
+        if (_imageCache.length > 200) _imageCache.clear();
+        _imageCache[cleanBase64] = bytes;
+      }
+
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: Image.memory(bytes, width: 45, height: 45, fit: BoxFit.cover, gaplessPlayback: true),
+      );
+    } catch (_) {}
+  }
+
+  // 🔥 3. SI ES UNA RUTA DE ARCHIVO LOCAL DIRECTA
+  try {
+    File file = File(pathOrBase64);
+    if (file.existsSync()) {
+      file.readAsBytesSync();
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: Image.file(file, width: 45, height: 45, fit: BoxFit.cover, gaplessPlayback: true),
+      );
+    }
+  } catch (_) {}
+
+  return Container(
+    width: 45, height: 45,
+    decoration: BoxDecoration(
+      color: isOscuro ? Colors.white10 : Colors.grey.shade200,
+      borderRadius: BorderRadius.circular(8),
+    ),
+    child: Icon(Icons.broken_image, size: 20, color: isOscuro ? Colors.white38 : Colors.black26),
+  );
 }
 
 class PantallaGestionPedidos extends StatefulWidget {
@@ -122,7 +164,13 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
 
   Future<void> _inicializarPantalla() async {
     final prefs = await SharedPreferences.getInstance();
-    if (mounted) setState(() => _esPremium = prefs.getBool('es_premium') ?? false);
+    if (mounted) {
+      setState(() {
+        _esPremium = prefs.getBool('es_premium') ?? false;
+        // 🔥 Carga la ruta resuelta al entrar a la pantalla
+        _localBoxiPathGlobal = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
+      });
+    }
     await _cargar();
   }
 

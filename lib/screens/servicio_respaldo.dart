@@ -193,7 +193,6 @@ class ServicioRespaldo {
         }
       }
 
-      // DETALLE DE PEDIDOS (Snapshot)
       if (await _tablaExiste(dbRespaldo, 'detalle_pedidos')) {
         List<Map<String, dynamic>> detRes = await dbRespaldo.query('detalle_pedidos');
         for (var d in detRes) {
@@ -210,7 +209,6 @@ class ServicioRespaldo {
         }
       }
 
-      // FUSIÓN DE FOTOS DE VARIANTES (Para bases de datos muy antiguas)
       if (await _tablaExiste(dbRespaldo, 'fotos_variantes')) {
         List<Map<String, dynamic>> fvRes = await dbRespaldo.query('fotos_variantes');
         for (var fv in fvRes) {
@@ -243,9 +241,6 @@ class ServicioRespaldo {
       }
 
       await dbRespaldo.close();
-
-      // 🔥 1. FORZAMOS LA RE-EJECUCIÓN DE LA MIGRACIÓN LOCAL
-      // Reseteamos temporalmente la bandera para que asimile los nuevos productos importados
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('migracion_definitiva_completa_v6', false);
       await ServicioNube.migrarVariantesAlJSONyCarpetas();

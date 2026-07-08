@@ -648,12 +648,21 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
 
   Future<void> _procesarFotoPrincipal() async {
     if (_imgData.isEmpty) return;
-    if (_imgData.startsWith('http')) {
-      _imgDataProcesada = _imgData;
-    } else if (_imgData.length > 500) {
-      _imgDataProcesada = await compute(decodificarBase64Aislado, _imgData);
+    
+    // 🔥 Validador de legibilidad para la foto principal del editor
+    String? rutaSegura = await ServicioNube.obtenerRutaLegibleSegura(_imgData);
+    if (rutaSegura != null) {
+      _imgDataProcesada = rutaSegura;
     } else {
-      _imgDataProcesada = _imgData;
+      if (_imgData.startsWith('http')) {
+        _imgDataProcesada = _imgData;
+        final appDir = await getApplicationDocumentsDirectory();
+        ServicioNube.descargarFotoIndividualEnSegundoPlano(_imgData, '${appDir.path}/Boxi');
+      } else if (_imgData.length > 500) {
+        _imgDataProcesada = await compute(decodificarBase64Aislado, _imgData);
+      } else {
+        _imgDataProcesada = _imgData;
+      }
     }
     if (mounted) setState((){});
   }
@@ -667,23 +676,23 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
         String b64 = opciones[oIdx]['foto_path'] ?? '';
         _fotosVariantes[key] = b64;
         
-        // Interceptor offline
-        if (b64.startsWith('http')) {
-          String name = b64.split('/').last;
-          if (!name.contains('.')) name += '.jpg';
-          File fPub = File('/storage/emulated/0/Pictures/Boxi/Variantes/$name');
-          if (fPub.existsSync()) {
-            _fotosVariantesProcesadas[key] = fPub.path;
-            continue;
+        if (b64.isEmpty) continue;
+
+        // 🔥 Validador asíncrono para comprobar acceso real a la variante
+        String? rutaSegura = await ServicioNube.obtenerRutaLegibleSegura(b64);
+        if (rutaSegura != null) {
+          _fotosVariantesProcesadas[key] = rutaSegura; // Usa el archivo físico seguro
+        } else {
+          if (b64.startsWith('http')) {
+            _fotosVariantesProcesadas[key] = b64;
+            final prefs = await SharedPreferences.getInstance();
+            String basePath = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
+            ServicioNube.descargarFotoIndividualEnSegundoPlano(b64, '$basePath/Variantes');
+          } else if (b64.length > 500) {
+            _fotosVariantesProcesadas[key] = await compute(decodificarBase64Aislado, b64);
+          } else {
+            _fotosVariantesProcesadas[key] = b64;
           }
-        }
-        
-        if (b64.startsWith('http')) {
-          _fotosVariantesProcesadas[key] = b64;
-        } else if (b64.length > 500) {
-          _fotosVariantesProcesadas[key] = await compute(decodificarBase64Aislado, b64);
-        } else if (b64.isNotEmpty) {
-          _fotosVariantesProcesadas[key] = b64;
         }
       }
     }
@@ -1404,18 +1413,24 @@ class _PantallaDetalleProductoState extends State<PantallaDetalleProducto> {
     }
 
     String fotoPrincipal = _prodLocal['foto_path'] ?? '';
-    if (fotoPrincipal.isNotEmpty) {
-      if (fotoPrincipal.startsWith('http')) {
-        String name = fotoPrincipal.split('/').last;
-        if (!name.contains('.')) name += '.jpg';
-        File fPub = File('/storage/emulated/0/Pictures/Boxi/$name');
-        _imgPrincipalProcesada = fPub.existsSync() ? fPub.path : fotoPrincipal;
-      } else if (fotoPrincipal.length > 500) {
-        _imgPrincipalProcesada = await compute(decodificarBase64Aislado, fotoPrincipal);
-      } else {
-        _imgPrincipalProcesada = fotoPrincipal;
+      if (fotoPrincipal.isNotEmpty) {
+        // 🔥 Validador asíncrono seguro
+        String? rutaSegura = await ServicioNube.obtenerRutaLegibleSegura(fotoPrincipal);
+        if (rutaSegura != null) {
+          _imgPrincipalProcesada = rutaSegura;
+        } else {
+          if (fotoPrincipal.startsWith('http')) {
+            _imgPrincipalProcesada = fotoPrincipal;
+            final prefs = await SharedPreferences.getInstance();
+            String basePath = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
+            ServicioNube.descargarFotoIndividualEnSegundoPlano(fotoPrincipal, basePath);
+          } else if (fotoPrincipal.length > 500) {
+            _imgPrincipalProcesada = await compute(decodificarBase64Aislado, fotoPrincipal);
+          } else {
+            _imgPrincipalProcesada = fotoPrincipal;
+          }
+        }
       }
-    }
 
     if (_prodLocal['variantes'] != null && _prodLocal['variantes'].toString().length > 5) {
       try {
@@ -1432,15 +1447,23 @@ class _PantallaDetalleProductoState extends State<PantallaDetalleProducto> {
             String key = "${gIdx}_$oIdx";
             String fotoStr = opciones[oIdx]['foto_path'] ?? "";
             
-            if (fotoStr.startsWith('http')) {
-              String name = fotoStr.split('/').last;
-              if (!name.contains('.')) name += '.jpg';
-              File fPub = File('/storage/emulated/0/Pictures/Boxi/Variantes/$name');
-              _fotosVariantesProcesadas[key] = fPub.existsSync() ? fPub.path : fotoStr;
-            } else if (fotoStr.length > 500) {
-              _fotosVariantesProcesadas[key] = await compute(decodificarBase64Aislado, fotoStr);
-            } else if (fotoStr.isNotEmpty) {
-              _fotosVariantesProcesadas[key] = fotoStr;
+            if (fotoStr.isNotEmpty) {
+              // 🔥 Validador asíncrono para fotos de variantes
+              String? rutaSeguraVar = await ServicioNube.obtenerRutaLegibleSegura(fotoStr);
+              if (rutaSeguraVar != null) {
+                _fotosVariantesProcesadas[key] = rutaSeguraVar;
+              } else {
+                if (fotoStr.startsWith('http')) {
+                  _fotosVariantesProcesadas[key] = fotoStr;
+                  final prefs = await SharedPreferences.getInstance();
+                  String basePath = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
+                  ServicioNube.descargarFotoIndividualEnSegundoPlano(fotoStr, '$basePath/Variantes');
+                } else if (fotoStr.length > 500) {
+                  _fotosVariantesProcesadas[key] = await compute(decodificarBase64Aislado, fotoStr);
+                } else {
+                  _fotosVariantesProcesadas[key] = fotoStr;
+                }
+              }
             }
           }
         }
@@ -1744,38 +1767,23 @@ class _ImagenInventarioState extends State<ImagenInventario> {
   }
 
   Future<dynamic> _cargarFoto() async {
-    final prefs = await SharedPreferences.getInstance();
-    
-    // 🔥 NUEVO: Cargar la ruta dinámica unificada resuelta en el Splash
-    String basePath = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
-
-    if (_rutaFotosCache.containsKey(widget.id)) {
-      String data = _rutaFotosCache[widget.id]!;
-      if (data.isEmpty) return null;
-      
-      // Interceptor offline para Premium
-      if (data.startsWith('http')) {
-         String name = data.split('/').last;
-         if (!name.contains('.')) name += '.jpg';
-         File fPub = File('$basePath/$name'); // 🔥 CAMBIADO: Usa la ruta dinámica
-         if (fPub.existsSync()) return fPub.path; 
-      }
-      return data;
-    }
-
     final db = await DBHelper.instance.database;
     final res = await db.query('productos', columns: ['foto_path'], where: 'id = ?', whereArgs: [widget.id]);
     if (res.isNotEmpty) {
       String data = res.first['foto_path']?.toString() ?? "";
-      _rutaFotosCache[widget.id] = data; 
-      
       if (data.isEmpty) return null;
-      if (data.startsWith('http')) {
-         String name = data.split('/').last;
-         if (!name.contains('.')) name += '.jpg';
-         File fPub = File('$basePath/$name'); // 🔥 CAMBIADO: Usa la ruta dinámica
-         if (fPub.existsSync()) return fPub.path;
+      
+      // 🔥 Verificamos con el nuevo validador si la foto local es realmente legible
+      String? rutaSegura = await ServicioNube.obtenerRutaLegibleSegura(data);
+      if (rutaSegura != null) {
+        return rutaSegura; // Retorna la ruta física local (rápido y seguro)
       }
+      
+      if (data.startsWith('http')) {
+          final prefs = await SharedPreferences.getInstance();
+          String basePath = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
+          ServicioNube.descargarFotoIndividualEnSegundoPlano(data, basePath);
+        }
       return data;
     }
     return null;
