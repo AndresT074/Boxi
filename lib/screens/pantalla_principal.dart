@@ -2913,7 +2913,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         text += "\n💰 *Precio: \$${precioFinal.toStringAsFixed(0)}*";
       }
 
-      // 1. OBTENEMOS LAS VARIANTES
+      // 1. OBTENEMOS LAS VARIANTES (Filtrando solo las activas)
       final List<Map<String, dynamic>> fotosDb = [];
       String varStr = p['variantes']?.toString() ?? "";
       if (varStr.length > 5) {
@@ -2922,7 +2922,10 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
           var grupos = (dec.isNotEmpty && !dec[0].containsKey('grupo')) ? [{'opciones': dec}] : dec;
           for (var g in grupos) {
             for (var o in g['opciones']) {
-              if (o['foto_path'] != null && o['foto_path'].toString().isNotEmpty) {
+              // 🔥 CORREGIDO: Filtramos para ignorar variantes inactivas/ocultas
+              bool esActiva = o['activo'] != false;
+
+              if (esActiva && o['foto_path'] != null && o['foto_path'].toString().isNotEmpty) {
                 fotosDb.add({
                   'variante_nombre': o['nombre'],
                   'foto_base64': o['foto_path']
