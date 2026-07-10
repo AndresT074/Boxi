@@ -13,8 +13,18 @@ import 'dart:async';
 import 'dart:ui' as ui;           
 import 'dart:typed_data';       
 import 'package:path_provider/path_provider.dart';
-import 'package:flutter/foundation.dart'; // 🔥 INDISPENSABLE PARA COMPUTE
-// 🔥 Función aislada a prueba de fallos y textos corruptos
+import 'package:flutter/foundation.dart'; 
+
+String optimizarUrlCloudinary(String urlOriginal, {int width = 400}) {
+  if (urlOriginal.isEmpty) return urlOriginal;
+  if (!urlOriginal.contains('cloudinary.com') || urlOriginal.contains('q_auto')) {
+    return urlOriginal;
+  }
+  return urlOriginal.replaceFirst(
+    '/upload/', 
+    '/upload/c_limit,w_$width,q_auto,f_auto/'
+  );
+}
 Uint8List? decodificarBase64Aislado(String b64) {
   try { 
     String clean = b64.replaceAll(RegExp(r'\s+'), '');
@@ -1773,16 +1783,17 @@ class _ImagenInventarioState extends State<ImagenInventario> {
       String data = res.first['foto_path']?.toString() ?? "";
       if (data.isEmpty) return null;
       
-      // 🔥 Verificamos con el nuevo validador si la foto local es realmente legible
       String? rutaSegura = await ServicioNube.obtenerRutaLegibleSegura(data);
-      if (rutaSegura != null) {
-        return rutaSegura; // Retorna la ruta física local (rápido y seguro)
-      }
+      if (rutaSegura != null) return rutaSegura; 
       
       if (data.startsWith('http')) {
           final prefs = await SharedPreferences.getInstance();
           String basePath = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
-          ServicioNube.descargarFotoIndividualEnSegundoPlano(data, basePath);
+          
+          // 🔥 OPTIMIZAR LA URL ANTES DE DESCARGAR DE FONDO Y RETORNAR
+          String urlOptimizada = optimizarUrlCloudinary(data, width: 300);
+          ServicioNube.descargarFotoIndividualEnSegundoPlano(urlOptimizada, basePath);
+          return urlOptimizada; // 👈 Retorna la optimizada para que el FutureBuilder la dibuje
         }
       return data;
     }

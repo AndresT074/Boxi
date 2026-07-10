@@ -12,6 +12,7 @@ import 'servicio_anuncios.dart';
 import 'pantalla_premium.dart';
 import 'pantalla_bienvenida.dart'; 
 import 'servicio_pdf.dart';
+import 'package:fl_chart/fl_chart.dart'; // 🔥 AÑADE ESTA LÍNEA AQUÍ
 
 class PantallaPresupuestos extends StatefulWidget {
   const PantallaPresupuestos({super.key});
@@ -32,6 +33,42 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
   List<Map<String, dynamic>> _historialReportes = [];
   List<Map<String, dynamic>> _capitalPorVentaProds = [];
   List<Map<String, dynamic>> _capitalManualAjustes = [];
+  // 🔥 VARIABLES ANALÍTICAS CON SOPORTE DE FECHAS COMPLETAS
+  double _ventasDelDia = 0;
+  int _pedidosDelDia = 0;
+  int _filtroDiasEstancados = 10;
+  List<Map<String, dynamic>> _topProductos = [];
+  List<Map<String, dynamic>> _topClientes = [];
+  List<Map<String, dynamic>> _productosEstancados = [];
+  
+  // Filtros independientes
+  String _filtroVentas = 'Semana'; 
+  String _filtroPedidos = 'Semana'; 
+  String _filtroRankings = 'Semana'; 
+  int _limiteRankings = 5; 
+  String _tipoRanking = 'Productos'; 
+
+  // Gráficos de Ventas ($)
+  List<FlSpot> _spotsPeriodoActual = [];
+  List<FlSpot> _spotsPeriodoPrevio = [];
+  List<String> _ejeXEtiquetas = [];
+  List<String> _ejeXEtiquetasCompletas = []; // 🔥 Fechas reales para tooltips
+  double _maxYGrafico = 100;
+
+  // Gráfico de Pedidos (#)
+  List<BarChartGroupData> _barGroupsPedidos = [];
+  List<String> _ejeXPedidosEtiquetas = [];
+  List<String> _ejeXPedidosEtiquetasCompletas = []; // 🔥 Fechas reales para tooltips
+  double _maxYPedidosGrafico = 10;
+
+  // Variables de Retención
+  Map<String, Map<String, int>> _retencionClientes = {
+    '15': {'activos': 0, 'inactivos': 0},
+    '30': {'activos': 0, 'inactivos': 0},
+    '60': {'activos': 0, 'inactivos': 0},
+  };
+
+  bool _cargandoGraficos = true;
 
   final List<StreamSubscription> _suscripciones = [];
   bool _incluirLogoEnReporte = true;
@@ -51,6 +88,7 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
       _esPremiumUsuario = prefs.getBool('es_premium') ?? false;
     });
     await _ejecutarMotorFinanciero();
+    await _cargarDatosGraficos(); // 🔥 Carga de analíticas al iniciar
     _activarSincronizacionEnVivo();
     _verificarReporteMensualAutomatico();
   }
@@ -69,6 +107,7 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
       _debounce?.cancel();
       _debounce = Timer(const Duration(seconds: 3), () {
         _ejecutarMotorFinanciero();
+        _cargarDatosGraficos(); // 🔥 Recalcular analíticas al recibir cambios
       });
     }
 
@@ -409,36 +448,36 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
     );
   }
 
-  @override
+ @override
   Widget build(BuildContext context) {
     final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
 
-    return Scaffold(
-      backgroundColor: isOscuro ? const Color(0xFF0A0A0F) : const Color(0xFFF5F7FA),
-      appBar: AppBar(
-        title: const Text('CENTRO FINANCIERO', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-        backgroundColor: isOscuro ? const Color(0xFF0D1B2A) : const Color(0xFF0D47A1), 
-        foregroundColor: Colors.white,
-        actions: [
-          IconButton(icon: const Icon(Icons.calendar_month), onPressed: _generarReporteRango),
-          IconButton(icon: const Icon(Icons.picture_as_pdf, color: Colors.orangeAccent), onPressed: _generarReporteMesBoton),
-        ],
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(15),
-        child: Column(
+    return DefaultTabController(
+      length: 2, 
+      child: Scaffold(
+        backgroundColor: isOscuro ? const Color(0xFF0A0A0F) : const Color(0xFFF5F7FA),
+        appBar: AppBar(
+          title: const Text('CENTRO FINANCIERO', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+          backgroundColor: isOscuro ? const Color(0xFF0D1B2A) : const Color(0xFF0D47A1), 
+          foregroundColor: Colors.white,
+          actions: [
+            IconButton(icon: const Icon(Icons.calendar_month), onPressed: _generarReporteRango),
+            IconButton(icon: const Icon(Icons.picture_as_pdf, color: Colors.orangeAccent), onPressed: _generarReporteMesBoton),
+          ],
+          bottom: const TabBar(
+            indicatorColor: Colors.cyanAccent,
+            labelColor: Colors.cyanAccent,
+            unselectedLabelColor: Colors.white60,
+            tabs: [
+              Tab(icon: Icon(Icons.account_balance_wallet_rounded), text: "FINANZAS"),
+              Tab(icon: Icon(Icons.bar_chart_rounded), text: "ESTADÍSTICAS"),
+            ],
+          ),
+        ),
+        body: TabBarView(
           children: [
-            _cardInventario('Inversión en Bodega (Costo)', inversionEnBodega, const Color(0xFF1565C0), _productosStock, 'compra', isOscuro),
-            _cardInventario('Ganancia Proyectada (Inventario)', utilidadProyectada, const Color(0xFFE65100), _productosStock, 'utilidad', isOscuro),
-            const SizedBox(height: 20),
-            _cardGlobal('Capital Reinversión (Fondo para Stock)', capitalGlobalReinversion, const Color(0xFF00695C), Icons.account_balance_wallet, isOscuro),
-            const SizedBox(height: 20),
-            _cardVentasMes('RECOGIDO TOTAL DEL MES', cajaTotalMes, const Color(0xFF2E7D32), _desgloseMesActual, 'recaudado', esGanancia: false, isOscuro: isOscuro),
-            _cardVentasMes('GANANCIA REAL DEL MES', gananciaNetaMes, const Color(0xFF388E3C), _desgloseMesActual, 'ganancia', esGanancia: true, isOscuro: isOscuro),
-            const SizedBox(height: 30),
-            _buildSeccionHistorial("REPORTES MANUALES", "REPORTE-", Colors.orange, isOscuro),
-            _buildSeccionHistorial("REPORTES ENTRE FECHAS", "REPORTE ", Colors.blue, isOscuro, excludePrefijo: "REPORTE MES-"), 
-            _buildSeccionHistorial("REPORTES MENSUALES (AUTO)", "REPORTE MES-", Colors.green, isOscuro),
+            _buildTabFinanzas(isOscuro),
+            _buildTabGraficos(isOscuro),
           ],
         ),
       ),
@@ -1073,6 +1112,1070 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
   }
   String _obtenerFechaFmt(DateTime dt) => "${dt.day.toString().padLeft(2, '0')}-${dt.month.toString().padLeft(2, '0')}-${dt.year}";
   String _formatearHoraPro(DateTime n) { String p = n.hour >= 12 ? 'PM' : 'AM'; int h = n.hour > 12 ? n.hour - 12 : (n.hour == 0 ? 12 : n.hour); return "$h:${n.minute.toString().padLeft(2, '0')} $p"; }
+  // =========================================================================
+  // 🔥 MOTOR DE ANALÍTICA AVANZADA (100% OFFLINE, 0 LECTURAS FIREBASE)
+  // =========================================================================
+  Future<void> _cargarDatosGraficos() async {
+    try {
+      final Database db = await DBHelper.instance.database;
+      final now = DateTime.now();
+      final hoyStr = "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}";
+
+      // 1. VENTAS Y PEDIDOS DEL DÍA
+      final qVentasDia = await db.rawQuery("SELECT SUM(total_venta) as total FROM pedidos WHERE estado = 'Completado' AND substr(fecha_hora, 1, 10) = ?", [hoyStr]);
+      final qPedsDia = await db.rawQuery("SELECT COUNT(id) as c FROM pedidos WHERE estado = 'Completado' AND substr(fecha_hora, 1, 10) = ?", [hoyStr]);
+      
+      double vDia = (qVentasDia.first['total'] as num? ?? 0).toDouble();
+      int pDia = Sqflite.firstIntValue(qPedsDia) ?? 0;
+
+      // 2. PARÁMETROS DE TIEMPO DINÁMICOS
+      DateTime dateInicioRankings = now.subtract(Duration(days: _filtroRankings == 'Semana' ? 6 : (_filtroRankings == 'Mes' ? (now.day - 1) : 365)));
+      String inicioRankingsStr = dateInicioRankings.toIso8601String().substring(0, 10);
+
+      // 3. RANKINGS (Productos vs Variantes)
+      String queryProds = _tipoRanking == 'Productos' 
+          ? '''
+            SELECT (SELECT nombre FROM productos WHERE id = d.producto_id) as nombre, SUM(d.cantidad) as total_vendido, COUNT(DISTINCT d.pedido_id) as total_pedidos
+            FROM detalle_pedidos d JOIN pedidos p ON d.pedido_id = p.id 
+            WHERE p.estado = 'Completado' AND substr(p.fecha_hora, 1, 10) >= ?
+            GROUP BY d.producto_id 
+            ORDER BY total_vendido DESC LIMIT $_limiteRankings
+          '''
+          : '''
+            SELECT d.nombre_snapshot as nombre, SUM(d.cantidad) as total_vendido, COUNT(DISTINCT d.pedido_id) as total_pedidos
+            FROM detalle_pedidos d JOIN pedidos p ON d.pedido_id = p.id 
+            WHERE p.estado = 'Completado' AND substr(p.fecha_hora, 1, 10) >= ?
+            GROUP BY d.nombre_snapshot 
+            ORDER BY total_vendido DESC LIMIT $_limiteRankings
+          ''';
+
+      final qTopProds = await db.rawQuery(queryProds, [inicioRankingsStr]);
+
+      final qTopClientes = await db.rawQuery('''
+        SELECT COALESCE(c.nombre_completo, 'Cliente General') as nombre, SUM(p.total_venta) as gastado, COUNT(p.id) as total_pedidos
+        FROM pedidos p LEFT JOIN clientes c ON p.cliente_id = c.id 
+        WHERE p.estado = 'Completado' AND substr(p.fecha_hora, 1, 10) >= ?
+        GROUP BY p.cliente_id 
+        ORDER BY gastado DESC LIMIT $_limiteRankings
+      ''', [inicioRankingsStr]);
+
+      // 4. RETENCIÓN DE CLIENTES COMPARATIVA (15, 30 y 60 DÍAS)
+      final qTotalClientes = await db.rawQuery("SELECT COUNT(id) as total FROM clientes");
+      int totalClientesApp = Sqflite.firstIntValue(qTotalClientes) ?? 0;
+
+      Map<String, Map<String, int>> retencionFmt = {};
+      List<int> rangosDias = [15, 30, 60];
+      for (int dias in rangosDias) {
+        String limiteFecha = now.subtract(Duration(days: dias)).toIso8601String().substring(0, 10);
+        final qActivos = await db.rawQuery("SELECT COUNT(DISTINCT cliente_id) as c FROM pedidos WHERE estado = 'Completado' AND substr(fecha_hora, 1, 10) >= ?", [limiteFecha]);
+        int activos = Sqflite.firstIntValue(qActivos) ?? 0;
+        int inactivos = (totalClientesApp - activos).clamp(0, totalClientesApp);
+        retencionFmt[dias.toString()] = {'activos': activos, 'inactivos': inactivos};
+      }
+
+      // 5. INVENTARIO ESTANCADO (Días dinámicos: 10, 20 o 30 días)
+      final haceXDias = now.subtract(Duration(days: _filtroDiasEstancados)).toIso8601String().substring(0, 10);
+      final qEstancados = await db.rawQuery('''
+        SELECT nombre, stock 
+        FROM productos 
+        WHERE activo = 1 AND stock > 0 AND id NOT IN (
+          SELECT producto_id FROM detalle_pedidos d JOIN pedidos p ON d.pedido_id = p.id 
+          WHERE p.estado = 'Completado' AND substr(p.fecha_hora, 1, 10) >= ?
+        )
+        ORDER BY stock DESC 
+      ''', [haceXDias]);
+      // 6. CÁLCULO DE GRÁFICOS
+      List<FlSpot> spotsActual = [];
+      List<FlSpot> spotsPrevio = [];
+      List<BarChartGroupData> barGroupsPedidos = [];
+      List<String> etiquetasX = [];
+      List<String> etiquetasXCompletas = [];
+      List<String> etiquetasXPedidos = [];
+      List<String> etiquetasXPedidosCompletas = [];
+      double maxValorVentas = 100;
+      double maxValorPedidos = 5;
+
+      DateTime startVentasAct;
+      DateTime startVentasPre;
+      int diasVentas = 0;
+
+      if (_filtroVentas == 'Semana') {
+        diasVentas = 7;
+        startVentasAct = now.subtract(const Duration(days: 6));
+        startVentasPre = now.subtract(const Duration(days: 13));
+      } else if (_filtroVentas == 'Mes') {
+        diasVentas = now.day; 
+        startVentasAct = DateTime(now.year, now.month, 1);
+        startVentasPre = DateTime(now.year, now.month - 1, 1);
+      } else {
+        diasVentas = 12;
+        startVentasAct = DateTime(now.year - 1, now.month + 1, 1);
+        startVentasPre = DateTime(now.year - 2, now.month + 1, 1);
+      }
+
+      if (_filtroVentas == 'Semana' || _filtroVentas == 'Mes') {
+        for (int i = 0; i < diasVentas; i++) {
+          DateTime dAct = startVentasAct.add(Duration(days: i));
+          DateTime dPre = startVentasPre.add(Duration(days: i));
+
+          final qActV = await db.rawQuery("SELECT SUM(total_venta) as t FROM pedidos WHERE estado = 'Completado' AND substr(fecha_hora, 1, 10) = ?", [dAct.toIso8601String().substring(0, 10)]);
+          final qPreV = await db.rawQuery("SELECT SUM(total_venta) as t FROM pedidos WHERE estado = 'Completado' AND substr(fecha_hora, 1, 10) = ?", [dPre.toIso8601String().substring(0, 10)]);
+
+          double valActV = (qActV.first['t'] as num? ?? 0).toDouble();
+          double valPreV = (qPreV.first['t'] as num? ?? 0).toDouble();
+
+          spotsActual.add(FlSpot(i.toDouble(), valActV));
+          spotsPrevio.add(FlSpot(i.toDouble(), valPreV));
+
+          if (valActV > maxValorVentas) maxValorVentas = valActV;
+          if (valPreV > maxValorVentas) maxValorVentas = valPreV;
+
+          // 🔥 CORREGIDO: Tooltip muestra nombre de día completo para Semana y fecha para Mes
+          if (_filtroVentas == 'Semana') {
+            String diaSem = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"][dAct.weekday-1];
+            etiquetasXCompletas.add(diaSem);
+            etiquetasX.add(["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"][dAct.weekday-1]);
+          } else {
+            etiquetasXCompletas.add("${dAct.day}/${dAct.month}");
+            etiquetasX.add("${dAct.day}/${dAct.month}");
+          }
+        }
+      } else {
+        // Año agrupado por meses
+        for (int i = 0; i < 12; i++) {
+          DateTime mAct = DateTime(startVentasAct.year, startVentasAct.month + i, 1);
+          DateTime mPre = DateTime(startVentasPre.year, startVentasPre.month + i, 1);
+
+          final qActV = await db.rawQuery("SELECT SUM(total_venta) as t FROM pedidos WHERE estado = 'Completado' AND substr(fecha_hora, 1, 7) = ?", ["${mAct.year}-${mAct.month.toString().padLeft(2, '0')}"]);
+          final qPreV = await db.rawQuery("SELECT SUM(total_venta) as t FROM pedidos WHERE estado = 'Completado' AND substr(fecha_hora, 1, 7) = ?", ["${mPre.year}-${mPre.month.toString().padLeft(2, '0')}"]);
+
+          double valActV = (qActV.first['t'] as num? ?? 0).toDouble();
+          double valPreV = (qPreV.first['t'] as num? ?? 0).toDouble();
+
+          spotsActual.add(FlSpot(i.toDouble(), valActV));
+          spotsPrevio.add(FlSpot(i.toDouble(), valPreV));
+
+          if (valActV > maxValorVentas) maxValorVentas = valActV;
+          if (valPreV > maxValorVentas) maxValorVentas = valPreV;
+
+          String nomMes = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"][mAct.month-1];
+          etiquetasXCompletas.add(nomMes);
+          etiquetasX.add(["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"][mAct.month-1]);
+        }
+      }
+
+      // 7. GRÁFICO DE PEDIDOS (#)
+      DateTime startPeds;
+      int diasPeds = 0;
+
+      if (_filtroPedidos == 'Semana') {
+        diasPeds = 7;
+        startPeds = now.subtract(const Duration(days: 6));
+      } else if (_filtroPedidos == 'Mes') {
+        diasPeds = now.day;
+        startPeds = DateTime(now.year, now.month, 1);
+      } else {
+        diasPeds = 12;
+        startPeds = DateTime(now.year - 1, now.month + 1, 1);
+      }
+
+      if (_filtroPedidos == 'Semana' || _filtroPedidos == 'Mes') {
+        for (int i = 0; i < diasPeds; i++) {
+          DateTime dAct = startPeds.add(Duration(days: i));
+          final qActP = await db.rawQuery("SELECT COUNT(id) as c FROM pedidos WHERE estado = 'Completado' AND substr(fecha_hora, 1, 10) = ?", [dAct.toIso8601String().substring(0, 10)]);
+          double valP = (qActP.first['c'] as num? ?? 0).toDouble();
+
+          barGroupsPedidos.add(BarChartGroupData(
+            x: i,
+            barRods: [BarChartRodData(toY: valP, color: Colors.blueAccent, width: _filtroPedidos == 'Semana' ? 12 : 6, borderRadius: BorderRadius.circular(2))]
+          ));
+
+          if (valP > maxValorPedidos) maxValorPedidos = valP;
+
+          // 🔥 CORREGIDO: Se añaden todas las fechas de volumen consecutivas
+          etiquetasXPedidosCompletas.add("${dAct.day}/${dAct.month}");
+
+          if (_filtroPedidos == 'Semana') {
+            String diaSem = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"][dAct.weekday-1];
+            etiquetasXPedidosCompletas[i] = diaSem; // Guardar nombre de día para tooltip
+            etiquetasXPedidos.add(["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"][dAct.weekday-1]);
+          } else {
+            etiquetasXPedidos.add("${dAct.day}/${dAct.month}"); // Se muestran todas consecutivas rotadas
+          }
+        }
+      } else {
+        for (int i = 0; i < 12; i++) {
+          DateTime mAct = DateTime(startPeds.year, startPeds.month + i, 1);
+          final qActP = await db.rawQuery("SELECT COUNT(id) as c FROM pedidos WHERE estado = 'Completado' AND substr(fecha_hora, 1, 7) = ?", ["${mAct.year}-${mAct.month.toString().padLeft(2, '0')}"]);
+          double valP = (qActP.first['c'] as num? ?? 0).toDouble();
+
+          barGroupsPedidos.add(BarChartGroupData(
+            x: i,
+            barRods: [BarChartRodData(toY: valP, color: Colors.blueAccent, width: 10, borderRadius: BorderRadius.circular(2))]
+          ));
+
+          if (valP > maxValorPedidos) maxValorPedidos = valP;
+          
+          String nomMes = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"][mAct.month-1];
+          etiquetasXPedidosCompletas.add(nomMes);
+          etiquetasXPedidos.add(["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"][mAct.month-1]);
+        }
+      }
+
+      if (mounted) {
+        setState(() {
+          _ventasDelDia = vDia;
+          _pedidosDelDia = pDia;
+          _topProductos = qTopProds;
+          _topClientes = qTopClientes;
+          _productosEstancados = qEstancados;
+          _retencionClientes = retencionFmt;
+          _spotsPeriodoActual = spotsActual;
+          _spotsPeriodoPrevio = spotsPrevio;
+          _ejeXEtiquetas = etiquetasX;
+          _ejeXEtiquetasCompletas = etiquetasXCompletas; 
+          _barGroupsPedidos = barGroupsPedidos;
+          _ejeXPedidosEtiquetas = etiquetasXPedidos;
+          _ejeXPedidosEtiquetasCompletas = etiquetasXPedidosCompletas; 
+          _maxYGrafico = maxValorVentas * 1.15;
+          _maxYPedidosGrafico = maxValorPedidos + 1;
+          _cargandoGraficos = false;
+        });
+      }
+    } catch (e) {
+      debugPrint("Error motor analítico: $e");
+    }
+  }
+
+  Widget _buildTabFinanzas(bool isOscuro) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(15),
+      child: Column(
+        children: [
+          _cardInventario('Inversión en Bodega (Costo)', inversionEnBodega, const Color(0xFF1565C0), _productosStock, 'compra', isOscuro),
+          _cardInventario('Ganancia Proyectada (Inventario)', utilidadProyectada, const Color(0xFFE65100), _productosStock, 'utilidad', isOscuro),
+          const SizedBox(height: 20),
+          _cardGlobal('Capital Reinversión (Fondo para Stock)', capitalGlobalReinversion, const Color(0xFF00695C), Icons.account_balance_wallet, isOscuro),
+          const SizedBox(height: 20),
+          _cardVentasMes('RECOGIDO TOTAL DEL MES', cajaTotalMes, const Color(0xFF2E7D32), _desgloseMesActual, 'recaudado', esGanancia: false, isOscuro: isOscuro),
+          _cardVentasMes('GANANCIA REAL DEL MES', gananciaNetaMes, const Color(0xFF388E3C), _desgloseMesActual, 'ganancia', esGanancia: true, isOscuro: isOscuro),
+          const SizedBox(height: 30),
+          _buildSeccionHistorial("REPORTES MANUALES", "REPORTE-", Colors.orange, isOscuro),
+          _buildSeccionHistorial("REPORTES ENTRE FECHAS", "REPORTE ", Colors.blue, isOscuro, excludePrefijo: "REPORTE MES-"), 
+          _buildSeccionHistorial("REPORTES MENSUALES (AUTO)", "REPORTE MES-", Colors.green, isOscuro),
+        ],
+      ),
+    );
+  }
+  
+  Widget _buildTabGraficos(bool isOscuro) {
+    if (_cargandoGraficos) return const Center(child: CircularProgressIndicator());
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(15),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 1. HEADER: VENTAS DEL DÍA
+          Container(
+            width: double.infinity, padding: const EdgeInsets.all(22),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: isOscuro 
+                    ? [const Color(0xFF1E3A8A), const Color(0xFF0F172A)] 
+                    : [const Color(0xFF2563EB), const Color(0xFF3B82F6)]
+              ),
+              borderRadius: BorderRadius.circular(20),
+              boxShadow: [
+                BoxShadow(
+                  color: isOscuro ? Colors.black54 : Colors.blue.withOpacity(0.3), 
+                  blurRadius: 12, 
+                  offset: const Offset(0, 4)
+                )
+              ]
+            ),
+            child: Column(
+              children: [
+                Text(
+                  "VENTAS DE HOY", 
+                  style: TextStyle(
+                    color: isOscuro ? Colors.white60 : Colors.white.withOpacity(0.9), 
+                    fontSize: 12, 
+                    fontWeight: FontWeight.bold, 
+                    letterSpacing: 1.5
+                  )
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  "\$${_ventasDelDia.toStringAsFixed(0)}", 
+                  style: const TextStyle(color: Colors.white, fontSize: 36, fontWeight: FontWeight.w900)
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  "$_pedidosDelDia ${_pedidosDelDia == 1 ? 'pedido registrado' : 'pedidos registrados hoy'}",
+                  style: TextStyle(color: isOscuro ? Colors.cyanAccent : Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 25),
+
+          // 2. EVOLUCIÓN DE VENTAS (Con su propio filtro independiente y sin recargas globales)
+          _tituloConFiltro(
+            "Evolución de Ventas (\$)", 
+            Icons.trending_up, 
+            _filtroVentas, 
+            isOscuro,
+            (v) {
+              if (v != null) {
+                setState(() { _filtroVentas = v; }); 
+                _cargarDatosGraficos();
+              }
+            }
+          ),
+          Card(
+            color: isOscuro ? Theme.of(context).cardColor : Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            elevation: isOscuro ? 0 : 2,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(10, 20, 20, 15),
+              child: Column(
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      _indicadorLinea(Colors.blueAccent, _filtroVentas == 'Semana' ? "Esta Semana" : (_filtroVentas == 'Mes' ? "Este Mes" : "Este Año")),
+                      const SizedBox(width: 20),
+                      _indicadorLinea(Colors.blue.withOpacity(0.4), _filtroVentas == 'Semana' ? "Sem. Anterior" : (_filtroVentas == 'Mes' ? "Mes Anterior" : "Año Anterior")),
+                    ],
+                  ),
+                  const SizedBox(height: 15),
+                  SizedBox(
+                    height: 220,
+                    child: LineChart(
+                      LineChartData(
+                        maxY: _maxYGrafico,
+                        minY: 0,
+                        // 🔥 MARGEN DE SEGURIDAD EXTREMO: El punto inicial y final tienen espacio para respirar
+                        minX: -0.4,
+                        maxX: _spotsPeriodoActual.isEmpty ? 1 : _spotsPeriodoActual.length.toDouble() - 0.6,
+                        lineTouchData: LineTouchData(
+                          touchSpotThreshold: 35, 
+                          touchTooltipData: LineTouchTooltipData(
+                            tooltipBgColor: isOscuro ? const Color(0xFF1E293B) : Colors.blueGrey.shade900,
+                            getTooltipItems: (touchedSpots) {
+                              return touchedSpots.map((spot) {
+                                int idx = spot.x.toInt();
+                                String etiqueta = (idx >= 0 && idx < _ejeXEtiquetasCompletas.length) 
+                                    ? _ejeXEtiquetasCompletas[idx] 
+                                    : "Día ${idx + 1}";
+                                String periodo = spot.barIndex == 0 ? "Actual" : "Anterior";
+                                return LineTooltipItem(
+                                  "$etiqueta ($periodo): \$${spot.y.toStringAsFixed(0)}",
+                                  const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11)
+                                );
+                              }).toList();
+                            }
+                          )
+                        ),
+                        gridData: FlGridData(
+                          show: true,
+                          drawHorizontalLine: true,
+                          drawVerticalLine: false,
+                          getDrawingHorizontalLine: (value) => FlLine(color: isOscuro ? Colors.white10 : Colors.grey.shade100, strokeWidth: 1),
+                        ),
+                        borderData: FlBorderData(show: false),
+                        titlesData: FlTitlesData(
+                          show: true,
+                          topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                          rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                          leftTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 45,
+                              getTitlesWidget: (value, meta) {
+                                if (value == 0) return const SizedBox.shrink();
+                                return Text(
+                                  value >= 1000 ? "\$${(value / 1000).toStringAsFixed(1)}K" : "\$${value.toStringAsFixed(0)}",
+                                  style: TextStyle(color: isOscuro ? Colors.white38 : Colors.grey.shade500, fontSize: 9, fontWeight: FontWeight.bold),
+                                  textAlign: TextAlign.right,
+                                );
+                              },
+                            )
+                          ),
+                          bottomTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 45, 
+                              interval: 1, 
+                              getTitlesWidget: (value, meta) {
+                                // 🔥 SOLUCIÓN DEFINITIVA A LÍNEAS DUPLICADAS: Se filtran valores decimales/fraccionarios del eje
+                                double resto = value - value.roundToDouble();
+                                if (resto.abs() > 0.01) return const SizedBox.shrink();
+
+                                int idx = value.round();
+                                if (idx < 0 || idx >= _ejeXEtiquetas.length || _ejeXEtiquetas[idx].isEmpty) {
+                                  return const SizedBox.shrink();
+                                }
+                                return SideTitleWidget(
+                                  axisSide: meta.axisSide,
+                                  angle: -1.5708, // Rotación de -90 grados
+                                  space: 8,
+                                  // 🔥 CORREGIDO: Desplazamiento corrector para alinear el texto bajo el punto vertical exacto
+                                  child: Transform.translate(
+                                    offset: const Offset(-3, 0), 
+                                    child: Text(
+                                      _ejeXEtiquetas[idx],
+                                      style: TextStyle(
+                                        color: isOscuro ? Colors.white38 : Colors.grey.shade500, 
+                                        fontSize: 8, 
+                                        fontWeight: FontWeight.bold
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              },
+                            )
+                          )
+                        ),
+                        lineBarsData: [
+                          LineChartBarData(
+                            spots: _spotsPeriodoActual.isEmpty ? [const FlSpot(0, 0)] : _spotsPeriodoActual,
+                            isCurved: true,
+                            color: Colors.blueAccent,
+                            barWidth: 3.5,
+                            isStrokeCapRound: true,
+                            dotData: const FlDotData(show: false),
+                            belowBarData: BarAreaData(
+                              show: true,
+                              color: Colors.blueAccent.withOpacity(isOscuro ? 0.08 : 0.05),
+                            ),
+                          ),
+                          LineChartBarData(
+                            spots: _spotsPeriodoPrevio.isEmpty ? [const FlSpot(0, 0)] : _spotsPeriodoPrevio,
+                            isCurved: true,
+                            color: Colors.blue.withOpacity(0.4),
+                            barWidth: 2,
+                            dashArray: [6, 4],
+                            isStrokeCapRound: true,
+                            dotData: const FlDotData(show: false),
+                            belowBarData: BarAreaData(show: false),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 25),
+
+          // 3. VOLUMEN DE PEDIDOS (Con filtro independiente)
+          _tituloConFiltro(
+            "Volumen de Pedidos (#)", 
+            Icons.assessment, 
+            _filtroPedidos, 
+            isOscuro,
+            (v) {
+              if (v != null) {
+                setState(() { _filtroPedidos = v; }); 
+                _cargarDatosGraficos();
+              }
+            }
+          ),
+          Card(
+            color: isOscuro ? Theme.of(context).cardColor : Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            elevation: isOscuro ? 0 : 2,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(10, 20, 10, 15),
+              child: SizedBox(
+                height: 200,
+                child: BarChart(
+                  BarChartData(
+                    alignment: BarChartAlignment.spaceAround,
+                    maxY: _maxYPedidosGrafico,
+                    barTouchData: BarTouchData(
+                      touchTooltipData: BarTouchTooltipData(
+                        tooltipBgColor: isOscuro ? const Color(0xFF1E293B) : Colors.blueGrey.shade900,
+                        getTooltipItem: (group, groupIndex, rod, rodIndex) {
+                          int idx = group.x.toInt();
+                          // 🔥 CORREGIDO: Muestra las fechas detalladas en las columnas de pedidos
+                          String etiqueta = (idx >= 0 && idx < _ejeXPedidosEtiquetasCompletas.length)
+                              ? _ejeXPedidosEtiquetasCompletas[idx]
+                              : "Día ${idx + 1}";
+                          return BarTooltipItem(
+                            "$etiqueta: ${rod.toY.toStringAsFixed(0)} ${rod.toY.toInt() == 1 ? 'pedido' : 'pedidos'}",
+                            const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)
+                          );
+                        }
+                      )
+                    ),
+                    titlesData: FlTitlesData(
+                      show: true,
+                      topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                      rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                      leftTitles: AxisTitles(
+                        sideTitles: SideTitles(
+                          showTitles: true,
+                          reservedSize: 30,
+                          getTitlesWidget: (value, meta) {
+                            return Text(
+                              value.toStringAsFixed(0),
+                              style: TextStyle(color: isOscuro ? Colors.white38 : Colors.grey.shade500, fontSize: 9, fontWeight: FontWeight.bold),
+                            );
+                          },
+                        )
+                      ),
+                      bottomTitles: AxisTitles(
+                        sideTitles: SideTitles(
+                          showTitles: true,
+                          reservedSize: 45, // Espacio ampliado para rotación
+                          interval: 1,
+                          getTitlesWidget: (value, meta) {
+                            // 🔥 EVITA DUPLICADOS EN LOS BORDES DE LAS BARRAS
+                            double resto = value - value.roundToDouble();
+                            if (resto.abs() > 0.01) return const SizedBox.shrink();
+
+                            int idx = value.round();
+                            if (idx < 0 || idx >= _ejeXPedidosEtiquetas.length || _ejeXPedidosEtiquetas[idx].isEmpty) {
+                              return const SizedBox.shrink();
+                            }
+                            return SideTitleWidget(
+                              axisSide: meta.axisSide,
+                              angle: -1.5708, // 🔥 CORREGIDO: Rotación vertical aplicada
+                              space: 8,
+                              // 🔥 CORREGIDO: Desplazamiento corrector para alinear el texto de barras
+                              child: Transform.translate(
+                                offset: const Offset(-3, 0), 
+                                child: Text(
+                                  _ejeXPedidosEtiquetas[idx],
+                                  style: TextStyle(
+                                    color: isOscuro ? Colors.white38 : Colors.grey.shade500, 
+                                    fontSize: 8, 
+                                    fontWeight: FontWeight.bold
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        )
+                      )
+                    ),
+                    borderData: FlBorderData(show: false),
+                    gridData: const FlGridData(show: false),
+                    barGroups: _barGroupsPedidos,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 25),
+
+          // PANEL CONTROLES PARA RANKINGS (Límite y Tipo)
+          _tituloSeccion("Configuración de Rankings", Icons.settings, isOscuro),
+          Card(
+            color: isOscuro ? Theme.of(context).cardColor : Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  // Filtro Período
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text("Periodo", style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.grey)),
+                      DropdownButton<String>(
+                        value: _filtroRankings,
+                        dropdownColor: isOscuro ? const Color(0xFF0F172A) : Colors.white,
+                        style: TextStyle(color: isOscuro ? Colors.cyanAccent : Colors.blue.shade800, fontWeight: FontWeight.bold, fontSize: 12),
+                        items: ['Semana', 'Mes', 'Año'].map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
+                        onChanged: (v) {
+                          if (v != null) {
+                            setState(() { _filtroRankings = v; });
+                            _cargarDatosGraficos();
+                          }
+                        },
+                      ),
+                    ],
+                  ),
+                  // Filtro Tipo (Productos vs Variantes)
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text("Agrupar por", style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.grey)),
+                      DropdownButton<String>(
+                        value: _tipoRanking,
+                        dropdownColor: isOscuro ? const Color(0xFF0F172A) : Colors.white,
+                        style: TextStyle(color: isOscuro ? Colors.cyanAccent : Colors.blue.shade800, fontWeight: FontWeight.bold, fontSize: 12),
+                        items: ['Productos', 'Variantes'].map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
+                        onChanged: (v) {
+                          if (v != null) {
+                            setState(() { _tipoRanking = v; });
+                            _cargarDatosGraficos();
+                          }
+                        },
+                      ),
+                    ],
+                  ),
+                  // Filtro Límitación
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text("Mostrar", style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.grey)),
+                      DropdownButton<int>(
+                        value: _limiteRankings,
+                        dropdownColor: isOscuro ? const Color(0xFF0F172A) : Colors.white,
+                        style: TextStyle(color: isOscuro ? Colors.cyanAccent : Colors.blue.shade800, fontWeight: FontWeight.bold, fontSize: 12),
+                        items: [5, 10, 20].map((e) => DropdownMenuItem(value: e, child: Text("Top $e"))).toList(),
+                        onChanged: (v) {
+                          if (v != null) {
+                            setState(() { _limiteRankings = v; });
+                            _cargarDatosGraficos();
+                          }
+                        },
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 15),
+
+          // 4. TOP 5 PRODUCTOS MÁS VENDIDOS
+          _tituloSeccion("Top $_limiteRankings ${_tipoRanking == 'Productos' ? 'Productos' : 'Variantes'} más Vendidos", Icons.star_border, isOscuro),
+          _listaRankingsProductos(_topProductos, isOscuro),
+          const SizedBox(height: 25),
+
+          // 5. TOP 5 MEJORES CLIENTES
+          _tituloSeccion("Top $_limiteRankings mejores Clientes", Icons.people_outline, isOscuro),
+          _listaRankingsClientes(_topClientes, isOscuro),
+          const SizedBox(height: 25),
+
+          // 6. RETENCIÓN DE CLIENTES (Panel 15, 30 y 60 días - Scroll para evitar overflow)
+          _tituloSeccion("Retención de Clientes (Toca para ver nombres)", Icons.pie_chart, isOscuro),
+          Card(
+            color: isOscuro ? Theme.of(context).cardColor : Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            elevation: isOscuro ? 0 : 2,
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal, 
+              physics: const BouncingScrollPhysics(),
+              padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: [
+                  _columnaRetencionInteractiva("15 días", _retencionClientes['15']?['activos'] ?? 0, _retencionClientes['15']?['inactivos'] ?? 0, 15, isOscuro),
+                  Container(width: 1, height: 110, margin: const EdgeInsets.symmetric(horizontal: 14), color: isOscuro ? Colors.white10 : Colors.grey.shade200),
+                  _columnaRetencionInteractiva("30 días", _retencionClientes['30']?['activos'] ?? 0, _retencionClientes['30']?['inactivos'] ?? 0, 30, isOscuro),
+                  Container(width: 1, height: 110, margin: const EdgeInsets.symmetric(horizontal: 14), color: isOscuro ? Colors.white10 : Colors.grey.shade200),
+                  _columnaRetencionInteractiva("60 días", _retencionClientes['60']?['activos'] ?? 0, _retencionClientes['60']?['inactivos'] ?? 0, 60, isOscuro),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 25),
+
+          // 7. INVENTARIO ESTANCADO
+          _tituloConFiltroDias(
+            "Inventario Estancado (+$_filtroDiasEstancados días)", 
+            Icons.warning_amber_rounded, 
+            _filtroDiasEstancados, 
+            isOscuro,
+            (v) {
+              if (v != null) {
+                setState(() { _filtroDiasEstancados = v; });
+                _cargarDatosGraficos();
+              }
+            },
+            colorIcon: Colors.redAccent,
+          ),
+          Card(
+            color: isOscuro ? Theme.of(context).cardColor : Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: BorderSide(color: Colors.redAccent.withOpacity(isOscuro ? 0.2 : 0.1))),
+            elevation: isOscuro ? 0 : 1,
+            child: _productosEstancados.isEmpty 
+              ? Padding(padding: const EdgeInsets.all(22), child: Center(child: Text("¡Excelente! Todo tu inventario tiene rotación activa.", style: TextStyle(color: isOscuro ? Colors.white60 : Colors.black54, fontSize: 13))))
+              : ListView.separated(
+                  shrinkWrap: true, 
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: _productosEstancados.length, 
+                  separatorBuilder: (_,__) => Divider(height: 1, color: isOscuro ? Colors.white10 : Colors.black12),
+                  itemBuilder: (ctx, i) {
+                    var p = _productosEstancados[i];
+                    return ListTile(
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                      leading: const Icon(Icons.inventory_2_outlined, color: Colors.redAccent, size: 20),
+                      title: Text(p['nombre'].toString(), style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: isOscuro ? Colors.white : Colors.black87)),
+                      trailing: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5), 
+                        decoration: BoxDecoration(color: Colors.red.withOpacity(0.08), borderRadius: BorderRadius.circular(8)), 
+                        child: Text("${p['stock']} u. en stock", style: const TextStyle(color: Colors.redAccent, fontSize: 11, fontWeight: FontWeight.w900))
+                      ),
+                    );
+                  }
+                ),
+          ),
+          const SizedBox(height: 50),
+        ],
+      ),
+    );
+  }
+
+  Widget _tituloConFiltroDias(String titulo, IconData icono, int filtroActual, bool isOscuro, Function(int?) onChanged, {Color? colorIcon}) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 5, bottom: 12, top: 15),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Expanded(
+            child: Row(
+              children: [
+                Icon(icono, size: 18, color: colorIcon ?? (isOscuro ? Colors.cyanAccent : Colors.blue.shade700)),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    titulo, 
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w900, color: isOscuro ? Colors.white70 : Colors.black87), 
+                    maxLines: 2, // 🔥 Corregido: Permite hasta 2 líneas para textos largos descriptivos
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            decoration: BoxDecoration(
+              color: isOscuro ? Colors.white.withOpacity(0.05) : Colors.grey.shade100,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: isOscuro ? Colors.white10 : Colors.grey.shade300)
+            ),
+            child: DropdownButton<int>(
+              value: filtroActual,
+              dropdownColor: isOscuro ? const Color(0xFF0F172A) : Colors.white,
+              style: TextStyle(color: isOscuro ? Colors.cyanAccent : Colors.blue.shade800, fontWeight: FontWeight.bold, fontSize: 11),
+              underline: const SizedBox(),
+              items: [10, 20, 30].map((e) => DropdownMenuItem<int>(value: e, child: Text("$e días", style: const TextStyle(fontSize: 11)))).toList(),
+              onChanged: onChanged,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _mostrarDetalleClientesRetencion(int dias, bool isOscuro) async {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => const Center(child: CircularProgressIndicator(color: Colors.cyanAccent)),
+    );
+
+    try {
+      final Database db = await DBHelper.instance.database;
+      final limiteFecha = DateTime.now().subtract(Duration(days: dias)).toIso8601String().substring(0, 10);
+
+      // 1. Obtener Clientes Activos (Tienen pedidos completados en el rango)
+      final activosRaw = await db.rawQuery('''
+        SELECT DISTINCT c.id, COALESCE(c.nombre_completo, 'Cliente General') as nombre, c.nombre_negocio
+        FROM pedidos p JOIN clientes c ON p.cliente_id = c.id
+        WHERE p.estado = 'Completado' AND substr(p.fecha_hora, 1, 10) >= ?
+      ''', [limiteFecha]);
+
+      // 2. Obtener Clientes Inactivos (Registrados, pero no tienen compras en el rango)
+      final inactivosRaw = await db.rawQuery('''
+        SELECT id, COALESCE(nombre_completo, 'Cliente General') as nombre, nombre_negocio
+        FROM clientes
+        WHERE id NOT IN (
+          SELECT DISTINCT cliente_id FROM pedidos WHERE estado = 'Completado' AND substr(fecha_hora, 1, 10) >= ?
+        )
+      ''', [limiteFecha]);
+
+      if (mounted) Navigator.pop(context); // Cerrar indicador de carga
+
+      if (!mounted) return;
+
+      showModalBottomSheet(
+        context: context,
+        backgroundColor: Colors.transparent,
+        isScrollControlled: true,
+        builder: (ctx) => DefaultTabController(
+          length: 2,
+          child: Container(
+            height: MediaQuery.of(ctx).size.height * 0.65,
+            decoration: BoxDecoration(
+              color: isOscuro ? const Color(0xFF0F172A) : Colors.white,
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(25))
+            ),
+            child: Column(
+              children: [
+                const SizedBox(height: 10),
+                Container(width: 40, height: 4, decoration: BoxDecoration(color: isOscuro ? Colors.white24 : Colors.grey.shade300, borderRadius: BorderRadius.circular(2))),
+                const SizedBox(height: 15),
+                Text(
+                  "Clientes - Periodo $dias días", 
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: isOscuro ? Colors.white : Colors.black87)
+                ),
+                TabBar(
+                  indicatorColor: Colors.blueAccent,
+                  labelColor: isOscuro ? Colors.cyanAccent : Colors.blue.shade800,
+                  unselectedLabelColor: isOscuro ? Colors.white54 : Colors.grey,
+                  tabs: [
+                    Tab(text: "Activos (${activosRaw.length})"),
+                    Tab(text: "Inactivos (${inactivosRaw.length})"),
+                  ],
+                ),
+                Expanded(
+                  child: TabBarView(
+                    children: [
+                      _listaNombresBottomSheet(activosRaw, isOscuro, activos: true),
+                      _listaNombresBottomSheet(inactivosRaw, isOscuro, activos: false),
+                    ],
+                  ),
+                )
+              ],
+            ),
+          ),
+        ),
+      );
+    } catch (e) {
+      if (mounted) Navigator.pop(context);
+      debugPrint("Error cargando detalle retención: $e");
+    }
+  }
+
+  Widget _listaNombresBottomSheet(List<Map<String, dynamic>> lista, bool isOscuro, {required bool activos}) {
+    if (lista.isEmpty) {
+      return Center(
+        child: Text(
+          "Sin clientes en este grupo", 
+          style: TextStyle(color: isOscuro ? Colors.white38 : Colors.grey, fontSize: 12)
+        )
+      );
+    }
+    return ListView.separated(
+      padding: const EdgeInsets.all(15),
+      itemCount: lista.length,
+      separatorBuilder: (_, __) => Divider(height: 1, color: isOscuro ? Colors.white10 : Colors.black12),
+      itemBuilder: (ctx, i) {
+        var c = lista[i];
+        String negocio = c['nombre_negocio']?.toString() ?? "";
+        return ListTile(
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          leading: CircleAvatar(
+            backgroundColor: (activos ? Colors.green : Colors.redAccent).withOpacity(0.15),
+            radius: 14,
+            child: Icon(
+              activos ? Icons.check : Icons.close, 
+              color: activos ? Colors.green : Colors.redAccent, 
+              size: 14
+            ),
+          ),
+          title: Text(
+            c['nombre'].toString(), 
+            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: isOscuro ? Colors.white : Colors.black87)
+          ),
+          subtitle: negocio.isNotEmpty && negocio != "null"
+              ? Text(negocio, style: TextStyle(color: isOscuro ? Colors.white38 : Colors.grey, fontSize: 11))
+              : null,
+        );
+      },
+    );
+  }
+
+  // 🔥 Corregido: firma simplificada a 2 parámetros para eliminar la advertencia de forma definitiva
+  Widget _indicadorLinea(Color c, String t) {
+    return Row(
+      children: [
+        Container(
+          width: 25, 
+          height: 3, 
+          decoration: BoxDecoration(
+            color: c, 
+            borderRadius: BorderRadius.circular(2),
+          )
+        ),
+        const SizedBox(width: 8),
+        Text(t, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+      ],
+    );
+  }
+
+  Widget _listaRankingsProductos(List<Map<String, dynamic>> datos, bool isOscuro) {
+    return Card(
+      color: isOscuro ? Theme.of(context).cardColor : Colors.white,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      elevation: isOscuro ? 0 : 2,
+      child: datos.isEmpty 
+        ? Padding(padding: const EdgeInsets.all(22), child: Center(child: Text("No hay datos en este período.", style: TextStyle(color: isOscuro ? Colors.white60 : Colors.black54, fontSize: 13))))
+        : ListView.separated(
+            shrinkWrap: true, 
+            physics: const NeverScrollableScrollPhysics(),
+            itemCount: datos.length, 
+            separatorBuilder: (_,__) => Divider(height: 1, color: isOscuro ? Colors.white10 : Colors.black12),
+            itemBuilder: (ctx, i) {
+              var d = datos[i];
+              int uVendidas = (d['total_vendido'] as num).toInt();
+              int totalPeds = (d['total_pedidos'] as num).toInt();
+              return ListTile(
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                leading: CircleAvatar(
+                  radius: 13, 
+                  backgroundColor: Colors.orange.withOpacity(0.15), 
+                  child: Text("${i+1}", style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: Colors.orange))
+                ),
+                // 🔥 CORREGIDO: maxLines: 2 para que los nombres de variantes se vean completos
+                title: Text(d['nombre'].toString(), style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: isOscuro ? Colors.white : Colors.black87), maxLines: 2, overflow: TextOverflow.ellipsis),
+                subtitle: Text("Solicitado en $totalPeds ${totalPeds == 1 ? 'pedido' : 'pedidos'}", style: TextStyle(fontSize: 10, color: isOscuro ? Colors.white38 : Colors.grey, fontWeight: FontWeight.w500)),
+                trailing: Text("$uVendidas u.", style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 14, color: Colors.orange)),
+              );
+            }
+          ),
+    );
+  }
+
+  Widget _listaRankingsClientes(List<Map<String, dynamic>> datos, bool isOscuro) {
+    return Card(
+      color: isOscuro ? Theme.of(context).cardColor : Colors.white,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      elevation: isOscuro ? 0 : 2,
+      child: datos.isEmpty 
+        ? Padding(padding: const EdgeInsets.all(22), child: Center(child: Text("No hay datos en este período.", style: TextStyle(color: isOscuro ? Colors.white60 : Colors.black54, fontSize: 13))))
+        : ListView.separated(
+            shrinkWrap: true, 
+            physics: const NeverScrollableScrollPhysics(),
+            itemCount: datos.length, 
+            separatorBuilder: (_,__) => Divider(height: 1, color: isOscuro ? Colors.white10 : Colors.black12),
+            itemBuilder: (ctx, i) {
+              var d = datos[i];
+              double gastado = (d['gastado'] as num).toDouble();
+              int totalPeds = (d['total_pedidos'] as num).toInt();
+              return ListTile(
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                leading: CircleAvatar(
+                  radius: 13, 
+                  backgroundColor: Colors.green.withOpacity(0.15), 
+                  child: Text("${i+1}", style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: Colors.green))
+                ),
+                // 🔥 CORREGIDO: maxLines: 2 para evitar truncamientos
+                title: Text(d['nombre'].toString(), style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: isOscuro ? Colors.white : Colors.black87), maxLines: 2, overflow: TextOverflow.ellipsis),
+                subtitle: Text("Registró $totalPeds ${totalPeds == 1 ? 'pedido' : 'pedidos'}", style: TextStyle(fontSize: 10, color: isOscuro ? Colors.white38 : Colors.grey, fontWeight: FontWeight.w500)),
+                trailing: Text("\$${gastado.toStringAsFixed(0)}", style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 14, color: Colors.green)),
+              );
+            }
+          ),
+    );
+  }
+  Widget _tituloSeccion(String texto, IconData icono, bool isOscuro, {Color? colorIcon}) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 5, bottom: 12, top: 5),
+      child: Row(
+        children: [
+          Icon(icono, size: 18, color: colorIcon ?? (isOscuro ? Colors.cyanAccent : Colors.blue.shade700)),
+          const SizedBox(width: 8),
+          // 🔥 CORREGIDO: Expanded para evitar que los textos largos desborden la pantalla
+          Expanded(
+            child: Text(texto, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w900, color: isOscuro ? Colors.white70 : Colors.black87)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _tituloConFiltro(String titulo, IconData icono, String filtroActual, bool isOscuro, Function(String?) onChanged) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 5, bottom: 12, top: 15),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          // 🔥 CORREGIDO: Expanded para que el título y el icono se adapten al espacio sobrante
+          Expanded(
+            child: Row(
+              children: [
+                Icon(icono, size: 18, color: isOscuro ? Colors.cyanAccent : Colors.blue.shade700),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(titulo, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w900, color: isOscuro ? Colors.white70 : Colors.black87), maxLines: 1, overflow: TextOverflow.ellipsis),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            decoration: BoxDecoration(
+              color: isOscuro ? Colors.white.withOpacity(0.05) : Colors.grey.shade100,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: isOscuro ? Colors.white10 : Colors.grey.shade300)
+            ),
+            child: DropdownButton<String>(
+              value: filtroActual,
+              dropdownColor: isOscuro ? const Color(0xFF0F172A) : Colors.white,
+              style: TextStyle(color: isOscuro ? Colors.cyanAccent : Colors.blue.shade800, fontWeight: FontWeight.bold, fontSize: 11),
+              underline: const SizedBox(),
+              items: ['Semana', 'Mes', 'Año'].map((e) => DropdownMenuItem(value: e, child: Text(e, style: const TextStyle(fontSize: 11)))).toList(),
+              onChanged: onChanged,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _columnaRetencionInteractiva(String titulo, int activos, int inactivos, int diasRango, bool isOscuro) {
+    int total = activos + inactivos;
+    double porcentaje = total > 0 ? (activos / total) * 100 : 0.0;
+    return InkWell(
+      onTap: () => _mostrarDetalleClientesRetencion(diasRango, isOscuro),
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        child: Column(
+          children: [
+            Text(titulo, style: TextStyle(fontWeight: FontWeight.w900, fontSize: 11, color: isOscuro ? Colors.white60 : Colors.black54)),
+            const SizedBox(height: 12),
+            Stack(
+              alignment: Alignment.center,
+              children: [
+                SizedBox(
+                  height: 55,
+                  width: 55,
+                  child: CircularProgressIndicator(
+                    value: total > 0 ? activos / total : 0.0,
+                    backgroundColor: isOscuro ? Colors.white.withOpacity(0.05) : Colors.grey.shade100,
+                    color: porcentaje >= 50 ? Colors.green : Colors.redAccent,
+                    strokeWidth: 5.5,
+                  ),
+                ),
+                Text(
+                  "${porcentaje.toStringAsFixed(0)}%", 
+                  style: TextStyle(fontWeight: FontWeight.w900, fontSize: 11, color: isOscuro ? Colors.white : Colors.black87)
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            // 🔥 CORREGIDO: Muestra datos puros sin etiquetas ambiguas
+            Text(
+              "Activos: $activos", 
+              style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 10, color: Colors.green)
+            ),
+            const SizedBox(height: 2),
+            Text(
+              "Inactivos: $inactivos", 
+              style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 10, color: Colors.redAccent)
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _FilaClienteExpandible extends StatefulWidget {

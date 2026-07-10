@@ -38,7 +38,17 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'servicio_notificaciones.dart';
 import 'package:flutter/foundation.dart'; 
 
-// 🔥 Función aislada a prueba de fallos y textos corruptos
+String optimizarUrlCloudinary(String urlOriginal, {int width = 400}) {
+  if (urlOriginal.isEmpty) return urlOriginal;
+  if (!urlOriginal.contains('cloudinary.com') || urlOriginal.contains('q_auto')) {
+    return urlOriginal;
+  }
+  return urlOriginal.replaceFirst(
+    '/upload/', 
+    '/upload/c_limit,w_$width,q_auto,f_auto/'
+  );
+}
+
 Uint8List? decodificarBase64Aislado(String b64) {
   try { 
     // Limpiamos espacios o saltos de línea basura que corrompen el Base64
@@ -890,34 +900,45 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       for (var row in dbProds) {
         int id = row['id'] as int;
         String fotoPath = row['foto_path']?.toString() ?? "";
+        
         if (fotoPath.isNotEmpty) {
           try {
-            Uint8List bytes;
-            if (fotoPath.startsWith('http')) {
-              final response = await http.get(Uri.parse(fotoPath));
-              bytes = response.bodyBytes;
+            Uint8List? bytes;
+
+            // 🔥 1. PRIORIDAD MÁXIMA OFFLINE: Buscar archivo físico local (Incluso si la base de datos dice "http...")
+            String? rutaLocal = _obtenerRutaFisicaLegibleSync(fotoPath);
+
+            if (rutaLocal != null) {
+              // La foto está en la carpeta Boxi (Instantáneo, 0 internet)
+              bytes = await File(rutaLocal).readAsBytes();
+            } else if (fotoPath.startsWith('http')) {
+              // 🔥 2. FALLBACK ONLINE: Si no está local, pedimos a Cloudinary la versión liviana de 300px
+              String urlLiviana = optimizarUrlCloudinary(fotoPath, width: 300);
+              final response = await http.get(Uri.parse(urlLiviana)).timeout(const Duration(seconds: 5));
+              if (response.statusCode == 200) {
+                bytes = response.bodyBytes;
+              }
             } else if (fotoPath.length > 500) {
+              // 3. LEGACY: Base 64
               bytes = base64Decode(fotoPath);
-            } else {
-              final file = File(fotoPath);
-              if (file.existsSync()) {
-                bytes = await file.readAsBytes();
-              } else {
-                continue;
+            }
+
+            if (bytes != null) {
+              // Compresión inteligente para que el PDF no explote la memoria RAM
+              final codec = await ui.instantiateImageCodec(bytes, targetWidth: 200);
+              final frame = await codec.getNextFrame();
+              final data = await frame.image.toByteData(format: ui.ImageByteFormat.png);
+              if (data != null) {
+                imagenesPdf[id] = pw.MemoryImage(data.buffer.asUint8List());
               }
             }
-            
-            // Compresión inteligente: Redimensionamos al vuelo a un ancho de 200px
-            final codec = await ui.instantiateImageCodec(bytes, targetWidth: 200);
-            final frame = await codec.getNextFrame();
-            final data = await frame.image.toByteData(format: ui.ImageByteFormat.png);
-            if (data != null) {
-              imagenesPdf[id] = pw.MemoryImage(data.buffer.asUint8List());
-            }
-          } catch (_) {}
+          } catch (_) {
+            debugPrint("Error procesando imagen para PDF - ID: $id");
+          }
         }
         
         contador++;
+        // Pausa de 1 milisegundo cada 5 fotos para que la pantalla "Cargando..." no se congele
         if (contador % 5 == 0) await Future.delayed(const Duration(milliseconds: 1));
       }
 
@@ -928,17 +949,36 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         int prodId = row['producto_id'] as int;
         int gIdx = row['grupo_index'] as int;
         int oIdx = row['opcion_index'] as int;
-        String fotoBase64 = row['foto_base64']?.toString() ?? "";
-        if (fotoBase64.isNotEmpty) {
+        String fotoVarData = row['foto_base64']?.toString() ?? "";
+        
+        if (fotoVarData.isNotEmpty) {
           try {
-            Uint8List bytes = base64Decode(fotoBase64);
-            
-            // Compresión al vuelo para miniaturas
-            final codec = await ui.instantiateImageCodec(bytes, targetWidth: 40);
-            final frame = await codec.getNextFrame();
-            final data = await frame.image.toByteData(format: ui.ImageByteFormat.png);
-            if (data != null) {
-              imagenesVariantesPdf["${prodId}_${gIdx}_$oIdx"] = pw.MemoryImage(data.buffer.asUint8List());
+            Uint8List? bytesVar;
+
+            // 🔥 1. PRIORIDAD MÁXIMA OFFLINE PARA VARIANTES
+            String? rutaLocalVar = _obtenerRutaFisicaLegibleSync(fotoVarData);
+
+            if (rutaLocalVar != null) {
+              bytesVar = await File(rutaLocalVar).readAsBytes();
+            } else if (fotoVarData.startsWith('http')) {
+              // 🔥 2. FALLBACK ONLINE: Versión hiper liviana para miniaturas (100px)
+              String urlLivianaVar = optimizarUrlCloudinary(fotoVarData, width: 100);
+              final response = await http.get(Uri.parse(urlLivianaVar)).timeout(const Duration(seconds: 5));
+              if (response.statusCode == 200) {
+                bytesVar = response.bodyBytes;
+              }
+            } else if (fotoVarData.length > 500) {
+              bytesVar = base64Decode(fotoVarData);
+            }
+
+            if (bytesVar != null) {
+              // Compresión al vuelo para miniaturas
+              final codec = await ui.instantiateImageCodec(bytesVar, targetWidth: 40);
+              final frame = await codec.getNextFrame();
+              final data = await frame.image.toByteData(format: ui.ImageByteFormat.png);
+              if (data != null) {
+                imagenesVariantesPdf["${prodId}_${gIdx}_$oIdx"] = pw.MemoryImage(data.buffer.asUint8List());
+              }
             }
           } catch (_) {}
         }
@@ -1984,7 +2024,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                                 }
                               });
                             },
-                            // 🔥 MINIATURA DE IMAGEN
+                            // 🔥 MINIATURA 100% LOCAL PRIMERO
                             leading: Container(
                               width: 45, height: 45,
                               decoration: BoxDecoration(
@@ -1992,11 +2032,34 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                                 borderRadius: BorderRadius.circular(10),
                               ),
                               clipBehavior: Clip.antiAlias,
-                              child: fotoPath.isEmpty
-                                  ? const Icon(Icons.image, color: Colors.grey, size: 20)
-                                  : (fotoPath.length > 500
-                                      ? Image.memory(base64Decode(fotoPath), fit: BoxFit.cover, gaplessPlayback: true)
-                                      : Image.file(File(fotoPath), fit: BoxFit.cover, gaplessPlayback: true, errorBuilder: (_,__,___) => const Icon(Icons.broken_image, size: 20))),
+                              child: () {
+                                if (fotoPath.isEmpty) return const Icon(Icons.image, color: Colors.grey, size: 20);
+
+                                // 1. PRIORIDAD 100% LOCAL (Busca en el disco duro del celular, 0 internet)
+                                String? rutaLegible = _obtenerRutaFisicaLegibleSync(fotoPath);
+                                
+                                if (rutaLegible != null) {
+                                  // La foto existe localmente, la mostramos directo de la memoria
+                                  return Image.file(File(rutaLegible), fit: BoxFit.cover, gaplessPlayback: true);
+                                }
+                                
+                                // 2. SOLO ENTRA AQUÍ SI LA FOTO NO EXISTE LOCALMENTE (se borró la carpeta Boxi o es celular nuevo)
+                                if (fotoPath.startsWith('http')) {
+                                  // La mandamos a descargar en segundo plano a la carpeta Boxi para que la próxima vez sea 100% local
+                                  ServicioNube.descargarFotoIndividualEnSegundoPlano(fotoPath, _localBoxiPath);
+                                  
+                                  // Mientras se descarga de fondo, mostramos una miniatura temporal super liviana para no gastar tus datos de Cloudinary
+                                  String urlLiviana = optimizarUrlCloudinary(fotoPath, width: 100);
+                                  return Image.network(urlLiviana, fit: BoxFit.cover, errorBuilder: (_,__,___) => const Icon(Icons.broken_image, size: 20));
+                                }
+                                
+                                // 3. Si es de los usuarios gratis antiguos (Base64)
+                                if (fotoPath.length > 500) {
+                                  return Image.memory(base64Decode(fotoPath), fit: BoxFit.cover, gaplessPlayback: true);
+                                }
+                                
+                                return const Icon(Icons.broken_image, size: 20);
+                              }()
                             ),
                             title: Text(
                               p['nombre'], 
@@ -2352,21 +2415,22 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                         ),
                         clipBehavior: Clip.antiAlias,
                         child: () {
-                          // 🔥 OFFLINE-FIRST: Buscamos la miniatura física de forma inmediata
+                          if (fotoPath.isEmpty) return const Icon(Icons.image, color: Colors.grey, size: 20);
                           String? rutaLegible = _obtenerRutaFisicaLegibleSync(fotoPath);
-                          
                           if (rutaLegible != null) {
                             return Image.file(File(rutaLegible), fit: BoxFit.cover, gaplessPlayback: true);
                           }
                           if (fotoPath.startsWith('http')) {
-                            return Image.network(fotoPath, fit: BoxFit.cover, errorBuilder: (_,__,___) => const Icon(Icons.image, color: Colors.grey, size: 20));
+                            String urlLiviana = optimizarUrlCloudinary(fotoPath, width: 100);
+                            return Image.network(urlLiviana, fit: BoxFit.cover, errorBuilder: (_,__,___) => const Icon(Icons.image, color: Colors.grey, size: 20));
                           }
                           if (fotoPath.length > 500) {
                             return Image.memory(base64Decode(fotoPath), fit: BoxFit.cover, gaplessPlayback: true);
                           }
-                          if (fotoPath.isNotEmpty && File(fotoPath).existsSync()) {
+                          if (File(fotoPath).existsSync()) {
                             return Image.file(File(fotoPath), fit: BoxFit.cover, gaplessPlayback: true);
                           }
+                          
                           return const Icon(Icons.image, color: Colors.grey, size: 20);
                         }(),
                       ),
@@ -2429,22 +2493,19 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   }
   
   Future<Uint8List> _escribirNombreEnImagen(Uint8List bytes, String texto) async {
-    final ui.Codec codec = await ui.instantiateImageCodec(bytes);
+    final ui.Codec codec = await ui.instantiateImageCodec(bytes, targetWidth: 800);
     final ui.FrameInfo frameInfo = await codec.getNextFrame();
     final ui.Image image = frameInfo.image;
 
     final ui.PictureRecorder recorder = ui.PictureRecorder();
     final Canvas canvas = Canvas(recorder);
     
-    // Dibujar imagen original
     canvas.drawImage(image, Offset.zero, Paint());
 
-    // Dibujar fondo oscuro abajo para que el texto resalte
-    final double altoBarra = image.height * 0.15; // 15% del alto
+    final double altoBarra = image.height * 0.15;
     final rect = Rect.fromLTRB(0, image.height - altoBarra, image.width.toDouble(), image.height.toDouble());
     canvas.drawRect(rect, Paint()..color = Colors.black.withOpacity(0.6));
 
-    // Dibujar texto
     final textPainter = TextPainter(
       text: TextSpan(
         text: texto, 
@@ -2464,6 +2525,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   Future<void> _compartirMultiplesProductos(String categoriaNombre, List<Map<String, dynamic>> seleccionados) async {
     if (seleccionados.isEmpty) return;
     
+    // 🚀 MUESTRA EL CARTEL "CARGANDO..." DE INMEDIATO
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -2482,17 +2544,15 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       List<XFile> files = [];
       StringBuffer sb = StringBuffer();
       
-      // Formateador de moneda integrado ($20000 -> $20.000)
       String formatMoney(double val) {
         return '\$${val.toStringAsFixed(0).replaceAllMapped(RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'), (Match m) => '${m[1]}.')}';
       }
 
-      // Diseño del Encabezado
       sb.writeln("📂 *CATEGORÍA: ${categoriaNombre.toUpperCase()}*");
       sb.writeln("━━━━━━━━━━━━━━━━━━━━\n");
 
-      // 🔥 OBTENEMOS EL DIRECTORIO AUTORIZADO PARA COMPARTIR
       final tempDir = await getTemporaryDirectory();
+      final String timestamp = DateTime.now().millisecondsSinceEpoch.toString();
 
       for (var p in seleccionados) {
         String nombre = p['nombre']?.toString() ?? "Producto";
@@ -2508,57 +2568,59 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
           sb.writeln("• *$nombre*");
           sb.writeln(" ↳ Precio: *${formatMoney(pFinal)}*");
         }
-        sb.writeln(""); // Salto de línea estético
+        sb.writeln(""); 
 
-        // Resolve e incorporar imagen física buscando primero de forma local y asíncrona
         String imgData = p['foto_path']?.toString() ?? "";
         if (imgData.isNotEmpty) {
           try {
             Uint8List? bytesImagen;
             
-            // 🔥 OFFLINE-FIRST: Buscamos primero la ruta legible
-            String? rutaSegura = await ServicioNube.obtenerRutaLegibleSegura(imgData);
+            // 🔥 1. OFFLINE-FIRST: Lee del disco duro, 0 internet
+            String? rutaSegura = _obtenerRutaFisicaLegibleSync(imgData);
             if (rutaSegura != null) {
               bytesImagen = await File(rutaSegura).readAsBytes();
             } else if (imgData.startsWith('http')) {
-              final response = await http.get(Uri.parse(imgData)).timeout(const Duration(seconds: 10));
-              if (response.statusCode == 200) {
-                bytesImagen = response.bodyBytes;
-              }
+              // 🔥 2. FALLBACK NUBE: Si la borraron, descarga versión a 800px
+              String urlOptimizada = optimizarUrlCloudinary(imgData, width: 800);
+              final response = await http.get(Uri.parse(urlOptimizada)).timeout(const Duration(seconds: 8));
+              if (response.statusCode == 200) bytesImagen = response.bodyBytes;
             } else if (imgData.length > 500) {
               bytesImagen = base64Decode(imgData);
             } else {
               File fileLocal = File(imgData);
-              if (fileLocal.existsSync()) {
-                bytesImagen = await fileLocal.readAsBytes();
-              }
+              if (fileLocal.existsSync()) bytesImagen = await fileLocal.readAsBytes();
             }
 
             if (bytesImagen != null) {
-              // Estampamos el nombre del producto en la imagen
+              // 🔥 Aquí llama a la función _escribirNombreEnImagen. 
+              // Como en el paso anterior le pusimos targetWidth: 800 a esa función, 
+              // el resultado ya sale súper liviano y comprimido para WhatsApp automáticamente.
               Uint8List bytesConTexto = await _escribirNombreEnImagen(bytesImagen, nombre);
 
-              // 🔥 SE GUARDA EN LA CARPETA PERMITIDA POR ANDROID/IOS
-              final file = File('${tempDir.path}/share_${p['id']}_${DateTime.now().millisecondsSinceEpoch}.png');
+              final file = File('${tempDir.path}/cat_share_${p['id']}_$timestamp.png');
               await file.writeAsBytes(bytesConTexto);
               files.add(XFile(file.path));
             }
           } catch (e) {
-            debugPrint("Error procesando imagen múltiple offline: $e");
+            debugPrint("Error procesando imagen de categoría: $e");
           }
         }
       }
 
-      if (mounted) Navigator.pop(context); // Cerrar diálogo de carga
+      // 🚀 QUITA EL CARTEL DE CARGANDO
+      if (mounted) Navigator.pop(context); 
 
+      // 🚀 ABRE WHATSAPP
       if (files.isNotEmpty) {
         await Share.shareXFiles(files, text: sb.toString());
       } else {
         await Share.share(sb.toString());
       }
     } catch (e) {
-      if (mounted) Navigator.pop(context); // Asegurar cierre del diálogo de carga
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Error al empaquetar imágenes")));
+      if (mounted) {
+        Navigator.pop(context); // Quita el cartel si hay error
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Error al empaquetar imágenes")));
+      }
     }
   }
   
@@ -2851,6 +2913,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         text += "\n💰 *Precio: \$${precioFinal.toStringAsFixed(0)}*";
       }
 
+      // 1. OBTENEMOS LAS VARIANTES
       final List<Map<String, dynamic>> fotosDb = [];
       String varStr = p['variantes']?.toString() ?? "";
       if (varStr.length > 5) {
@@ -2862,7 +2925,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
               if (o['foto_path'] != null && o['foto_path'].toString().isNotEmpty) {
                 fotosDb.add({
                   'variante_nombre': o['nombre'],
-                  'foto_base64': o['foto_path'] // Mantienes esta key temporal para que el código de abajo funcione
+                  'foto_base64': o['foto_path']
                 });
               }
             }
@@ -2870,68 +2933,28 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         } catch (_) {}
       }
 
-      List<String> fotosSeleccionadasBase64 = [];
+      // 2. FILTRAMOS DUPLICADOS
+      final Set<String> seenPhotos = {};
+      final List<Map<String, dynamic>> fotosFiltradas = [];
+      for (var f in fotosDb) {
+        final String base64Str = f['foto_base64'] as String? ?? '';
+        if (base64Str.isNotEmpty && !seenPhotos.contains(base64Str)) {
+          seenPhotos.add(base64Str);
+          fotosFiltradas.add(f);
+        }
+      }
+
+      List<String> fotosSeleccionadasRutas = [];
       bool procederACompartir = true;
       bool? compartirSeleccion;
 
-      if (fotosDb.isNotEmpty && mounted) {
-        // 1. FILTRAR DUPLICADOS EN MEMORIA PARA EVITAR REPETIDOS
-        final Set<String> seenPhotos = {};
-        final List<Map<String, dynamic>> fotosFiltradas = [];
-        for (var f in fotosDb) {
-          final String base64Str = f['foto_base64'] as String? ?? '';
-          if (base64Str.isNotEmpty && !seenPhotos.contains(base64Str)) {
-            seenPhotos.add(base64Str);
-            fotosFiltradas.add(f);
-          }
-        }
-
-        // 2. OBTENER IMÁGENES DE VARIANTES CON LÓGICA OFFLINE-FIRST SEGURA
-        final List<Uint8List> decodedBytesList = [];
-        for (var f in fotosFiltradas) {
-          String imgData = f['foto_base64'] as String? ?? '';
-          Uint8List? bytes;
-
-          // A. Intentamos cargar localmente primero
-          String? rutaSegura = await ServicioNube.obtenerRutaLegibleSegura(imgData);
-          if (rutaSegura != null) {
-            try {
-              bytes = await File(rutaSegura).readAsBytes();
-            } catch (_) {}
-          }
-
-          // B. Si falla y es URL de red, descargamos (solo si hay internet)
-          if (bytes == null && imgData.startsWith('http')) {
-            try {
-              final response = await http.get(Uri.parse(imgData)).timeout(const Duration(seconds: 8));
-              if (response.statusCode == 200) {
-                bytes = response.bodyBytes;
-              }
-            } catch (_) {}
-          }
-
-          // C. Fallback para Base64 o rutas directas
-          if (bytes == null) {
-            if (imgData.length > 500) {
-              try { bytes = base64Decode(imgData); } catch (_) {}
-            } else if (imgData.isNotEmpty) {
-              try {
-                File file = File(imgData);
-                if (file.existsSync()) bytes = await file.readAsBytes();
-              } catch (_) {}
-            }
-          }
-
-          // Si todo falló, guardamos un arreglo vacío seguro de longitud 0
-          decodedBytesList.add(bytes ?? Uint8List(0));
-        }
-
+      // 3. MOSTRAMOS EL DIÁLOGO AL INSTANTE (Sin retrasos)
+      if (fotosFiltradas.isNotEmpty && mounted) {
         final Map<int, bool> seleccionadas = {};
         for (int i = 0; i < fotosFiltradas.length; i++) {
-          seleccionadas[i] = true; // Seleccionado por defecto
+          seleccionadas[i] = true; // Todo seleccionado por defecto
         }
 
-        // Diálogo refinado e inmune a crashes
         compartirSeleccion = await showDialog<bool?>(
           context: context,
           barrierDismissible: false,
@@ -2950,6 +2973,8 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                     itemBuilder: (c, idx) {
                       final f = fotosFiltradas[idx];
                       final String nombreVar = f['variante_nombre']?.toString() ?? 'Variante';
+                      final String rutaFoto = f['foto_base64']?.toString() ?? '';
+
                       return CheckboxListTile(
                         activeColor: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1),
                         secondary: Container(
@@ -2959,15 +2984,24 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                             border: Border.all(color: Colors.grey.shade300),
                           ),
                           clipBehavior: Clip.antiAlias,
-                          // 🔥 PROTECCIÓN ANTIMOTOR GRÁFICO: Si los bytes están vacíos o corruptos, mostramos un ícono y evitamos llamar a Image.memory
-                          child: decodedBytesList[idx].length < 100
-                              ? const Icon(Icons.image, color: Colors.grey, size: 20)
-                              : Image.memory(
-                                  decodedBytesList[idx],
-                                  fit: BoxFit.cover,
-                                  gaplessPlayback: true,
-                                  errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, color: Colors.grey, size: 20),
-                                ),
+                          child: () {
+                            // 🔥 CARGA ASÍNCRONA: No bloquea la pantalla, prioridad 100% LOCAL
+                            if (rutaFoto.isEmpty) return const Icon(Icons.image, color: Colors.grey, size: 20);
+
+                            String? rutaLegible = _obtenerRutaFisicaLegibleSync(rutaFoto);
+                            if (rutaLegible != null) {
+                              return Image.file(File(rutaLegible), fit: BoxFit.cover, errorBuilder: (_,__,___) => const Icon(Icons.broken_image, size:20));
+                            }
+                            if (rutaFoto.startsWith('http')) {
+                              // Usa miniatura web súper liviana solo para la vista previa
+                              String urlLiviana = optimizarUrlCloudinary(rutaFoto, width: 100);
+                              return Image.network(urlLiviana, fit: BoxFit.cover, errorBuilder: (_,__,___) => const Icon(Icons.broken_image, size:20));
+                            }
+                            if (rutaFoto.length > 500) {
+                              return Image.memory(base64Decode(rutaFoto), fit: BoxFit.cover, errorBuilder: (_,__,___) => const Icon(Icons.broken_image, size:20));
+                            }
+                            return const Icon(Icons.broken_image, size: 20);
+                          }()
                         ),
                         title: Text(nombreVar, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
                         value: seleccionadas[idx] ?? false,
@@ -3009,12 +3043,11 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         );
 
         if (compartirSeleccion == null) {
-          // El usuario presionó CANCELAR, abortamos todo de inmediato.
           procederACompartir = false;
         } else if (compartirSeleccion == true) {
           seleccionadas.forEach((idx, seleccionado) {
             if (seleccionado) {
-              fotosSeleccionadasBase64.add(fotosFiltradas[idx]['foto_base64'] as String);
+              fotosSeleccionadasRutas.add(fotosFiltradas[idx]['foto_base64'] as String);
             }
           });
         }
@@ -3022,85 +3055,85 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
 
       if (!procederACompartir) return; 
 
+      // ==========================================
+      // 🚀 INICIA EL CARTEL "CARGANDO..." MIENTRAS COMPRIME
+      // ==========================================
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => const AlertDialog(
+          content: Row(
+            children: [
+              CircularProgressIndicator(color: Color(0xFF0D47A1)),
+              SizedBox(width: 20),
+              Expanded(child: Text("Preparando imágenes, por favor espera...")),
+            ],
+          ),
+        ),
+      );
+
       List<XFile> files = [];
-      // 🔥 REEMPLAZO CLAVE: Directorio autorizado en vez de Directory.systemTemp
       final tempDir = await getTemporaryDirectory(); 
       final String timestamp = DateTime.now().millisecondsSinceEpoch.toString();
       
-      if (compartirSeleccion == false || compartirSeleccion == null) {
-        // Opción A: Solo foto principal
-        if (imgData.isNotEmpty) {
-          try {
-            Uint8List? bytesP;
-            
-            // 🔥 OFFLINE-FIRST
-            String? rutaSegura = await ServicioNube.obtenerRutaLegibleSegura(imgData);
-            if (rutaSegura != null) {
-              bytesP = await File(rutaSegura).readAsBytes();
-            } else if (imgData.startsWith('http')) {
-              final response = await http.get(Uri.parse(imgData)).timeout(const Duration(seconds: 10));
-              if (response.statusCode == 200) {
-                bytesP = response.bodyBytes;
-              }
-            } else if (imgData.length > 500) {
-              bytesP = base64Decode(imgData);
-            } else {
-              File localFile = File(imgData);
-              if (localFile.existsSync()) {
-                bytesP = await localFile.readAsBytes();
-              }
-            }
-
-            if (bytesP != null) {
-              final file = File('${tempDir.path}/prod_share_${p['id']}_$timestamp.png');
-              await file.writeAsBytes(bytesP);
-              files.add(XFile(file.path));
-            }
-          } catch (_) {}
-        }
-      } else {
-        // Opción B: Compartimos exclusivamente las variantes seleccionadas
-        for (int i = 0; i < fotosSeleccionadasBase64.length; i++) {
-          try {
-            String fVarUrl = fotosSeleccionadasBase64[i];
-            Uint8List? bytesVar;
-
-            // 🔥 OFFLINE-FIRST
-            String? rutaSeguraVar = await ServicioNube.obtenerRutaLegibleSegura(fVarUrl);
-            if (rutaSeguraVar != null) {
-              bytesVar = await File(rutaSeguraVar).readAsBytes();
-            } else if (fVarUrl.startsWith('http')) {
-              final response = await http.get(Uri.parse(fVarUrl)).timeout(const Duration(seconds: 10));
-              if (response.statusCode == 200) {
-                bytesVar = response.bodyBytes;
-              }
-            } else if (fVarUrl.length > 500) {
-              bytesVar = base64Decode(fVarUrl);
-            } else {
-              File localFile = File(fVarUrl);
-              if (localFile.existsSync()) {
-                bytesVar = await localFile.readAsBytes();
-              }
-            }
-
-            if (bytesVar != null) {
-              final file = File('${tempDir.path}/var_share_${p['id']}_${i}_$timestamp.png');
-              await file.writeAsBytes(bytesVar);
-              files.add(XFile(file.path));
-            }
-          } catch (e) {
-            debugPrint("Error escribiendo foto variante temporal: $e");
+      // FUNCIÓN INTERNA: Procesa, comprime a 800px y guarda para compartir
+      Future<void> prepararImagenParaWhatsApp(String ruta, String filename) async {
+        if (ruta.isEmpty) return;
+        try {
+          Uint8List? bytesCrudos;
+          
+          // Prioridad 100% Local
+          String? rutaSegura = _obtenerRutaFisicaLegibleSync(ruta);
+          if (rutaSegura != null) {
+            bytesCrudos = await File(rutaSegura).readAsBytes();
+          } else if (ruta.startsWith('http')) {
+            String urlOpt = optimizarUrlCloudinary(ruta, width: 800); // Evita gastar datos
+            final res = await http.get(Uri.parse(urlOpt)).timeout(const Duration(seconds: 8));
+            if (res.statusCode == 200) bytesCrudos = res.bodyBytes;
+          } else if (ruta.length > 500) {
+            bytesCrudos = base64Decode(ruta);
+          } else {
+            File f = File(ruta);
+            if (f.existsSync()) bytesCrudos = await f.readAsBytes();
           }
+
+          if (bytesCrudos != null) {
+            // 🔥 COMPRESIÓN A 800px: Salva tu memoria y evita que WhatsApp se trabe
+            final codec = await ui.instantiateImageCodec(bytesCrudos, targetWidth: 800);
+            final frame = await codec.getNextFrame();
+            final data = await frame.image.toByteData(format: ui.ImageByteFormat.png);
+
+            final file = File('${tempDir.path}/$filename');
+            await file.writeAsBytes(data!.buffer.asUint8List());
+            files.add(XFile(file.path));
+          }
+        } catch (e) {
+          debugPrint("Error procesando imagen para compartir: $e");
+        }
+      }
+
+      // 4. PROCESAMOS LAS IMÁGENES
+      if (compartirSeleccion == false || compartirSeleccion == null) {
+        await prepararImagenParaWhatsApp(imgData, 'prod_share_${p['id']}_$timestamp.png');
+      } else {
+        for (int i = 0; i < fotosSeleccionadasRutas.length; i++) {
+          await prepararImagenParaWhatsApp(fotosSeleccionadasRutas[i], 'var_share_${p['id']}_${i}_$timestamp.png');
         }
       }
       
+      // ==========================================
+      // 🚀 CERRAMOS EL CARTEL "CARGANDO..." Y ABRIMOS WHATSAPP
+      // ==========================================
+      if (mounted) Navigator.pop(context);
+
       if (files.isNotEmpty) {
+        // WhatsApp se abrirá al instante con el texto pegado en la descripción
         await Share.shareXFiles(files, text: text);
       } else {
         await Share.share(text);
       }
     } catch (e) {
-      debugPrint("Error al compartir: $e");
+      if (mounted) Navigator.pop(context); // Cierra el cartel si hay error
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Error al compartir el producto")));
     }
   }
@@ -3420,7 +3453,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                 _tile(Icons.people, 'Vendedores', const PantallaVendedores()),
                 _tile(Icons.person_search, 'Clientes', const PantallaClientes()),
                 _tile(Icons.receipt_long, 'Gestión Pedidos', const PantallaGestionPedidos(), badgeCount: _badgePedidos, badgeColor: Colors.blue),
-                _tile(Icons.bar_chart, 'Finanzas y Reportes', const PantallaPresupuestos()),             
+                _tile(Icons.bar_chart, 'Finanzas y Estadisticas', const PantallaPresupuestos()),             
                 ValueListenableBuilder<ThemeMode>(
                   valueListenable: ServicioTema.modoTema,
                   builder: (context, modo, _) {
@@ -3953,9 +3986,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     }
     
     try {
-      // 🔥 Buscamos de forma síncrona si existe una copia física legible local
       String? rutaLegible = _obtenerRutaFisicaLegibleSync(data);
-      
       if (rutaLegible != null) {
         return Image.file(
           File(rutaLegible),
@@ -3967,13 +3998,14 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         );
       }
 
-      // Si es URL de red y no hay ninguna copia local legible accesible (Online)
       if (data.startsWith('http')) {
-        // Desencadenamos descarga silenciosa de fondo
-        ServicioNube.descargarFotoIndividualEnSegundoPlano(data, _localBoxiPath);
+        // 🔥 APLICAMOS LA OPTIMIZACIÓN AQUÍ
+        String urlOptimizada = optimizarUrlCloudinary(data, width: 400); 
+
+        ServicioNube.descargarFotoIndividualEnSegundoPlano(urlOptimizada, _localBoxiPath);
         
         return Image.network(
-          data, 
+          urlOptimizada, // 👈 USAMOS LA URL LIVIANA
           fit: BoxFit.cover, 
           width: double.infinity, 
           height: double.infinity, 
