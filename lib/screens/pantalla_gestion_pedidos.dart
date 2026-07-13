@@ -271,8 +271,8 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
         }
         return;
       }
-      await ServicioNube.sincronizarBorradosFisicos(uid, 'pedidos');
-      await ServicioNube.sincronizarBorradosFisicos(uid, 'detalle_pedidos');
+      await ServicioNube.sincronizarBorradosFisicos(uid, 'pedidos', force: true);
+      await ServicioNube.sincronizarBorradosFisicos(uid, 'detalle_pedidos', force: true);
       await ServicioNube.descargarSoloModificados(
           uid, 'pedidos', 'ultima_modificacion');
       await ServicioNube.descargarSoloModificados(
@@ -347,6 +347,17 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
 
   Future<List<Map<String, dynamic>>> _obtenerDetalles(int pedId) async {
     final db = await DBHelper.instance.database;
+
+    // 🔥 1. OBTENEMOS EL TOTAL REAL COBRADO PARA DETECTAR DESCUENTOS GLOBALES
+    final pedRes = await db.query('pedidos', columns: ['total_venta', 'valor_domicilio'], where: 'id = ?', whereArgs: [pedId]);
+    double totalCobrado = 0.0;
+    double domi = 0.0;
+    if (pedRes.isNotEmpty) {
+      totalCobrado = (pedRes.first['total_venta'] as num?)?.toDouble() ?? 0.0;
+      domi = (pedRes.first['valor_domicilio'] as num?)?.toDouble() ?? 0.0;
+    }
+    double totalRealProductos = totalCobrado - domi;
+
     final resultado = await db.rawQuery('''
       SELECT d.*,
             IFNULL(d.nombre_snapshot, IFNULL(p.nombre, "Producto")) as nombre_prod,
@@ -361,8 +372,36 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     List<Map<String, dynamic>> detallesEditables =
         resultado.map((e) => Map<String, dynamic>.from(e)).toList();
 
+    // 🔥 2. CALCULAMOS SI HAY DINERO FALTANTE (DESCUENTO GLOBAL OCULTO)
+    double subtotalSinDescuento = 0.0;
+    for (var d in detallesEditables) {
+      double pU = (d['precio_unitario'] as num?)?.toDouble() ?? 0.0;
+      int c = (d['cantidad'] as int?) ?? 1;
+      subtotalSinDescuento += (pU * c);
+    }
+
+    double descGlobalFaltante = 0.0;
+    // Si la suma teórica es mayor al total cobrado (Tolerancia de $1 por decimales)
+    if (subtotalSinDescuento > 0 && totalRealProductos > 0 && (subtotalSinDescuento - totalRealProductos) > 1.0) {
+      descGlobalFaltante = ((subtotalSinDescuento - totalRealProductos) / subtotalSinDescuento) * 100;
+    }
+
     for (var d in detallesEditables) {
       d['sin_stock'] = 0;
+
+      // 🔥 3. APLICAMOS EL DESCUENTO DETECTADO PARA REPARAR LA VISTA Y EL PDF
+      double pUnitario = (d['precio_unitario'] as num?)?.toDouble() ?? 0.0;
+      int cant = (d['cantidad'] as int?) ?? 1;
+      double descGuardado = (d['descuento'] as num?)?.toDouble() ?? 0.0;
+
+      // Si el ítem no tiene descuento registrado, le asignamos el global que detectamos
+      if (descGuardado <= 0 && descGlobalFaltante > 0) {
+        d['descuento'] = descGlobalFaltante;
+        d['subtotal'] = (pUnitario - (pUnitario * (descGlobalFaltante / 100))) * cant;
+      } else if (descGuardado > 0) {
+        d['subtotal'] = (pUnitario - (pUnitario * (descGuardado / 100))) * cant;
+      }
+
       String varStr = d['prod_variantes']?.toString() ?? "";
       String nombreSnapshot = d['nombre_snapshot']?.toString() ?? "";
 
@@ -392,7 +431,7 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
         if (stockBase < 0) d['sin_stock'] = 1;
       }
 
-      // 🔥 PRE-CARGA DE FOTOS: Se guardan directamente en el mapa para evitar parpadeos
+      // Pre-carga de fotos
       d['foto_data'] = await _obtenerFotoDetalleEstatico(db, d['producto_id'] as int, d['nombre_prod']?.toString() ?? '');
     }
     return detallesEditables;

@@ -4,14 +4,12 @@ import 'dart:typed_data';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:pdf/pdf.dart';
 import 'package:printing/printing.dart';
-import 'package:path_provider/path_provider.dart'; // Para directorio temporal
-import 'package:share_plus/share_plus.dart'; // Para compartir
+import 'package:path_provider/path_provider.dart'; 
+import 'package:share_plus/share_plus.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 class ServicioPdf {
-  // 1. MÉTODO INTERNO PRIVADO: Diseña la factura una sola vez
-  // 1. MÉTODO INTERNO PRIVADO: Diseña la factura una sola vez
   static Future<pw.Document> _crearDocumentoPdf({
     required Map<String, dynamic> pedido,
     required List<Map<String, dynamic>> detalles,
@@ -20,8 +18,6 @@ class ServicioPdf {
     bool mostrarLogo = true,
   }) async {
     final pdf = pw.Document();
-
-    // 🔥 1. EXTRACCIÓN DE DATOS BLINDADA (Usa el historial si el cliente fue borrado)
     String cNombre = pedido['cliente_nombre'] ?? pedido['cliente_nombre_snapshot'] ?? 'Cliente General';
     if (cNombre.trim().isEmpty || cNombre == "null") cNombre = 'Cliente General';
 
@@ -39,8 +35,6 @@ class ServicioPdf {
 
     String vTel = pedido['vendedor_telefono'] ?? pedido['vendedor']?['telefono'] ?? pedido['telefono_vendedor'] ?? 'N/A';
     if (vTel.trim().isEmpty || vTel == "null") vTel = 'N/A';
-
-    // 🔥 2. PROCESAR LOGO COMPATIBLE CON MODO OFFLINE Y ONLINE
     pw.Widget? logoWidget;
     if (mostrarLogo && logoPath != null && logoPath.isNotEmpty) {
       try {
@@ -60,8 +54,6 @@ class ServicioPdf {
               imageBytes = await localLogoFile.readAsBytes();
             }
           }
-          
-          // Si no existe local, lo descarga (Para modo Online)
           if (imageBytes == null) {
             final response = await http.get(Uri.parse(logoPath)).timeout(const Duration(seconds: 4));
             if (response.statusCode == 200) {
@@ -87,8 +79,6 @@ class ServicioPdf {
         print("Error cargando logo en PDF: $e");
       }
     }
-
-    // 3. Procesar Firma
     Uint8List? firmaBytes;
     if (pedido['firma'] != null) {
       try {
@@ -101,17 +91,11 @@ class ServicioPdf {
         print("Error procesando firma: $e");
       }
     }
-
-    // 4. Cálculos de pie de página
     double valorDomicilio = (pedido['valor_domicilio'] ?? 0).toDouble();
     double subtotalProductos = detalles.fold(0, (sum, item) => sum + (item['subtotal'] as num).toDouble());
-
-    // 🔥 DEFINICIÓN DE MARCA DE AGUA ESTILO SEGURIDAD (Ultra tenue y limpia)
     String estado = pedido['estado']?.toString() ?? 'Pendiente';
     String watermarkText = "";
-    
     const watermarkColor = PdfColor(0.85, 0.85, 0.85);
-
     if (estado == 'Pendiente' || estado == 'Entregado sin Pago') {
       watermarkText = "PENDIENTE DE PAGO";
     } else if (estado == 'Completado') {
@@ -119,8 +103,6 @@ class ServicioPdf {
     } else if (estado == 'Cancelado') {
       watermarkText = "CANCELADO";
     }
-
-    // 🔥 6. ARMADO DE LA HOJA (Diseño plano de alta gama sin cortes)
     pdf.addPage(
       pw.Page(
         pageTheme: pw.PageTheme(
@@ -225,17 +207,24 @@ class ServicioPdf {
                 data: detalles.map((d) {
                   double desc = (d['descuento'] ?? 0).toDouble();
                   String nombreFinal = (d['nombre_snapshot'] ?? d['nombre'] ?? 'PRODUCTO').toString().toUpperCase();
-                  if (desc > 0) nombreFinal += " (-${desc.toStringAsFixed(0)}%)";
+                  
+                  // Formatear porcentaje sin decimales si es exacto
+                  if (desc > 0) {
+                    String descTxt = desc == desc.roundToDouble() ? desc.toStringAsFixed(0) : desc.toStringAsFixed(1);
+                    nombreFinal += " (-$descTxt%)";
+                  }
+
+                  // 🔥 Precio base original ($15.000)
+                  double pUnitario = (d['precio_unitario'] as num).toDouble();
 
                   return [
                     d['cantidad'].toString(), 
                     nombreFinal, 
-                    "\$${(d['precio_unitario'] as num).toStringAsFixed(0)}", 
-                    "\$${(d['subtotal'] as num).toStringAsFixed(0)}"
+                    "\$${pUnitario.toStringAsFixed(0)}", // Muestra el precio base (Ej: $15000)
+                    "\$${(d['subtotal'] as num).toStringAsFixed(0)}" // Muestra el total con descuento (Ej: $12000)
                   ];
                 }).toList(),
               ),
-
               pw.SizedBox(height: 15),
 
               // SECCIÓN DE TOTALES DESGLOSADOS

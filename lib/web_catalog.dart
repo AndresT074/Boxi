@@ -1,3 +1,4 @@
+import 'dart:ui'; 
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -8,6 +9,18 @@ import 'package:flutter/foundation.dart' show kIsWeb; // Nuevo
 import 'package:universal_html/js.dart' as js; 
 import 'package:http/http.dart' as http; 
 import 'package:firebase_database/firebase_database.dart';
+
+// 🔥 FUNCIÓN DE COMPRESIÓN DE ANCHO DE BANDA PARA LA WEB
+String optimizarUrlCloudinary(String urlOriginal, {int width = 400}) {
+  if (urlOriginal.isEmpty) return urlOriginal;
+  if (!urlOriginal.contains('cloudinary.com') || urlOriginal.contains('q_auto')) {
+    return urlOriginal;
+  }
+  return urlOriginal.replaceFirst(
+    '/upload/', 
+    '/upload/c_limit,w_$width,q_auto,f_auto/'
+  );
+}
 
 class CatalogoWeb extends StatefulWidget {
   final String adminId;
@@ -555,7 +568,7 @@ class _CatalogoWebState extends State<CatalogoWeb> {
                   borderRadius: const BorderRadius.vertical(top: Radius.circular(25)),
                   child: p['foto_path'] != null && p['foto_path'].toString().isNotEmpty
                       ? p['foto_path'].toString().startsWith('http')
-                          ? Image.network(p['foto_path'], fit: BoxFit.cover, width: double.infinity, height: double.infinity)
+                          ? Image.network(optimizarUrlCloudinary(p['foto_path'], width: 400), fit: BoxFit.cover, width: double.infinity, height: double.infinity)
                           : Image.memory(base64Decode(p['foto_path']), fit: BoxFit.cover, width: double.infinity, height: double.infinity, gaplessPlayback: true)
                       : Container(color: Colors.grey.shade100, width: double.infinity, height: double.infinity, child: const Icon(Icons.image, size: 40, color: Colors.grey)),
                 ),
@@ -646,8 +659,10 @@ class _CatalogoWebState extends State<CatalogoWeb> {
                        fontSize: esCelular ? 15 : 20
                      )
                    ),
+                if (tieneVariantes) 
+                  _buildVariantesPills(grps, esCelular),
 
-                SizedBox(height: esCelular ? 4 : 12),
+                SizedBox(height: esCelular ? 6 : 12),
                 _buildBotonesAccion(p, tieneVariantes, grps, cantTotalProd),
               ],
             ),
@@ -658,13 +673,22 @@ class _CatalogoWebState extends State<CatalogoWeb> {
   }
 
   Widget _buildBotonesAccion(p, tieneVariantes, grps, cantTotalProd) {
+    // 🔥 CORREGIDO: Muestra el botón unificado "Añadir" para variantes y abre la pantalla al tocarlo
     if (tieneVariantes) {
       return SizedBox(
         width: double.infinity, height: 42,
-        child: ElevatedButton(
+        child: ElevatedButton.icon(
           onPressed: () => _abrirOpcionesVariantes(p, grps),
-          style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0D47A1), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)), elevation: 0),
-          child: Text(cantTotalProd > 0 ? "Opciones ($cantTotalProd)" : "Ver Opciones", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white, fontSize: 13)),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: const Color(0xFF0D47A1), 
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)), 
+            elevation: 0
+          ),
+          icon: const Icon(Icons.add_shopping_cart, size: 16, color: Colors.white),
+          label: Text(
+            cantTotalProd > 0 ? "Añadir ($cantTotalProd)" : "Añadir", 
+            style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white, fontSize: 13)
+          ),
         ),
       );
     }
@@ -721,7 +745,7 @@ class _CatalogoWebState extends State<CatalogoWeb> {
                               width: double.infinity,
                               height: 300,
                               child: p['foto_path'].toString().startsWith('http')
-                                ? Image.network(p['foto_path'], fit: BoxFit.contain)
+                                ? Image.network(optimizarUrlCloudinary(p['foto_path'], width: 800), fit: BoxFit.contain)
                                 : Image.memory(base64Decode(p['foto_path']), fit: BoxFit.contain, gaplessPlayback: true)
                             )
                           : Container(height: 250, width: double.infinity, color: Colors.grey.shade200, child: const Icon(Icons.image, size: 60, color: Colors.grey)),
@@ -766,6 +790,67 @@ class _CatalogoWebState extends State<CatalogoWeb> {
               ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildVariantesPills(List<dynamic> grps, bool esCelular) {
+    List<Widget> pills = [];
+    for (var g in grps) {
+      var opciones = g['opciones'] as List? ?? [];
+      for (var o in opciones) {
+        bool activo = o['activo'] == null || o['activo'] == true || o['activo'] == 1;
+        if (!activo) continue;
+
+        String foto = o['foto_path']?.toString() ?? '';
+        bool esCloudinary = foto.startsWith('http');
+        bool esBase64 = foto.length > 500;
+        bool tieneFoto = esCloudinary || esBase64;
+
+        pills.add(
+          Container(
+            margin: const EdgeInsets.only(right: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: Colors.grey.shade100,
+              border: Border.all(color: Colors.grey.shade200),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (tieneFoto) ...[
+                  ClipOval(
+                    child: esCloudinary
+                        ? Image.network(optimizarUrlCloudinary(foto, width: 50), width: 18, height: 18, fit: BoxFit.cover)
+                        : Image.memory(base64Decode(foto), width: 18, height: 18, fit: BoxFit.cover, gaplessPlayback: true),
+                  ),
+                  const SizedBox(width: 6),
+                ],
+                Text(
+                  o['nombre'].toString(),
+                  style: TextStyle(fontSize: esCelular ? 9 : 11, fontWeight: FontWeight.bold, color: Colors.grey.shade800),
+                ),
+              ],
+            ),
+          ),
+        );
+      }
+    }
+
+    if (pills.isEmpty) return const SizedBox.shrink();
+
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      height: esCelular ? 26 : 30,
+      // 🔥 CORREGIDO: Envolvemos en un ScrollConfiguration para permitir el arrastre con clic de mouse en PC
+      child: ScrollConfiguration(
+        behavior: MyCustomScrollBehavior(),
+        child: ListView(
+          scrollDirection: Axis.horizontal,
+          physics: const BouncingScrollPhysics(),
+          children: pills,
         ),
       ),
     );
@@ -1237,7 +1322,7 @@ class _CatalogoWebState extends State<CatalogoWeb> {
           padding: const EdgeInsets.all(15),
           gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: columnas,
-            childAspectRatio: esCelular ? 0.70 : 0.62, 
+            childAspectRatio: esCelular ? 0.66 : 0.58,
             crossAxisSpacing: 15,
             mainAxisSpacing: 15,
           ),
@@ -1431,10 +1516,9 @@ class _DialogoVariantesWebState extends State<_DialogoVariantesWeb> {
                                       border: Border.all(color: Colors.blue.shade100)
                                     ),
                                     clipBehavior: Clip.antiAlias,
-                                    // 🔥 WEB SEGURA: Solo renderiza HTTP o Base64, ignora rutas del celular
                                     child: tieneFotoWeb
                                         ? (esCloudinary
-                                            ? Image.network(foto, fit: BoxFit.cover, gaplessPlayback: true)
+                                            ? Image.network(optimizarUrlCloudinary(foto, width: 150), fit: BoxFit.cover, gaplessPlayback: true)
                                             : Image.memory(base64Decode(foto), fit: BoxFit.cover, gaplessPlayback: true))
                                         : const Icon(Icons.image, color: Colors.grey),
                                   ),
@@ -1674,4 +1758,13 @@ class _VisorFotosVariantesState extends State<_VisorFotosVariantes> {
       ),
     );
   }
+}
+
+class MyCustomScrollBehavior extends MaterialScrollBehavior {
+  @override
+  Set<PointerDeviceKind> get dragDevices => {
+    PointerDeviceKind.touch,
+    PointerDeviceKind.mouse,
+    PointerDeviceKind.trackpad,
+  };
 }

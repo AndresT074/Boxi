@@ -472,19 +472,77 @@ class ServicioNube {
   }
 
   static Future<void> sincronizarBorradosFisicos(
-      String uid, String tabla) async {
+      String uid, String tabla, {bool force = false}) async {
     if (!await tieneInternet()) return;
     try {
-      final dbLocal = await DBHelper.instance.database;
+      final prefs = await SharedPreferences.getInstance();
+      
+      // 🛡️ ESCUDO DE SEGURIDAD 1 (Para no Premium):
+      // Si el usuario es gratuito, salimos inmediatamente. No se toca nada local.
+      if (!(prefs.getBool('es_premium') ?? false)) return;
 
-      final snapshot = await _db
-          .collection('usuarios')
-          .doc(uid)
-          .collection(tabla)
-          .get();
-      final List<int> idsNube = snapshot.docs
-          .map((doc) => int.tryParse(doc.id) ?? -1)
-          .toList();
+      String hoy = DateTime.now().toIso8601String().substring(0, 10);
+      String key = 'ultimo_borrado_fisico_${tabla}_$uid';
+
+      if (!force && prefs.getString(key) == hoy) {
+        debugPrint('🧹 Salteando comprobación de borrados físicos para $tabla (Ya se ejecutó hoy).');
+        return;
+      }
+
+      final dbLocal = await DBHelper.instance.database;
+      List<int> idsNube = [];
+      bool consultaExitosa = false; // Nos asegura que la nube respondió antes de borrar algo local
+
+      // ☁️ Sincronización del catálogo por Realtime Database (0 Lecturas Firestore)
+      if (tabla == 'productos' || tabla == 'categorias') {
+        final ref = FirebaseDatabase.instance.ref("catalogos_web/$uid");
+        final snap = await ref.get();
+        
+        if (snap.exists) {
+          consultaExitosa = true;
+          Map<String, dynamic> datos = {};
+          final rawValue = snap.value;
+          if (rawValue is String) {
+            datos = jsonDecode(rawValue);
+          } else if (rawValue is Map) {
+            datos = Map<String, dynamic>.from(rawValue);
+          }
+
+          if (tabla == 'productos') {
+            final activos = datos['productos'] != null ? List<dynamic>.from(datos['productos']) : [];
+            final inactivos = datos['productos_inactivos'] != null ? List<dynamic>.from(datos['productos_inactivos']) : [];
+            for (var p in [...activos, ...inactivos]) {
+              if (p != null && p['id'] != null) idsNube.add(p['id'] as int);
+            }
+          } else if (tabla == 'categorias') {
+            final activos = datos['categorias'] != null ? List<dynamic>.from(datos['categorias']) : [];
+            final inactivos = datos['categorias_inactivas'] != null ? List<dynamic>.from(datos['categorias_inactivas']) : [];
+            for (var c in [...activos, ...inactivos]) {
+              if (c != null && c['id'] != null) idsNube.add(c['id'] as int);
+            }
+          }
+        }
+      } 
+      // 🔒 Sincronización de datos privados por Firestore (pedidos, etc.)
+      else {
+        final snapshot = await _db
+            .collection('usuarios')
+            .doc(uid)
+            .collection(tabla)
+            .get();
+        idsNube = snapshot.docs
+            .map((doc) => int.tryParse(doc.id) ?? -1)
+            .toList();
+        consultaExitosa = true; // Firestore siempre es el origen para pedidos
+      }
+
+      // 🛡️ ESCUDO DE SEGURIDAD 2 (Anti-redes inestables):
+      // Si por algún error de conexión el nodo de Realtime no respondió, 
+      // NO borramos el inventario local para prevenir accidentes.
+      if (!consultaExitosa) {
+        debugPrint('⚠️ Sincronización de borrados omitida: No se pudo verificar el origen en la nube.');
+        return;
+      }
 
       final registrosLocales = await dbLocal.query(tabla, columns: ['id']);
       final List<int> idsLocales =
@@ -505,6 +563,8 @@ class ServicioNube {
       }
 
       if (huboBorrados) await batch.commit(noResult: true);
+      
+      await prefs.setString(key, hoy);
     } catch (e) {
       debugPrint('Error sincronizarBorradosFisicos ($tabla): $e');
     }

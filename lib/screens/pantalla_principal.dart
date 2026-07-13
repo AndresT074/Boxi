@@ -1705,65 +1705,77 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
             onPressed: () async {
+              // 🔥 1. CAPTURAR EL UID ANTES DE QUE PASE A NULL
               final user = FirebaseAuth.instance.currentUser;
+              final String? uid = user?.uid; 
+
+              // 🔥 2. LIBERAR MEMORIA RAM Y BLOQUEOS DE ARCHIVOS
+              PaintingBinding.instance.imageCache.clear();
+              PaintingBinding.instance.imageCache.clearLiveImages();
+
+              // 🔥 3. CERRAR SESIÓN EN FIREBASE
+              await ServicioAuth.cerrarSesion();
+
+              // 🔥 4. ESPERA DE SEGURIDAD (500ms)
+              await Future.delayed(const Duration(milliseconds: 500));
+
               final prefs = await SharedPreferences.getInstance();
-              if (user != null) {
-                await prefs.remove("descarga_completa_${user.uid}");
-                await prefs.remove('ultima_mod_productos_local_${user.uid}');
-                await prefs.remove('ultima_mod_pedidos_local_${user.uid}');
-                await prefs.remove('ultima_mod_categorias_local_${user.uid}');
-                debugPrint("🗑️ Banderas eliminadas para el usuario ${user.uid}");
+
+              // 🔥 5. BORRAR BANDERAS DE USUARIO CON LA VARIABLE "uid" CAPTURADA AL INICIO
+              if (uid != null) {
+                await prefs.remove("descarga_completa_$uid");
+                await prefs.remove("primera_carga_completada_$uid");
+                await prefs.remove('ultima_mod_productos_local_$uid');
+                await prefs.remove('ultima_mod_pedidos_local_$uid');
+                await prefs.remove('ultima_mod_categorias_local_$uid');
               }
-
-              // 🔥 1. RESET DE BANDERA DE MIGRACIÓN PARA EL PRÓXIMO INGRESO
-              await prefs.remove('migracion_definitiva_completa_v6');
-
-              // 🔥 2. LIMPIEZA FÍSICA Y BASE DE DATOS ULTRA SEGURA (Inmune a bloqueos de Android)
-              try {
-                String pathBoxi = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
-                
-                void borrarDirectorioSeguroSync(Directory dir) {
-                  if (!dir.existsSync()) return;
-                  try {
-                    final List<FileSystemEntity> entities = dir.listSync(recursive: true);
-                    
-                    // Borramos cada archivo de forma individual
-                    for (FileSystemEntity entity in entities) {
-                      if (entity is File) {
-                        try {
-                          entity.deleteSync();
-                        } catch (_) {
-                          // Si un archivo está bloqueado por el OS, lo salta y continúa con los demás
-                        }
-                      }
-                    }
-                    
-                    // Finalmente intentamos borrar el directorio raíz ya vacío
-                    try {
-                      dir.deleteSync(recursive: true);
-                    } catch (_) {}
-                  } catch (_) {}
-                }
-
-                // Borramos la carpeta activa y la pública por si acaso
-                borrarDirectorioSeguroSync(Directory(pathBoxi));
-                borrarDirectorioSeguroSync(Directory('/storage/emulated/0/Pictures/Boxi'));
-                
-                debugPrint("🗑️ Carpetas Boxi vaciadas y eliminadas de forma segura.");
-              } catch (e) {
-                debugPrint("Error eliminando carpetas: $e");
-              }
-              Navigator.pop(ctx);
               
-              // Limpieza local de tablas protegida
+              await prefs.remove('admin_password');
+              await prefs.remove('admin_pregunta');
+              await prefs.remove('admin_respuesta');
+              await prefs.remove('admin_biometria_activa');
+              await prefs.remove('migracion_definitiva_completa_v6');
+              await prefs.remove('datos_descargados');
+
+              // 🔥 6. LIMPIEZA DE TABLAS LOCALES
               try {
                 await DBHelper.instance.limpiarTablas();
               } catch (e) {
                 debugPrint("Error limpiando BD local: $e");
               }
-              await prefs.remove('datos_descargados');
+
+              // 🔥 7. DESTRUCCIÓN ABSOLUTA DE LAS CARPETAS
+              try {
+                String pathBoxi = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
+                
+                Future<void> aniquilarCarpeta(Directory dir) async {
+                  if (!await dir.exists()) return;
+                  try {
+                    final List<FileSystemEntity> entidades = dir.listSync(recursive: true);
+                    for (FileSystemEntity entity in entidades) {
+                      if (entity is File) {
+                        try {
+                          await entity.delete();
+                        } catch (_) {}
+                      }
+                    }
+                    try { await dir.delete(recursive: true); } catch (_) {}
+                  } catch (_) {}
+                }
+
+                await aniquilarCarpeta(Directory(pathBoxi));
+                await aniquilarCarpeta(Directory('/storage/emulated/0/Pictures/Boxi'));
+                
+                final appDir = await getApplicationDocumentsDirectory();
+                await aniquilarCarpeta(Directory('${appDir.path}/Boxi'));
+                
+                debugPrint("🗑️ Carpetas Boxi vaciadas y eliminadas en cero absoluto.");
+              } catch (e) {
+                debugPrint("Error eliminando carpetas: $e");
+              }
+
+              Navigator.pop(ctx);
               
-              await ServicioAuth.cerrarSesion();
               if (mounted) {
                 Navigator.pushAndRemoveUntil(
                   context,
@@ -2912,8 +2924,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       } else {
         text += "\n💰 *Precio: \$${precioFinal.toStringAsFixed(0)}*";
       }
-
-      // 1. OBTENEMOS LAS VARIANTES (Filtrando solo las activas)
       final List<Map<String, dynamic>> fotosDb = [];
       String varStr = p['variantes']?.toString() ?? "";
       if (varStr.length > 5) {
@@ -2922,9 +2932,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
           var grupos = (dec.isNotEmpty && !dec[0].containsKey('grupo')) ? [{'opciones': dec}] : dec;
           for (var g in grupos) {
             for (var o in g['opciones']) {
-              // 🔥 CORREGIDO: Filtramos para ignorar variantes inactivas/ocultas
               bool esActiva = o['activo'] != false;
-
               if (esActiva && o['foto_path'] != null && o['foto_path'].toString().isNotEmpty) {
                 fotosDb.add({
                   'variante_nombre': o['nombre'],
@@ -3979,7 +3987,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     );
   }
 
-  Widget _foto(int id, String data) {
+ Widget _foto(int id, String data) {
     final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
     if (data.isEmpty) {
       return Container(
@@ -4002,13 +4010,12 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       }
 
       if (data.startsWith('http')) {
-        // 🔥 APLICAMOS LA OPTIMIZACIÓN AQUÍ
         String urlOptimizada = optimizarUrlCloudinary(data, width: 400); 
-
-        ServicioNube.descargarFotoIndividualEnSegundoPlano(urlOptimizada, _localBoxiPath);
+        String urlAltaCalidad = optimizarUrlCloudinary(data, width: 1200); 
+        ServicioNube.descargarFotoIndividualEnSegundoPlano(urlAltaCalidad, _localBoxiPath);
         
         return Image.network(
-          urlOptimizada, // 👈 USAMOS LA URL LIVIANA
+          urlOptimizada,
           fit: BoxFit.cover, 
           width: double.infinity, 
           height: double.infinity, 

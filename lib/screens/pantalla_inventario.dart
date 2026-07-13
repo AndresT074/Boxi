@@ -786,16 +786,29 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
       // 🔥 1. TRATAMIENTO DE IMAGEN PRINCIPAL
       if (pathFinal.isNotEmpty && !pathFinal.startsWith('http') && pathFinal.length < 500 && File(pathFinal).existsSync()) {
         
-        // SIEMPRE guardamos una copia en la galería Boxi, seas Premium o no
+        // SIEMPRE guardamos una copia en la galería Boxi local
         String rutaLocal = await _guardarImagenEnLocalPersistente(pathFinal);
 
         if (esPremium) {
           // Si es Premium, subimos esa foto a Cloudinary
           String urlSubida = await ServicioNube.subirImagenACloudinary(rutaLocal);
           if (urlSubida.isNotEmpty) {
-             pathFinal = urlSubida; // En BD usamos la web, pero en la galería ya quedó el respaldo
+             // 🔥 NUEVO: Renombramos la foto local PROD_ al nombre de Cloudinary para evitar duplicados
+             try {
+               String nombreCloudinary = urlSubida.split('/').last;
+               File fileLocal = File(rutaLocal);
+               if (fileLocal.existsSync()) {
+                 String parentDir = fileLocal.parent.path;
+                 String nuevoCamino = "$parentDir/$nombreCloudinary";
+                 await fileLocal.rename(nuevoCamino);
+                 rutaLocal = nuevoCamino; // Actualizamos el puntero al nuevo archivo
+               }
+             } catch (e) {
+               debugPrint("Error renombrando imagen principal: $e");
+             }
+             pathFinal = urlSubida; // En la base de datos se guarda la URL de Cloudinary
           } else {
-             pathFinal = rutaLocal; // Fallback
+             pathFinal = rutaLocal; // Fallback local si falla la subida
           }
         } else {
           pathFinal = rutaLocal;
@@ -849,6 +862,19 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
           if (esPremium) {
             String urlSubida = await ServicioNube.subirImagenACloudinary(rutaLocal);
             if (urlSubida.isNotEmpty) {
+               // 🔥 NUEVO: Renombramos la foto local VAR_ al nombre de Cloudinary para evitar duplicados
+               try {
+                 String nombreCloudinary = urlSubida.split('/').last;
+                 File fileLocal = File(rutaLocal);
+                 if (fileLocal.existsSync()) {
+                   String parentDir = fileLocal.parent.path;
+                   String nuevoCamino = "$parentDir/$nombreCloudinary";
+                   await fileLocal.rename(nuevoCamino);
+                   rutaLocal = nuevoCamino;
+                 }
+               } catch (e) {
+                 debugPrint("Error renombrando variante: $e");
+               }
                fotoVarianteUrl = urlSubida;
             } else {
                fotoVarianteUrl = rutaLocal;
@@ -884,6 +910,11 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
 
   Future<String> _guardarImagenEnLocalPersistente(String tempPath, {bool esVariante = false}) async {
     try {
+      // 🔥 EVITAR DUPLICADOS: Si la imagen ya está en la carpeta Boxi, no hacemos una copia nueva.
+      if (tempPath.contains('/Boxi/')) {
+        return tempPath;
+      }
+
       // Intentamos usar la galería principal pública
       Directory baseDir = Directory('/storage/emulated/0/Pictures/Boxi');
       if (!await baseDir.exists()) {
@@ -898,9 +929,12 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
       
       Directory targetDir = esVariante ? Directory('${baseDir.path}/Variantes') : baseDir;
       if (!await targetDir.exists()) await targetDir.create(recursive: true);
-
       final File tempFile = File(tempPath);
-      final String fileName = tempPath.split('/').last.isNotEmpty ? tempPath.split('/').last : "${DateTime.now().millisecondsSinceEpoch}.png";
+      String ext = tempPath.contains('.') ? tempPath.split('.').last : 'jpg';
+      if (ext.length > 4 || ext.isEmpty) ext = 'jpg';
+      final String prefix = esVariante ? "VAR" : "PROD";
+      final String fileName = "${prefix}_${DateTime.now().microsecondsSinceEpoch}.$ext";
+      
       final File nuevaImagen = await tempFile.copy('${targetDir.path}/$fileName');
       return nuevaImagen.path; 
     } catch (e) {

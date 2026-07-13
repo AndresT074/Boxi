@@ -808,11 +808,10 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
         title: const Text("¿Cerrar Sesión?",
             style: TextStyle(color: Colors.white)),
         content: Text(
-          _esPremium
-              ? "Tu sesión se cerrará, pero tus datos quedarán guardados en este celular para un acceso rápido."
-              : "Al cerrar sesión, tus datos locales se borrarán por seguridad.",
-          style: const TextStyle(color: Colors.white70),
-        ),
+            _esPremium
+                ? "Tu sesión se cerrará, pero tus datos quedarán guardados en este celular para un acceso rápido."
+                : "Al cerrar sesión, tus datos locales se borrarán por seguridad.",
+            style: const TextStyle(color: Colors.white70)),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx),
@@ -820,74 +819,87 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
             onPressed: () async {
+              // 🔥 1. CAPTURAR EL UID ANTES DE QUE PASE A NULL
               final user = FirebaseAuth.instance.currentUser;
+              final String? uid = user?.uid; 
+
+              // 🔥 2. LIBERAR MEMORIA RAM Y BLOQUEOS DE ARCHIVOS
+              PaintingBinding.instance.imageCache.clear();
+              PaintingBinding.instance.imageCache.clearLiveImages();
+
+              // 🔥 3. CERRAR SESIÓN EN FIREBASE
+              await ServicioAuth.cerrarSesion();
+
+              // 🔥 4. ESPERA DE SEGURIDAD (500ms)
+              await Future.delayed(const Duration(milliseconds: 500));
+
               final prefs = await SharedPreferences.getInstance();
 
-              if (user != null) {
-                await prefs.remove("descarga_completa_${user.uid}");
-                await prefs.remove('ultima_mod_productos_local_${user.uid}');
-                await prefs.remove('ultima_mod_pedidos_local_${user.uid}');
-                await prefs.remove('ultima_mod_categorias_local_${user.uid}');
+              // 🔥 5. BORRAR BANDERAS DE USUARIO CON LA VARIABLE "uid" CAPTURADA AL INICIO
+              if (uid != null) {
+                await prefs.remove("descarga_completa_$uid");
+                await prefs.remove("primera_carga_completada_$uid");
+                await prefs.remove('ultima_mod_productos_local_$uid');
+                await prefs.remove('ultima_mod_pedidos_local_$uid');
+                await prefs.remove('ultima_mod_categorias_local_$uid');
               }
+              
               await prefs.remove('admin_password');
               await prefs.remove('admin_pregunta');
               await prefs.remove('admin_respuesta');
               await prefs.remove('admin_biometria_activa');
-
-              // 🔥 1. RESET DE BANDERA DE MIGRACIÓN PARA EL PRÓXIMO INGRESO
               await prefs.remove('migracion_definitiva_completa_v6');
+              await prefs.remove('datos_descargados');
 
-              // 🔥 2. LIMPIEZA FÍSICA Y BASE DE DATOS ULTRA SEGURA (Inmune a bloqueos de Android)
+              // 🔥 6. LIMPIEZA DE TABLAS LOCALES
+              try {
+                await DBHelper.instance.limpiarTablas();
+              } catch (e) {
+                debugPrint("Error limpiando BD local: $e");
+              }
+
+              // 🔥 7. DESTRUCCIÓN ABSOLUTA DE LAS CARPETAS
               try {
                 String pathBoxi = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
                 
-                void borrarDirectorioSeguroSync(Directory dir) {
-                  if (!dir.existsSync()) return;
+                Future<void> aniquilarCarpeta(Directory dir) async {
+                  if (!await dir.exists()) return;
                   try {
-                    final List<FileSystemEntity> entities = dir.listSync(recursive: true);
-                    
-                    // Borramos cada archivo de forma individual
-                    for (FileSystemEntity entity in entities) {
+                    final List<FileSystemEntity> entidades = dir.listSync(recursive: true);
+                    for (FileSystemEntity entity in entidades) {
                       if (entity is File) {
                         try {
-                          entity.deleteSync();
-                        } catch (_) {
-                          // Si un archivo está bloqueado por el OS, lo salta y continúa con los demás
-                        }
+                          await entity.delete();
+                        } catch (_) {}
                       }
                     }
-                    
-                    // Finalmente intentamos borrar el directorio raíz ya vacío
-                    try {
-                      dir.deleteSync(recursive: true);
-                    } catch (_) {}
+                    try { await dir.delete(recursive: true); } catch (_) {}
                   } catch (_) {}
                 }
 
-                // Borramos la carpeta activa y la pública por si acaso
-                borrarDirectorioSeguroSync(Directory(pathBoxi));
-                borrarDirectorioSeguroSync(Directory('/storage/emulated/0/Pictures/Boxi'));
+                await aniquilarCarpeta(Directory(pathBoxi));
+                await aniquilarCarpeta(Directory('/storage/emulated/0/Pictures/Boxi'));
                 
-                debugPrint("🗑️ Carpetas Boxi vaciadas y eliminadas de forma segura.");
+                final appDir = await getApplicationDocumentsDirectory();
+                await aniquilarCarpeta(Directory('${appDir.path}/Boxi'));
+                
+                debugPrint("🗑️ Carpetas Boxi vaciadas y eliminadas en cero absoluto.");
               } catch (e) {
                 debugPrint("Error eliminando carpetas: $e");
               }
 
               Navigator.pop(ctx);
               
-              // Se limpian siempre las tablas locales para garantizar una sincronización limpia
-              try {
-                await DBHelper.instance.limpiarTablas();
-              } catch (e) {
-                debugPrint("Error limpiando BD local: $e");
+              if (mounted) {
+                Navigator.pushAndRemoveUntil(
+                  context,
+                  MaterialPageRoute(builder: (_) => const PantallaBienvenida()),
+                  (route) => false,
+                );
               }
-              await prefs.remove('datos_descargados');
-              
-              await ServicioAuth.cerrarSesion();
-              await _cargarConfig();
-              if (mounted) setState(() {});
             },
-            child: const Text("SÍ, SALIR", style: TextStyle(color: Colors.white)),
+            child: const Text("SÍ, SALIR",
+                style: TextStyle(color: Colors.white)),
           ),
         ],
       ),
