@@ -682,12 +682,24 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     final db = await DBHelper.instance.database;
     _invalidarCache(pedidoId);
 
-    // Cambiado a Future<void> para esperar los procesos de BD
     Future<void> ejecutar() async {
-      // 1. Actualiza SQLite local de inmediato
+      String? fechaPagoVal;
+      
+      // 🔥 Si el pedido pasa a Completado, registramos la fecha y hora de hoy
+      if (nuevoEstado == 'Completado') {
+        final DateTime ahora = DateTime.now();
+        final String periodo = ahora.hour >= 12 ? 'PM' : 'AM';
+        final int hora12 = ahora.hour > 12 ? ahora.hour - 12 : (ahora.hour == 0 ? 12 : ahora.hour);
+        fechaPagoVal = "${ahora.year}-${ahora.month.toString().padLeft(2, '0')}-${ahora.day.toString().padLeft(2, '0')} $hora12:${ahora.minute.toString().padLeft(2, '0')} $periodo";
+      }
+
       await db.update(
           'pedidos',
-          {'estado': nuevoEstado, 'ultima_modificacion': DateTime.now().toIso8601String()},
+          {
+            'estado': nuevoEstado, 
+            'ultima_modificacion': DateTime.now().toIso8601String(),
+            if (fechaPagoVal != null) 'fecha_pago': fechaPagoVal, // Guardamos la fecha de pago
+          },
           where: 'id = ?',
           whereArgs: [pedidoId]);
 
@@ -702,16 +714,13 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
         }
       }
 
-      // 2. Refresca la interfaz de inmediato
       _cargar();
-
-      // 🔥 3. MOSTRAR LA PANTALLA DE ÉXITO ANIMADA
       _mostrarPantallaExito(nuevoEstado);
 
-      // 4. Sincroniza en la nube de fondo
       if (_esPremium) {
         try {
-          await ServicioNube.actualizarEstadoPedidoNube(pedidoId, nuevoEstado);
+          // Enviamos la fecha de pago calculada a la nube
+          await ServicioNube.actualizarEstadoPedidoNube(pedidoId, nuevoEstado, fechaPago: fechaPagoVal);
         } catch (e) {
           debugPrint("Error al sincronizar estado offline: $e");
         }
@@ -719,7 +728,6 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     }
 
     if (!_esPremium) {
-      // Si hay anuncio, la pantalla de éxito sale al terminar el anuncio
       ServicioAnuncios.mostrarAnuncioIntersticial(() => ejecutar());
     } else {
       ejecutar();

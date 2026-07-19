@@ -318,10 +318,28 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
         String llaveDescarga = "descarga_completa_${user.uid}";
         bool yaDescargoTodo = prefs.getBool(llaveDescarga) ?? false;
         if (!yaDescargoTodo) {
-          // Descarga base de datos de Realtime + Firestore (Ahora incluye los inactivos)
-          await ServicioNube.descargarTodoDesdeNube();
           
-          // 🔥 BLOQUEANTE: Forzamos la descarga de imágenes en la pantalla de bienvenida al iniciar sesión
+          // 1. Descargamos el catálogo web
+          await ServicioNube.importarCatalogoDesdeRTDB(user.uid);
+
+          // 2. Intentamos descargar datos privados desde RTDB
+          await ServicioNube.descargarDatosPrivadosRTDB();
+
+          // 3. Verificamos si realmente se descargó algo desde RTDB
+          final dbLocal = await DBHelper.instance.database;
+          final clientesLocales = await dbLocal.query('clientes', limit: 1);
+          final pedidosLocales = await dbLocal.query('pedidos', limit: 1);
+
+          if (clientesLocales.isEmpty && pedidosLocales.isEmpty) {
+            // 4. Si RTDB estaba vacío, significa que es la primera migración.
+            // Descargamos todo tu historial desde Firestore (solo ocurre 1 vez).
+            debugPrint("☁️ Primer inicio: Migrando historial desde Firestore a Realtime...");
+            await ServicioNube.descargarTodoDesdeNube();
+            
+            // 5. Lo subimos de inmediato a RTDB para que las próximas veces consuma 0 lecturas.
+            await ServicioNube.respaldarDatosPrivadosRTDB();
+          }
+          
           await prefs.setBool('migracion_definitiva_completa_v6', false); 
           await ServicioNube.migrarVariantesAlJSONyCarpetas(); 
           
@@ -336,8 +354,6 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
             if (modPed != null) await prefs.setString('ultima_mod_pedidos_local_${user.uid}', modPed);
           }
         } else {
-          // 🔥 NUEVO: Para usuarios que ya tienen la app instalada, rescatamos los inactivos perdidos.
-          // Esto solo se correrá 1 vez y dejará el inventario completo.
           await ServicioNube.rescatarDatosPerdidosFirestore(user.uid);
         }
         

@@ -36,26 +36,38 @@ class ServicioPdf {
     String vTel = pedido['vendedor_telefono'] ?? pedido['vendedor']?['telefono'] ?? pedido['telefono_vendedor'] ?? 'N/A';
     if (vTel.trim().isEmpty || vTel == "null") vTel = 'N/A';
     pw.Widget? logoWidget;
+    
     if (mostrarLogo && logoPath != null && logoPath.isNotEmpty) {
       try {
         Uint8List? imageBytes;
         
         if (logoPath.startsWith('http')) {
-          // Intentar cargar localmente desde la carpeta segura de Boxi (Para modo Offline)
           final prefs = await SharedPreferences.getInstance();
           String? localBoxiPath = prefs.getString('local_boxi_path');
           
           if (localBoxiPath != null) {
             String name = logoPath.split('/').last;
-            if (!name.contains('.')) name += '.png';
-            File localLogoFile = File('$localBoxiPath/$name');
             
-            if (localLogoFile.existsSync()) {
-              imageBytes = await localLogoFile.readAsBytes();
+            // 🔥 SOLUCIÓN DEFINITIVA: Buscamos de forma flexible con y sin extensión para asegurar match con la caché de disco
+            List<File> candidatos = [
+              File('$localBoxiPath/$name'),
+              File('$localBoxiPath/${name.split('?').first}'),
+              File('$localBoxiPath/${name.split('.').first}.png'),
+              File('$localBoxiPath/$name.png'),
+              File('$localBoxiPath/$name.jpg'),
+            ];
+
+            for (File f in candidatos) {
+              if (f.existsSync()) {
+                imageBytes = await f.readAsBytes();
+                break;
+              }
             }
           }
+          
+          // Si no está en caché, descargamos como último recurso
           if (imageBytes == null) {
-            final response = await http.get(Uri.parse(logoPath)).timeout(const Duration(seconds: 4));
+            final response = await http.get(Uri.parse(logoPath)).timeout(const Duration(seconds: 8));
             if (response.statusCode == 200) {
               imageBytes = response.bodyBytes;
             }
@@ -112,16 +124,16 @@ class ServicioPdf {
             if (watermarkText.isEmpty) return pw.SizedBox();
             return pw.Center(
               child: pw.Container(
-                width: 480, // Ancho límite seguro en la hoja
+                width: 480, 
                 child: pw.FittedBox(
-                  fit: pw.BoxFit.scaleDown, // 🔥 Encoge la palabra automáticamente para que NUNCA se corte
+                  fit: pw.BoxFit.scaleDown, 
                   child: pw.Text(
                     watermarkText,
                     style: pw.TextStyle(
-                      fontSize: 85, // Tamaño gigante base
+                      fontSize: 85, 
                       fontWeight: pw.FontWeight.bold,
                       color: watermarkColor,
-                      letterSpacing: 6.0, // Espaciado premium idéntico al de tu imagen
+                      letterSpacing: 6.0, 
                     ),
                     maxLines: 1,
                   ),
@@ -152,7 +164,15 @@ class ServicioPdf {
                     children: [
                       pw.Text("COMPROBANTE DE VENTA", style: pw.TextStyle(fontSize: 10, color: PdfColors.grey700)),
                       pw.Text("No. ${pedido['id']}", style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
-                      pw.Text("FECHA: ${pedido['fecha_hora'] ?? 'S/F'}", style: const pw.TextStyle(fontSize: 10)),
+                      pw.SizedBox(height: 2),
+                      pw.Text("FECHA PEDIDO: ${pedido['fecha_hora'] ?? 'S/F'}", style: const pw.TextStyle(fontSize: 8.5)),
+                      // 🔥 NUEVO: Si el pedido ya tiene fecha de pago, la mostramos en verde debajo de la fecha de pedido
+                      if (pedido['fecha_pago'] != null && pedido['fecha_pago'].toString().isNotEmpty && pedido['fecha_pago'].toString() != 'null')
+                        pw.Padding(
+                          padding: const pw.EdgeInsets.only(top: 2),
+                          child: pw.Text("FECHA PAGO: ${pedido['fecha_pago']}", 
+                            style: pw.TextStyle(fontSize: 8.5, fontWeight: pw.FontWeight.bold, color: PdfColors.green800)),
+                        ),
                     ],
                   ),
                 ],
@@ -208,20 +228,18 @@ class ServicioPdf {
                   double desc = (d['descuento'] ?? 0).toDouble();
                   String nombreFinal = (d['nombre_snapshot'] ?? d['nombre'] ?? 'PRODUCTO').toString().toUpperCase();
                   
-                  // Formatear porcentaje sin decimales si es exacto
                   if (desc > 0) {
                     String descTxt = desc == desc.roundToDouble() ? desc.toStringAsFixed(0) : desc.toStringAsFixed(1);
                     nombreFinal += " (-$descTxt%)";
                   }
 
-                  // 🔥 Precio base original ($15.000)
                   double pUnitario = (d['precio_unitario'] as num).toDouble();
 
                   return [
                     d['cantidad'].toString(), 
                     nombreFinal, 
-                    "\$${pUnitario.toStringAsFixed(0)}", // Muestra el precio base (Ej: $15000)
-                    "\$${(d['subtotal'] as num).toStringAsFixed(0)}" // Muestra el total con descuento (Ej: $12000)
+                    "\$${pUnitario.toStringAsFixed(0)}", 
+                    "\$${(d['subtotal'] as num).toStringAsFixed(0)}" 
                   ];
                 }).toList(),
               ),
@@ -288,7 +306,7 @@ class ServicioPdf {
               ),
               pw.SizedBox(height: 10),
               pw.Center(
-                child: pw.Text("Gracias por su compra", style: pw.TextStyle(fontSize: 8, fontStyle: pw.FontStyle.italic, color: PdfColors.grey600)),
+                child: pw.Text("¡Gracias por su compra!", style: pw.TextStyle(fontSize: 8, fontStyle: pw.FontStyle.italic, color: PdfColors.grey600)),
               )
             ],
           );

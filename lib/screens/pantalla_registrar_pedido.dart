@@ -54,6 +54,7 @@ class _PantallaRegistrarPedidoState extends State<PantallaRegistrarPedido> {
   bool _incluirLogo = true;
   bool _procesando = false; 
   bool _noNecesitaFactura = false; // Control de factura genérica
+  bool _usarFirmaAutomatica = false;
 
   final SignatureController _sigController = SignatureController(
     penStrokeWidth: 3, 
@@ -201,9 +202,7 @@ class _PantallaRegistrarPedidoState extends State<PantallaRegistrarPedido> {
     if (_deptoC.text.trim().isEmpty) return _mostrarError("El Departamento es obligatorio.");
     if (_ciuC.text.trim().isEmpty) return _mostrarError("La Ciudad o Municipio es obligatoria.");
     if (_vendC.text.trim().isEmpty || _vId == null) return _mostrarError("Debe seleccionar un Vendedor.");
-    
-    // Si no necesita factura, nos saltamos la validación física de la firma
-    if (!_noNecesitaFactura && _sigController.isEmpty) {
+    if (!_usarFirmaAutomatica && _sigController.isEmpty) {
       return _mostrarError("La Firma del Cliente es obligatoria.");
     }
 
@@ -214,13 +213,14 @@ class _PantallaRegistrarPedidoState extends State<PantallaRegistrarPedido> {
       final prefs = await SharedPreferences.getInstance();
       bool esPremium = prefs.getBool('es_premium') ?? false;
 
-      // 2. PREPARAR FECHA Y FIRMA (Física o generada)
+      // 2. PREPARAR FECHA Y FIRMA (Física o generada automáticamente)
       final DateTime ahora = DateTime.now();
       final String periodo = ahora.hour >= 12 ? 'PM' : 'AM';
       final int hora12 = ahora.hour > 12 ? ahora.hour - 12 : (ahora.hour == 0 ? 12 : ahora.hour);
       final String fechaFormateada = "${ahora.year}-${ahora.month.toString().padLeft(2, '0')}-${ahora.day.toString().padLeft(2, '0')} $hora12:${ahora.minute.toString().padLeft(2, '0')} $periodo";
       
-      final Uint8List? firmaBytes = _noNecesitaFactura 
+      // 🔥 Modificado: Evalúa la nueva bandera para generar la firma automática
+      final Uint8List? firmaBytes = _usarFirmaAutomatica 
           ? await _generarFirmaLinea() 
           : await _sigController.toPngBytes();
 
@@ -551,6 +551,7 @@ class _PantallaRegistrarPedidoState extends State<PantallaRegistrarPedido> {
                       setState(() {
                         _noNecesitaFactura = val;
                         if (val) {
+                          _usarFirmaAutomatica = true; // 🔥 Fuerza la firma automática
                           _nC.text = "Cliente Final";
                           _negC.text = "Sin negocio";
                           _dC.text = "Sin dirección";
@@ -559,6 +560,7 @@ class _PantallaRegistrarPedidoState extends State<PantallaRegistrarPedido> {
                           _ciuC.text = "General";
                           _sigController.clear(); 
                         } else {
+                          _usarFirmaAutomatica = false; // 🔥 Desactiva para requerir firma física
                           _nC.clear();
                           _negC.clear();
                           _dC.clear();
@@ -702,13 +704,39 @@ class _PantallaRegistrarPedidoState extends State<PantallaRegistrarPedido> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children:[
-        Text(
-          "Firma del Cliente:", 
-          style: TextStyle(
-            fontWeight: FontWeight.bold, 
-            fontSize: 16, 
-            color: isOscuro ? Colors.white70 : Colors.black
-          )
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              "Firma del Cliente:", 
+              style: TextStyle(
+                fontWeight: FontWeight.bold, 
+                fontSize: 16, 
+                color: isOscuro ? Colors.white70 : Colors.black
+              )
+            ),
+            // 🔥 NUEVO: Switch para activar la firma automática para clientes con factura (si no se está usando factura genérica)
+            if (!_noNecesitaFactura)
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text("Firma automática", style: TextStyle(fontSize: 11, color: isOscuro ? Colors.white54 : Colors.black54)),
+                  Transform.scale(
+                    scale: 0.8,
+                    child: Switch(
+                      value: _usarFirmaAutomatica,
+                      activeColor: Colors.orange,
+                      onChanged: (val) {
+                        setState(() {
+                          _usarFirmaAutomatica = val;
+                          if (val) _sigController.clear();
+                        });
+                      },
+                    ),
+                  ),
+                ],
+              ),
+          ],
         ),
         const SizedBox(height: 10),
         Container(
@@ -723,7 +751,7 @@ class _PantallaRegistrarPedidoState extends State<PantallaRegistrarPedido> {
           ), 
           child: ClipRRect(
             borderRadius: BorderRadius.circular(13),
-            child: _noNecesitaFactura 
+            child: _usarFirmaAutomatica 
                 ? Container(
                     height: esHorizontal ? 150 : 160,
                     width: double.infinity,
@@ -750,7 +778,7 @@ class _PantallaRegistrarPedidoState extends State<PantallaRegistrarPedido> {
                   ),
           )
         ),
-        if (!_noNecesitaFactura)
+        if (!_usarFirmaAutomatica)
           Align(
             alignment: Alignment.centerRight,
             child: TextButton.icon(

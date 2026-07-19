@@ -3,6 +3,7 @@ import 'dart:ui' as ui;
 import 'dart:convert';
 import 'dart:async';
 import 'dart:math';
+import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -115,13 +116,21 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     WidgetsBinding.instance.addObserver(this);
   }
 
-  // 🔥 INICIALIZACIÓN SECUENCIAL ULTRA RÁPIDA (La migración pesada ya se hizo en el Splash)
   Future<void> _inicializarTodo() async {
     try {
       await ServicioNotificaciones.inicializar();
       await _cargarConfig();
-      await _cargar(); // Carga de SQLite instantánea en 0.01 segundos
+      await _cargar(); // Carga de SQLite instantánea
       
+      // 🔥 NUEVO: Forzar un respaldo inmediato en RTDB si acabamos de migrar a la versión 17
+      final prefs = await SharedPreferences.getInstance();
+      bool migradoV17 = prefs.getBool('migracion_v17_completada') ?? false;
+      if (!migradoV17) {
+        await ServicioNube.respaldarDatosPrivadosRTDB();
+        await prefs.setBool('migracion_v17_completada', true);
+        debugPrint("⚡ Migración v17 respaldada con éxito en RTDB.");
+      }
+
       await _intentarSincronizacionNube(); // Sincroniza la nube de forma segura
       _escucharSolicitudes();
     } catch (e) {
@@ -365,85 +374,47 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   Future<void> _sincronizarSoloSiHayCambios() async {
     if (!_esPremium) return;
     final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
-    if (!await ServicioNube.tieneInternet()) return;
+    if (user == null || !await ServicioNube.tieneInternet()) return;
 
     try {
       final prefs = await SharedPreferences.getInstance();
-      final userDoc = await FirebaseFirestore.instance.collection('usuarios').doc(user.uid).get(const GetOptions(source: Source.server));
+      bool hayCambios = false;
       
-      if (!userDoc.exists) return;
-      final data = userDoc.data() as Map<String, dynamic>;
-      final Timestamp? ultimaMod = data['ultima_mod_productos'] as Timestamp?;
-      final String? ultimaModLocal = prefs.getString('ultima_mod_productos_local_${user.uid}');
-      String? ultimaModStr = ultimaMod?.microsecondsSinceEpoch.toString(); 
-      
-      final Timestamp? ultimaModPed = data['ultima_mod_pedidos'] as Timestamp?;
-      final String? ultimaModPedLocal = prefs.getString('ultima_mod_pedidos_local_${user.uid}');
-      String? ultimaModPedStr = ultimaModPed?.microsecondsSinceEpoch.toString();
-      
-      final Timestamp? ultimaModAjust = data['ultima_mod_ajustes'] as Timestamp?;
-      final String? ultimaModAjustLocal = prefs.getString('ultima_mod_ajustes_local_${user.uid}');
-      String? ultimaModAjustStr = ultimaModAjust?.microsecondsSinceEpoch.toString();
+      // 1. VERIFICAR DATOS PRIVADOS (Ventas, Clientes)
+      final refPrivado = FirebaseDatabase.instance.ref("datos_privados/${user.uid}/timestamp_privado");
+      final snapPrivado = await refPrivado.get();
+      if (snapPrivado.exists) {
+        int nubeTsPrivado = snapPrivado.value as int;
+        int localTsPrivado = prefs.getInt('rt_timestamp_privado_${user.uid}') ?? 0;
+        if (nubeTsPrivado > localTsPrivado) {
+          await ServicioNube.descargarDatosPrivadosRTDB();
+          await prefs.setInt('rt_timestamp_privado_${user.uid}', nubeTsPrivado);
+          hayCambios = true;
+        }
+      }
 
-      final Timestamp? ultimaModCat = data['ultima_mod_categorias'] as Timestamp?;
-      final String? ultimaModCatLocal = prefs.getString('ultima_mod_categorias_local_${user.uid}');
-      String? ultimaModCatStr = ultimaModCat?.microsecondsSinceEpoch.toString();
-      
-      bool cambioAjust = ultimaModAjustStr != null && ultimaModAjustStr != ultimaModAjustLocal;
-      bool cambioProd = ultimaModStr != null && ultimaModStr != ultimaModLocal;
-      bool cambioPed = ultimaModPedStr != null && ultimaModPedStr != ultimaModPedLocal;
-      bool cambioCat = ultimaModCatStr != null && ultimaModCatStr != ultimaModCatLocal;
+      // 2. VERIFICAR INVENTARIO (Catálogo Web)
+      final refCatalogo = FirebaseDatabase.instance.ref("catalogos_web/${user.uid}/ultima_actualizacion");
+      final snapCatalogo = await refCatalogo.get();
+      if (snapCatalogo.exists) {
+        String nubeTsCatalogo = snapCatalogo.value as String;
+        String localTsCatalogo = prefs.getString('rt_timestamp_catalogo_${user.uid}') ?? "";
+        if (nubeTsCatalogo != localTsCatalogo) {
+          await ServicioNube.importarCatalogoDesdeRTDB(user.uid);
+          await prefs.setString('rt_timestamp_catalogo_${user.uid}', nubeTsCatalogo);
+          hayCambios = true;
+        }
+      }
 
-      if (!cambioProd && !cambioPed && !cambioAjust && !cambioCat) {
+      if (hayCambios) {
+        _cargar(); 
+        debugPrint("📦 Datos actualizados desde RTDB.");
+      } else {
         debugPrint("☁️ Nube al día. 0 lecturas consumidas.");
-        return; 
       }
-
-      if (cambioProd) {
-        // Solo eliminamos localmente si ya existía un registro de sincronización previo
-        if (ultimaModLocal != null) {
-          await ServicioNube.sincronizarBorradosFisicos(user.uid, 'productos');
-        }
-        await ServicioNube.descargarSoloModificados(user.uid, 'productos', 'ultima_modificacion');
-        await prefs.setString('ultima_mod_productos_local_${user.uid}', ultimaModStr);
-      }
-
-      if (cambioPed) {
-        if (ultimaModPedLocal != null) {
-          await ServicioNube.sincronizarBorradosFisicos(user.uid, 'pedidos');
-        }
-        await ServicioNube.descargarSoloModificados(user.uid, 'pedidos', 'ultima_modificacion');
-        
-        if (ultimaModPedLocal != null) {
-          await ServicioNube.sincronizarBorradosFisicos(user.uid, 'detalle_pedidos');
-        }
-        await ServicioNube.descargarSoloModificados(user.uid, 'detalle_pedidos', 'ultima_modificacion');
-        await ServicioNube.limpiarFantasmasNubeYLocal(user.uid);
-        await prefs.setString('ultima_mod_pedidos_local_${user.uid}', ultimaModPedStr);
-        debugPrint("📦 Pedidos y Detalles sincronizados.");
-      }
-
-      if (cambioAjust) {
-        if (ultimaModAjustLocal != null) {
-          await ServicioNube.sincronizarBorradosFisicos(user.uid, 'ajustes_capital');
-        }
-        await ServicioNube.descargarSoloModificados(user.uid, 'ajustes_capital', 'ultima_modificacion');
-        await prefs.setString('ultima_mod_ajustes_local_${user.uid}', ultimaModAjustStr);
-        debugPrint("💰 Capital de reinversión sincronizado.");
-      }
-
-      if (cambioCat) {
-        // Solo eliminamos categorías si ya existía sincronización previa
-        if (ultimaModCatLocal != null) {
-          await ServicioNube.sincronizarBorradosFisicos(user.uid, 'categorias');
-        }
-        await ServicioNube.descargarSoloModificados(user.uid, 'categorias', 'ultima_modificacion');
-        await prefs.setString('ultima_mod_categorias_local_${user.uid}', ultimaModCatStr);
-      }
-      _cargar();
+      
     } catch (e) {
-      debugPrint("Error de sincronización: $e");
+      debugPrint("Error de sincronización RTDB: $e");
     }
   }
 
@@ -3914,15 +3885,39 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       backgroundColor: Colors.transparent,
       builder: (ctx) => _DialogoDescuentoCart(
         carritoActual: carrito,
+        productosOriginales: productos, // 🔥 Enviamos la lista de inventario para comparar
         globalInicial: _aplicarDescuentoGlobal,
         pctInicial: _descuentoGlobalPct,
         onAplicar: (individuales, global, pct) {
           setState(() {
             _aplicarDescuentoGlobal = global;
             _descuentoGlobalPct = pct;
-            if (!global && individuales.isNotEmpty) {
-              List<Map<String, dynamic>> nuevoCarrito = [];         
+            
+            if (!global) {
+              // 🔥 1. LIMPIAR DIVISIONES PREVIAS Y REINTEGRAR CANTIDADES ANTES DE APLICAR NUEVOS VALORES
+              List<Map<String, dynamic>> carritoLimpio = [];
               for (var item in carrito) {
+                if (item['cart_id'].toString().contains('_desc_')) {
+                  String idBase = item['cart_id'].toString().split('_desc_').first;
+                  int idxBase = carritoLimpio.indexWhere((x) => x['cart_id'].toString() == idBase);
+                  if (idxBase != -1) {
+                    carritoLimpio[idxBase]['cantidad'] += item['cantidad'];
+                  } else {
+                    var restaurado = Map<String, dynamic>.from(item);
+                    restaurado['cart_id'] = idBase;
+                    restaurado['descuento'] = 0.0;
+                    carritoLimpio.add(restaurado);
+                  }
+                } else {
+                  var limpio = Map<String, dynamic>.from(item);
+                  limpio['descuento'] = 0.0; // Reseteamos temporalmente
+                  carritoLimpio.add(limpio);
+                }
+              }
+
+              // 🔥 2. APLICAR NUEVOS VALORES INDIVIDUALES
+              List<Map<String, dynamic>> nuevoCarrito = [];         
+              for (var item in carritoLimpio) {
                 var discData = individuales.firstWhere(
                   (d) => d['cart_id'] == item['cart_id'], 
                   orElse: () => {}
@@ -5643,11 +5638,13 @@ class _PantallaSolicitudesState extends State<PantallaSolicitudes> {
 
 class _DialogoDescuentoCart extends StatefulWidget {
   final List<Map<String, dynamic>> carritoActual;
+  final List<Map<String, dynamic>> productosOriginales; // 🔥 Recibe el inventario original
   final bool globalInicial;
   final double pctInicial;
   final Function(List<Map<String, dynamic>>, bool, double) onAplicar;
   const _DialogoDescuentoCart({
     required this.carritoActual, 
+    required this.productosOriginales, // 🔥 Recibe el inventario original
     required this.globalInicial, 
     required this.pctInicial, 
     required this.onAplicar
@@ -5668,10 +5665,20 @@ class _DialogoDescuentoCartState extends State<_DialogoDescuentoCart> {
     _globalCtrl.text = widget.pctInicial > 0 ? widget.pctInicial.toStringAsFixed(0) : "";
     for (var item in widget.carritoActual) {
       if (item['es_domicilio'] == true) continue;
+      
+      // 🔥 Buscamos si el producto originalmente ya tiene un descuento definitivo en inventario
+      var original = widget.productosOriginales.firstWhere(
+        (p) => p['id'] == item['id'], 
+        orElse: () => <String, dynamic>{}
+      );
+      double descOriginal = original.isNotEmpty ? (original['descuento'] ?? 0).toDouble() : 0.0;
+      
+      // Si el descuento del carrito es manual, mostramos el valor para poder regresarlo a 0
+      double descAMostrar = descOriginal > 0 ? descOriginal : (item['descuento'] ?? 0).toDouble();
+
       String id = item['cart_id']?.toString() ?? "sin_id";
       _cantCtrls[id] = TextEditingController(text: "${item['cantidad']}");
-      double descPrevia = (item['descuento'] ?? 0).toDouble();
-      _pctCtrls[id] = TextEditingController(text: descPrevia > 0 ? descPrevia.toStringAsFixed(0) : "");
+      _pctCtrls[id] = TextEditingController(text: descAMostrar > 0 ? descAMostrar.toStringAsFixed(0) : "");
     }
   }
   @override
@@ -5740,15 +5747,23 @@ class _DialogoDescuentoCartState extends State<_DialogoDescuentoCart> {
                 shrinkWrap: true,
                 children: widget.carritoActual.where((i) => i['es_domicilio'] != true).map((item) {
                   String id = item['cart_id']?.toString() ?? "sin_id";
-                  bool yaTieneDesc = (item['descuento'] ?? 0) > 0;
+                  
+                  // 🔥 Comparamos contra el inventario original de SQLite
+                  var original = widget.productosOriginales.firstWhere(
+                    (p) => p['id'] == item['id'], 
+                    orElse: () => <String, dynamic>{}
+                  );
+                  double descOriginal = original.isNotEmpty ? (original['descuento'] ?? 0).toDouble() : 0.0;
+                  bool tieneDescDeInventario = descOriginal > 0;
+
                   double precioVenta = (item['precio_venta'] as num).toDouble();
                   double pctInput = double.tryParse(_pctCtrls[id]?.text ?? "0") ?? 0;
                   double precioCalculado = precioVenta - (precioVenta * (pctInput / 100));
                   bool perdidaInd = _generaPerdida(item, pctInput);
                   return Card(
                     color: isOscuro 
-                      ? (yaTieneDesc ? Colors.white.withOpacity(0.05) : Colors.white.withOpacity(0.08))
-                      : (yaTieneDesc ? Colors.grey.shade100 : Colors.white),
+                      ? (tieneDescDeInventario ? Colors.white.withOpacity(0.05) : Colors.white.withOpacity(0.08))
+                      : (tieneDescDeInventario ? Colors.grey.shade100 : Colors.white),
                     elevation: isOscuro ? 0 : 2,
                     margin: const EdgeInsets.symmetric(vertical: 6),
                     shape: RoundedRectangleBorder(
@@ -5759,7 +5774,7 @@ class _DialogoDescuentoCartState extends State<_DialogoDescuentoCart> {
                       contentPadding: const EdgeInsets.all(12),
                       title: Text(item['nombre'], 
                         style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: isOscuro ? Colors.white : Colors.black87)),
-                      subtitle: yaTieneDesc 
+                      subtitle: tieneDescDeInventario 
                         ? const Padding(
                             padding: EdgeInsets.only(top: 8),
                             child: Text("Ya tiene descuento de inventario.", 
@@ -5788,7 +5803,7 @@ class _DialogoDescuentoCartState extends State<_DialogoDescuentoCart> {
                                     "% Desc", 
                                     isOscuro, 
                                     onChanged: (v) => setState((){}) // Esto refresca el precio al escribir
-                                  )
+                                  ),
                                 ),
                               ]),
                               if (perdidaInd)
@@ -5822,7 +5837,16 @@ class _DialogoDescuentoCartState extends State<_DialogoDescuentoCart> {
               if (!_globalActivo) {
                 for (var item in widget.carritoActual) {
                   String id = item['cart_id']?.toString() ?? "sin_id";
-                  if (item['es_domicilio'] == true || (item['descuento'] ?? 0) > 0) continue;
+                  if (item['es_domicilio'] == true) continue;
+
+                  // 🔥 Si el producto originalmente tiene descuento en inventario, no se reporta como manual del carrito
+                  var original = widget.productosOriginales.firstWhere(
+                    (p) => p['id'] == item['id'], 
+                    orElse: () => <String, dynamic>{}
+                  );
+                  double descOriginal = original.isNotEmpty ? (original['descuento'] ?? 0).toDouble() : 0.0;
+                  if (descOriginal > 0) continue;
+
                   int c = int.tryParse(_cantCtrls[id]?.text ?? "0") ?? 0;
                   double p = double.tryParse(_pctCtrls[id]?.text ?? "0") ?? 0;
                   if (c > 0 && p > 0) resIndividuales.add({'cart_id': id, 'qty': c, 'desc': p});

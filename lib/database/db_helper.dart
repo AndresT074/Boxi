@@ -20,7 +20,7 @@ class DBHelper {
     final path = join(dbPath, filePath);
     return await openDatabase(
       path,
-      version: 16, 
+      version: 17, // 🔥 Incrementado a 17
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
     );
@@ -29,8 +29,8 @@ class DBHelper {
   Future _createDB(Database db, int version) async {
     await db.execute('''CREATE TABLE vendedores (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, telefono TEXT, email TEXT, ultima_modificacion TEXT)''');
     await db.execute('''CREATE TABLE clientes (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre_completo TEXT NOT NULL, nombre_negocio TEXT, direccion TEXT, telefono TEXT, departamento TEXT, ciudad TEXT, firma TEXT, ultima_modificacion TEXT)''');
-    await db.execute('''CREATE TABLE productos (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, foto_path TEXT, precio_compra REAL NOT NULL, precio_venta REAL NOT NULL, descuento REAL DEFAULT 0, stock INTEGER DEFAULT 0, descripcion TEXT, variantes TEXT, orden INTEGER DEFAULT 0, activo INTEGER DEFAULT 1, ultima_modificacion TEXT, categoria TEXT)'''); // ✅ Agregada categoría
-    await db.execute('''CREATE TABLE pedidos (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha_hora TEXT NOT NULL, cliente_id INTEGER NOT NULL, vendedor_id INTEGER NOT NULL, total_venta REAL NOT NULL, ganancia_total REAL NOT NULL, estado TEXT NOT NULL, departamento TEXT, ciudad TEXT, firma BLOB, valor_domicilio REAL DEFAULT 0, cliente_nombre_snapshot TEXT, ultima_modificacion TEXT)''');
+    await db.execute('''CREATE TABLE productos (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, foto_path TEXT, precio_compra REAL NOT NULL, precio_venta REAL NOT NULL, descuento REAL DEFAULT 0, stock INTEGER DEFAULT 0, descripcion TEXT, variantes TEXT, orden INTEGER DEFAULT 0, activo INTEGER DEFAULT 1, ultima_modificacion TEXT, categoria TEXT)''');
+    await db.execute('''CREATE TABLE pedidos (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha_hora TEXT NOT NULL, fecha_pago TEXT, cliente_id INTEGER NOT NULL, vendedor_id INTEGER NOT NULL, total_venta REAL NOT NULL, ganancia_total REAL NOT NULL, estado TEXT NOT NULL, departamento TEXT, ciudad TEXT, firma BLOB, valor_domicilio REAL DEFAULT 0, cliente_nombre_snapshot TEXT, ultima_modificacion TEXT)'''); // ✅ Agregada columna fecha_pago
     await db.execute('''CREATE TABLE detalle_pedidos (id INTEGER PRIMARY KEY AUTOINCREMENT, pedido_id INTEGER NOT NULL, producto_id INTEGER NOT NULL, cantidad INTEGER NOT NULL, precio_unitario REAL NOT NULL, subtotal REAL NOT NULL, nombre_snapshot TEXT, descuento REAL DEFAULT 0, ultima_modificacion TEXT, FOREIGN KEY (pedido_id) REFERENCES pedidos (id) ON DELETE CASCADE)''');
     await db.execute('''CREATE TABLE ajustes_capital (id INTEGER PRIMARY KEY AUTOINCREMENT, monto REAL NOT NULL, fecha TEXT NOT NULL, descripcion TEXT, ultima_modificacion TEXT)''');
     await db.execute('''CREATE TABLE reportes_guardados (id INTEGER PRIMARY KEY AUTOINCREMENT, titulo TEXT, fecha TEXT, caja REAL, utilidad REAL, reinversion REAL, detalle_json TEXT, ultima_modificacion TEXT)''');
@@ -46,8 +46,6 @@ class DBHelper {
         ultima_modificacion TEXT
       )
     ''');
-    
-    // 🔥 NUEVA TABLA DE CATEGORÍAS
     await db.execute('''
       CREATE TABLE categorias (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,7 +83,6 @@ class DBHelper {
       try { await db.execute('ALTER TABLE fotos_variantes ADD COLUMN variante_nombre TEXT'); } catch (_) {}
     }
 
-    // 🔥 MIGRACIÓN SEGURA PARA USUARIOS EXISTENTES (VERSIÓN 14)
     if (oldVersion < 14) {
       try { await db.execute('ALTER TABLE productos ADD COLUMN categoria TEXT DEFAULT NULL'); } catch (_) {}
       try { await db.execute('''
@@ -102,6 +99,12 @@ class DBHelper {
       try { await db.execute('ALTER TABLE pedidos ADD COLUMN cliente_nombre_snapshot TEXT DEFAULT NULL'); } catch (_) {}
       try { await db.execute('''UPDATE pedidos SET cliente_nombre_snapshot = (SELECT nombre_completo FROM clientes WHERE clientes.id = pedidos.cliente_id) WHERE cliente_nombre_snapshot IS NULL OR cliente_nombre_snapshot = ""'''); } catch (_) {}
     }
+    // 🔥 MIGRACIÓN DE LA VERSIÓN 17 (Fecha de pago independiente)
+    if (oldVersion < 17) {
+      try { await db.execute('ALTER TABLE pedidos ADD COLUMN fecha_pago TEXT DEFAULT NULL'); } catch (_) {}
+      // Saneamiento: Para pedidos antiguos ya completados, rellenamos fecha_pago con su fecha de pedido original
+      try { await db.execute("UPDATE pedidos SET fecha_pago = fecha_hora WHERE estado = 'Completado' AND (fecha_pago IS NULL OR fecha_pago = '')"); } catch (_) {}
+    }
   }
 
   Future<void> close() async { final db = _database; if (db != null) { await db.close(); _database = null; } }
@@ -112,6 +115,6 @@ class DBHelper {
     await db.delete('pedidos'); await db.delete('detalle_pedidos'); await db.delete('ajustes_capital');
     await db.delete('reportes_guardados'); await db.delete('operaciones_pendientes');
     try { await db.delete('fotos_variantes'); } catch (_) {}
-    try { await db.delete('categorias'); } catch (_) {} // Limpiar categorías
+    try { await db.delete('categorias'); } catch (_) {} 
   }
 }

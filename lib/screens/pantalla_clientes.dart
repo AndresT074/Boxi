@@ -5,10 +5,8 @@ import 'package:google_mobile_ads/google_mobile_ads.dart'; // 🔥 Import de AdM
 import '../database/db_helper.dart';
 import 'servicio_anuncios.dart';
 import 'servicio_nube.dart';
-import 'pantalla_premium.dart'; // 🔥 Import de pantalla premium para el botón del anuncio
-import 'package:sqflite/sqflite.dart'; 
+import 'pantalla_premium.dart'; 
 import 'dart:async';
-import 'package:cloud_firestore/cloud_firestore.dart';
 
 class PantallaClientes extends StatefulWidget {
   const PantallaClientes({super.key});
@@ -40,38 +38,8 @@ class _PantallaClientesState extends State<PantallaClientes> {
   void _activarTiempoReal() async {
     final prefs = await SharedPreferences.getInstance();
     if (prefs.getBool('es_premium') ?? false) {
-      _suscripcion = ServicioNube.escucharClientesEnTiempoReal()?.listen((snapshot) async {
-        final db = await DBHelper.instance.database;
-
-        for (var change in snapshot.docChanges) {
-          final data = change.doc.data() as Map<String, dynamic>;
-          
-          // 🛡️ EVITA CAÍDAS DE TIPADO: Si el ID viene en otro formato, lo parseamos con seguridad
-          final dynamic rawId = data['id'];
-          final int? id = rawId is num ? rawId.toInt() : int.tryParse(rawId?.toString() ?? '');
-          if (id == null) continue;
-
-          // 🛡️ EVITA BORRADOS ACCIDENTALES: Ignoramos los eventos 'removed' del flujo en tiempo real
-          // para que pérdidas de conexión o expiración de tokens no eliminen los datos locales.
-          if (change.type != DocumentChangeType.removed) {
-            Map<String, dynamic> localData = Map.from(data);
-            
-            localData.forEach((key, value) {
-              if (value is Timestamp) {
-                localData[key] = value.toDate().toIso8601String();
-              }
-            });
-
-            const permitidas = [
-              'id', 'nombre_completo', 'nombre_negocio', 'direccion', 
-              'telefono', 'departamento', 'ciudad', 'firma', 'ultima_modificacion'
-            ];
-            localData.removeWhere((key, value) => !permitidas.contains(key));
-            localData['id'] = id; // Forzamos el ID entero validado
-
-            await db.insert('clientes', localData, conflictAlgorithm: ConflictAlgorithm.replace);
-          }
-        }
+      _suscripcion = ServicioNube.escucharCambiosNubeRTDB(() async {
+        await ServicioNube.descargarDatosPrivadosRTDB();
         if (mounted) _cargar();
       });
     }

@@ -107,35 +107,25 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
       _debounce?.cancel();
       _debounce = Timer(const Duration(seconds: 3), () {
         _ejecutarMotorFinanciero();
-        _cargarDatosGraficos(); // 🔥 Recalcular analíticas al recibir cambios
+        _cargarDatosGraficos(); 
       });
     }
 
-    _suscripciones.add(ServicioNube.escucharProductosEnTiempoReal()!.listen((snap) => recalcularConDebounce()));
-    _suscripciones.add(ServicioNube.escucharPedidosEnTiempoReal()!.listen((snap) => recalcularConDebounce()));
-    _suscripciones.add(ServicioNube.escucharAjustesCapitalEnTiempoReal()!.listen((snap) => recalcularConDebounce()));
-    _suscripciones.add(ServicioNube.escucharReportesEnTiempoReal()!.listen((snapshot) async {
-      final db = await DBHelper.instance.database;
-
-      for (var change in snapshot.docChanges) {
-        final data = change.doc.data() as Map<String, dynamic>;
-        final int id = int.tryParse(change.doc.id) ?? (data['id'] as int? ?? -1);
-
-        if (change.type == DocumentChangeType.removed) {
-          await db.delete('reportes_guardados', where: 'id = ?', whereArgs: [id]);
-        } else {
-          Map<String, dynamic> localData = Map.from(data);
-          localData.updateAll((key, value) => value is Timestamp ? value.toDate().toIso8601String() : value);
-          const permitidas = ['id', 'titulo', 'fecha', 'caja', 'utilidad', 'reinversion', 'detalle_json', 'ultima_modificacion'];
-          localData.removeWhere((key, _) => !permitidas.contains(key));
-          localData['id'] = id;
-          await db.insert('reportes_guardados', localData, conflictAlgorithm: ConflictAlgorithm.replace);
-        }
+    // 🔥 REEMPLAZAR TODAS LAS SUSCRIPCIONES POR ESTA:
+    final subs = ServicioNube.escucharCambiosNubeRTDB(() async {
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      if (uid != null) {
+        await ServicioNube.descargarSoloModificados(uid, 'productos', 'ultima_modificacion');
+        await ServicioNube.descargarSoloModificados(uid, 'pedidos', 'ultima_modificacion');
+        await ServicioNube.descargarSoloModificados(uid, 'ajustes_capital', 'ultima_modificacion');
+        await ServicioNube.descargarSoloModificados(uid, 'reportes_guardados', 'ultima_modificacion');
+        recalcularConDebounce();
       }
-      if (mounted) _ejecutarMotorFinanciero();
-    }));
+    });
+    
+    if (subs != null) _suscripciones.add(subs);
   }
-
+  
   Future<void> _verificarReporteMensualAutomatico() async {
     final now = DateTime.now();
     final mesPasado = DateTime(now.year, now.month - 1);
@@ -204,17 +194,20 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
       double capAjust = (totalGastadoQ.first['total'] as num? ?? 0).toDouble();
       double capitalDispo = capRecup - capAjust;
 
-      // 3. MÉTRICAS DEL MES
-      final metricasMes = await db.rawQuery("SELECT SUM(total_venta) as cajaMes, SUM(ganancia_total + COALESCE(valor_domicilio, 0)) as utilMes FROM pedidos WHERE estado = 'Completado' AND substr(fecha_hora, 1, 7) = ?", [mesActualStr]);
+      // 3. MÉTRICAS DEL MES (Filtradas por fecha de pago)
+      final metricasMes = await db.rawQuery(
+          "SELECT SUM(total_venta) as cajaMes, SUM(ganancia_total + COALESCE(valor_domicilio, 0)) as utilMes FROM pedidos WHERE estado = 'Completado' AND substr(COALESCE(fecha_pago, fecha_hora), 1, 7) = ?", 
+          [mesActualStr]
+      );
       double cajaMes = (metricasMes.first['cajaMes'] as num? ?? 0).toDouble();
       double utilMes = (metricasMes.first['utilMes'] as num? ?? 0).toDouble();
 
-      // 4. DESGLOSE DETALLADO POR CLIENTE
+      // 4. DESGLOSE DETALLADO POR CLIENTE (Filtrado por fecha de pago)
       final clientesRaw = await db.rawQuery('''
         SELECT c.id as cliente_id, COALESCE(c.nombre_completo, 'Cliente Temporal') as nombre_completo, c.nombre_negocio,
                SUM(p.total_venta) as recaudado, SUM(p.ganancia_total + COALESCE(p.valor_domicilio, 0)) as ganancia_neta, SUM(COALESCE(p.valor_domicilio, 0)) as total_domicilios
         FROM pedidos p LEFT JOIN clientes c ON p.cliente_id = c.id
-        WHERE p.estado = 'Completado' AND substr(p.fecha_hora, 1, 7) = ? GROUP BY p.cliente_id
+        WHERE p.estado = 'Completado' AND substr(COALESCE(p.fecha_pago, p.fecha_hora), 1, 7) = ? GROUP BY p.cliente_id
       ''', [mesActualStr]);
 
       List<Map<String, dynamic>> desgloseMesDefinitivo = [];
@@ -222,7 +215,7 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
         final itemsAgrupados = await db.rawQuery('''
           SELECT d.nombre_snapshot, SUM(d.cantidad) as total_cant, d.descuento, d.precio_unitario, (SELECT precio_compra FROM productos WHERE id = d.producto_id) as p_compra
           FROM detalle_pedidos d JOIN pedidos p ON d.pedido_id = p.id
-          WHERE p.cliente_id = ? AND p.estado = 'Completado' AND substr(p.fecha_hora, 1, 7) = ?
+          WHERE p.cliente_id = ? AND p.estado = 'Completado' AND substr(COALESCE(p.fecha_pago, p.fecha_hora), 1, 7) = ?
           GROUP BY d.nombre_snapshot, d.descuento, d.precio_unitario, d.producto_id
         ''', [c['cliente_id'], mesActualStr]);
 
@@ -287,11 +280,11 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
     final now = DateTime.now();
     final String mesTarget = mesReferencia ?? "${now.year}-${now.month.toString().padLeft(2, '0')}";
 
-    // 1. VENTAS COMPLETADAS (Solo ventas del mes)
+    // 1. VENTAS COMPLETADAS (Ventas cobradas en el mes filtrado)
     final List<Map<String, dynamic>> peds = await db.rawQuery('''
-      SELECT p.fecha_hora, p.total_venta, (p.ganancia_total + COALESCE(p.valor_domicilio, 0)) as ganancia_real, c.nombre_completo, c.nombre_negocio
+      SELECT p.fecha_hora, p.fecha_pago, p.total_venta, (p.ganancia_total + COALESCE(p.valor_domicilio, 0)) as ganancia_real, c.nombre_completo, c.nombre_negocio
       FROM pedidos p LEFT JOIN clientes c ON p.cliente_id = c.id
-      WHERE p.estado = 'Completado' AND substr(p.fecha_hora, 1, 7) = ?
+      WHERE p.estado = 'Completado' AND substr(COALESCE(p.fecha_pago, p.fecha_hora), 1, 7) = ?
     ''', [mesTarget]);
 
     // 2. RECONSTRUCCIÓN GENERAL DEL LIBRO MAYOR (Todos los tiempos para cálculo exacto antes/después)
@@ -1121,10 +1114,15 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
       final now = DateTime.now();
       final hoyStr = "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}";
 
-      // 1. VENTAS Y PEDIDOS DEL DÍA
-      final qVentasDia = await db.rawQuery("SELECT SUM(total_venta) as total FROM pedidos WHERE estado = 'Completado' AND substr(fecha_hora, 1, 10) = ?", [hoyStr]);
-      final qPedsDia = await db.rawQuery("SELECT COUNT(id) as c FROM pedidos WHERE estado = 'Completado' AND substr(fecha_hora, 1, 10) = ?", [hoyStr]);
-      
+      // 1. VENTAS Y PEDIDOS DEL DÍA (Filtrados por la fecha de pago real)
+      final qVentasDia = await db.rawQuery(
+          "SELECT SUM(total_venta) as total FROM pedidos WHERE estado = 'Completado' AND substr(COALESCE(fecha_pago, fecha_hora), 1, 10) = ?", 
+          [hoyStr]
+      );
+      final qPedsDia = await db.rawQuery(
+          "SELECT COUNT(id) as c FROM pedidos WHERE estado = 'Completado' AND substr(COALESCE(fecha_pago, fecha_hora), 1, 10) = ?", 
+          [hoyStr]
+      );
       double vDia = (qVentasDia.first['total'] as num? ?? 0).toDouble();
       int pDia = Sqflite.firstIntValue(qPedsDia) ?? 0;
 

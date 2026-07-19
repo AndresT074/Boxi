@@ -10,8 +10,7 @@ import 'servicio_nube.dart';
 import 'servicio_anuncios.dart'; 
 import 'pantalla_premium.dart'; 
 import 'dart:async';
-import 'dart:ui' as ui;           
-import 'dart:typed_data';       
+import 'dart:ui' as ui;         
 import 'package:path_provider/path_provider.dart';
 import 'package:flutter/foundation.dart'; 
 
@@ -44,9 +43,9 @@ class PantallaInventario extends StatefulWidget {
 class _PantallaInventarioState extends State<PantallaInventario> {
   List<Map<String, dynamic>> _prods =[];
   List<Map<String, dynamic>> _filtrados =[];
-  bool _esCuadricula = true;
   bool _esPremium = false; 
   bool _estaCargando = true; 
+  int _vistaModo = 1; 
   final _searchCtrl = TextEditingController();
 
   @override
@@ -118,11 +117,20 @@ class _PantallaInventarioState extends State<PantallaInventario> {
   Future<void> _cargar() async {
     final db = await DBHelper.instance.database;
     final prefs = await SharedPreferences.getInstance();
+    
+    // Consulta SQL uniendo categorías, dándole prioridad absoluta (salen de primeras) a los productos sin categoría
     final data = await db.rawQuery('''
-      SELECT id, nombre, precio_compra, precio_venta, descuento, stock, descripcion, orden, activo, ultima_modificacion, variantes 
-      FROM productos 
-      ORDER BY activo DESC, orden ASC, id DESC
+      SELECT p.id, p.nombre, p.precio_compra, p.precio_venta, p.descuento, p.stock, p.descripcion, p.orden, p.activo, p.ultima_modificacion, p.variantes, p.categoria
+      FROM productos p
+      LEFT JOIN categorias c ON p.categoria = c.nombre
+      ORDER BY 
+        p.activo DESC, 
+        CASE WHEN p.categoria IS NULL OR p.categoria = '' THEN 0 ELSE 1 END ASC, -- 🔥 Los productos sin categoría se marcan con 0 (salen de primeras)
+        c.orden ASC, 
+        p.orden ASC, 
+        p.id DESC
     ''');
+    
     if (!mounted) return;
     setState(() {
       _prods = data;
@@ -177,7 +185,7 @@ class _PantallaInventarioState extends State<PantallaInventario> {
         : pct.toStringAsFixed(1);
   }
   
-  Widget _construirVistaProductos(int columnas) {
+  Widget _construirVistaProductos() {
     if (_estaCargando) {
       return const Center(
         child: CircularProgressIndicator(color: Color(0xFF0D47A1)),
@@ -189,7 +197,12 @@ class _PantallaInventarioState extends State<PantallaInventario> {
     double anchoPantalla = MediaQuery.of(context).size.width;
     bool esVertical = MediaQuery.of(context).orientation == Orientation.portrait;
 
-    int columnasCalculadas = columnas == 1 ? 1 : (esVertical ? 2 : 5);
+    int columnasCalculadas = 1;
+    if (_vistaModo == 1) {
+      columnasCalculadas = esVertical ? 2 : 4; 
+    } else if (_vistaModo == 2) {
+      columnasCalculadas = esVertical ? 3 : 6; 
+    }
 
     double factorTexto = 1.0;
     if (anchoPantalla < 360) {
@@ -200,9 +213,17 @@ class _PantallaInventarioState extends State<PantallaInventario> {
       factorTexto = 1.15;
     }
 
-    double aspect = columnasCalculadas == 1 
-        ? (anchoPantalla > 600 ? 5.0 : 2.5) 
-        : (0.58 - (factorTexto > 1.0 ? 0.05 : 0.0));
+    // 🔥 PROPORCIÓN EXACTA: Restaurada a 0.50 en modo compacto
+    double aspect = 1.0;
+    if (columnasCalculadas == 1) {
+      aspect = anchoPantalla > 600 ? 5.0 : 2.5;
+    } else if (columnasCalculadas == 2 || columnasCalculadas == 4) {
+      aspect = 0.65; 
+    } else {
+      aspect = 0.50; // 🔥 Como lo solicitaste
+    }
+
+    bool esCompacto = columnasCalculadas == 3 || columnasCalculadas >= 5;
 
     return GridView.builder(
       padding: const EdgeInsets.only(left: 8, right: 8, top: 8, bottom: 90),
@@ -218,20 +239,17 @@ class _PantallaInventarioState extends State<PantallaInventario> {
         bool estaInactivo = (p['activo'] ?? 1) == 0;
 
         bool tieneNegativoOCero = false;
-        bool tieneVariantes = false; // 🔥 Nuevo verificador
+        bool tieneVariantes = false; 
         String variantesData = p['variantes']?.toString() ?? ""; 
         
-        // 🔥 LÓGICA BLINDADA Y AISLADA
         if (variantesData.length > 5) {
           try {
             var dec = jsonDecode(variantesData);
             if (dec is List && dec.isNotEmpty) {
-              tieneVariantes = true; // Confirmamos que trabaja con variantes
+              tieneVariantes = true; 
               for (var g in dec) {
                 if (g is Map) {
-                  // Soporta tanto formato con grupos como formato viejo (lista plana)
                   List opciones = g.containsKey('opciones') && g['opciones'] is List ? g['opciones'] : [g];
-                  
                   for (var o in opciones) {
                     if (o is Map) {
                       bool esActivo = o['activo']?.toString() != 'false';
@@ -249,8 +267,6 @@ class _PantallaInventarioState extends State<PantallaInventario> {
         }
 
         bool sinStockGlobal = (int.tryParse(p['stock']?.toString() ?? '0') ?? 0) <= 0;
-        
-        // 🔥 SI TIENE VARIANTES, EL BORDE ROJO DEPENDE DE ELLAS. SI NO, DEL GLOBAL.
         bool mostrarAlerta = tieneVariantes ? tieneNegativoOCero : sinStockGlobal;
 
         double descuentoPct = (p['descuento'] ?? 0).toDouble();
@@ -270,10 +286,8 @@ class _PantallaInventarioState extends State<PantallaInventario> {
                   estaInactivo 
                     ? ColorFiltered(
                         colorFilter: const ColorFilter.mode(Colors.grey, BlendMode.saturation),
-                        // 🔥 KEY AGREGADA PARA EVITAR CAOS DE RECICLAJE
                         child: ImagenInventario(key: ValueKey('img_${p['id']}'), id: p['id']), 
                       )
-                    // 🔥 KEY AGREGADA
                     : ImagenInventario(key: ValueKey('img_${p['id']}'), id: p['id']), 
                   if (estaInactivo)
                     Center(
@@ -343,7 +357,7 @@ class _PantallaInventarioState extends State<PantallaInventario> {
                                     Text('STOCK: ${p['stock']}',
                                         style: TextStyle(
                                             fontSize: 11 * factorTexto,
-                                            color: mostrarAlerta ? const Color.fromARGB(255, 236, 173, 168) : (isOscuro ? Colors.white70 : Colors.blueGrey))),
+                                            color: mostrarAlerta ? const Color.fromARGB(255, 201, 20, 7) : (isOscuro ? Colors.white70 : Colors.blueGrey))),
                                     const SizedBox(height: 2),
                                     Text('Costo: \$${precioCompra.toStringAsFixed(2)}',
                                         style: TextStyle(
@@ -352,7 +366,7 @@ class _PantallaInventarioState extends State<PantallaInventario> {
                                             fontWeight: FontWeight.bold)),
                                     if (descuentoPct > 0)
                                       Text('\$$precioBase',
-                                          style: TextStyle(fontSize: 10 * factorTexto, color: const Color.fromARGB(255, 249, 174, 168), decoration: TextDecoration.lineThrough)),
+                                          style: TextStyle(fontSize: 10 * factorTexto, color: const Color.fromARGB(255, 244, 137, 137), decoration: TextDecoration.lineThrough)),
                                     const SizedBox(height: 2),
                                     FittedBox(
                                         child: Text('Venta: \$${precioFinal.toStringAsFixed(2)}',
@@ -394,7 +408,10 @@ class _PantallaInventarioState extends State<PantallaInventario> {
                         child: widgetImagen(false),
                       ),
                       Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 6.0),
+                        padding: EdgeInsets.symmetric(
+                          horizontal: esCompacto ? 6.0 : 8.0, 
+                          vertical: esCompacto ? 4.0 : 6.0 
+                        ),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           mainAxisSize: MainAxisSize.min,
@@ -403,45 +420,59 @@ class _PantallaInventarioState extends State<PantallaInventario> {
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: TextStyle(
-                                    fontSize: 13 * factorTexto,
+                                    fontSize: (esCompacto ? 11 : 13) * factorTexto,
+                                    height: esCompacto ? 1.1 : null, // 🔥 Elimina el margen invisible del texto
                                     fontWeight: FontWeight.bold,
                                     color: isOscuro ? Colors.white : Colors.black)),
-                            const SizedBox(height: 2),
+                            
+                            if (!esCompacto) const SizedBox(height: 2),
+                            
                             Text('Stock: ${p['stock']}',
                                 style: TextStyle(
-                                    fontSize: 11 * factorTexto,
-                                    color: mostrarAlerta ? const Color.fromARGB(255, 248, 174, 169) : (isOscuro ? Colors.white70 : Colors.black54))),
-                            Text('Costo: \$${precioCompra.toStringAsFixed(2)}',
+                                    fontSize: (esCompacto ? 9 : 11) * factorTexto,
+                                    height: esCompacto ? 1.1 : null, // 🔥 Elimina el margen invisible
+                                    color: mostrarAlerta ? const Color.fromARGB(255, 216, 18, 3) : (isOscuro ? Colors.white70 : Colors.black54))),
+                            
+                            Text('Costo: \$${precioCompra.toStringAsFixed(0)}', 
                                 style: TextStyle(
-                                    fontSize: 11 * factorTexto,
+                                    fontSize: (esCompacto ? 9 : 11) * factorTexto,
+                                    height: esCompacto ? 1.1 : null, // 🔥 Elimina el margen invisible
                                     color: isOscuro ? Colors.white38 : Colors.blueGrey,
                                     fontWeight: FontWeight.bold)),
+                                    
                             if (descuentoPct > 0)
-                              Text('\$$precioBase',
-                                  style: TextStyle(fontSize: 10 * factorTexto, color: const Color.fromARGB(255, 244, 137, 137), decoration: TextDecoration.lineThrough)),
+                              Text('\$${precioBase.toStringAsFixed(0)}',
+                                  style: TextStyle(
+                                      fontSize: (esCompacto ? 8 : 10) * factorTexto, 
+                                      height: esCompacto ? 1.1 : null,
+                                      color: const Color.fromARGB(255, 244, 137, 137), 
+                                      decoration: TextDecoration.lineThrough)),
+
                             FittedBox(
-                                child: Text('Venta: \$${precioFinal.toStringAsFixed(2)}',
+                                child: Text('Venta: \$${precioFinal.toStringAsFixed(0)}',
                                     style: TextStyle(
-                                        fontSize: 13 * factorTexto,
+                                        fontSize: (esCompacto ? 12 : 13) * factorTexto,
+                                        height: esCompacto ? 1.1 : null, // 🔥 Elimina el margen invisible
                                         color: descuentoPct > 0
                                             ? const Color.fromARGB(255, 19, 190, 107)
                                             : (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)),
                                         fontWeight: FontWeight.bold))),
-                            const SizedBox(height: 6),
+                            
+                            if (!esCompacto) const SizedBox(height: 6) else const SizedBox(height: 3),
+                            
                             Row(
                               mainAxisAlignment: MainAxisAlignment.end,
                               children: [
-                                IconButton(
-                                    padding: const EdgeInsets.all(4),
-                                    constraints: const BoxConstraints(),
-                                    icon: Icon(Icons.edit_note, color: Colors.blue, size: 26 * factorTexto),
-                                    onPressed: () => _abrirFormulario(p: p)),
-                                const SizedBox(width: 16),
-                                IconButton(
-                                    padding: const EdgeInsets.all(4),
-                                    constraints: const BoxConstraints(),
-                                    icon: Icon(Icons.delete_outline, color: Colors.red, size: 26 * factorTexto),
-                                    onPressed: () => _eliminar(p['id'], p['nombre'])),
+                                // 🔥 Usamos GestureDetector: Elimina de raíz los 48px ocultos de Material
+                                GestureDetector(
+                                    onTap: () => _abrirFormulario(p: p),
+                                    child: Icon(Icons.edit_note, color: Colors.blue, size: (esCompacto ? 22 : 26) * factorTexto),
+                                ),
+                                SizedBox(width: esCompacto ? 14 : 16),
+                                GestureDetector(
+                                    onTap: () => _eliminar(p['id'], p['nombre']),
+                                    child: Icon(Icons.delete_outline, color: Colors.red, size: (esCompacto ? 20 : 26) * factorTexto),
+                                ),
                               ],
                             ),
                           ],
@@ -467,10 +498,35 @@ class _PantallaInventarioState extends State<PantallaInventario> {
             style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
             onPressed: () async {
               final db = await DBHelper.instance.database;
+              final res = await db.query('productos', where: 'id = ?', whereArgs: [id]);
+              if (res.isNotEmpty) {
+                var p = res.first;
+                String foto = p['foto_path']?.toString() ?? "";
+                if (foto.isNotEmpty) {
+                  ServicioNube.eliminarImagenCloudinaryYLocal(foto); // Borra foto principal
+                }
+                
+                String varStr = p['variantes']?.toString() ?? "";
+                if (varStr.length > 5) {
+                  try {
+                    List<dynamic> dec = jsonDecode(varStr);
+                    var grupos = (dec.isNotEmpty && !dec[0].containsKey('grupo')) ? [{'opciones': dec}] : dec;
+                    for (var g in grupos) {
+                      for (var o in g['opciones']) {
+                        String vFoto = o['foto_path']?.toString() ?? "";
+                        if (vFoto.isNotEmpty) {
+                          ServicioNube.eliminarImagenCloudinaryYLocal(vFoto); // Borra variantes
+                        }
+                      }
+                    }
+                  } catch (_) {}
+                }
+              }
+
               await db.delete('productos', where: 'id = ?', whereArgs: [id]);
               if (_esPremium) {
-                ServicioNube.eliminarProductoNube(id); // Se encola si estás offline
-                ServicioNube.compilarYSubirCatalogoRTDB(); // Se actualizará al volver el internet
+                ServicioNube.eliminarProductoNube(id); 
+                ServicioNube.compilarYSubirCatalogoRTDB(); 
               }
               
               _cargar();
@@ -506,9 +562,16 @@ class _PantallaInventarioState extends State<PantallaInventario> {
           ),
         ),
         actions:[
+          // 🔥 Nuevo: Botón cíclico inteligente de 3 estados
           IconButton(
-            icon: Icon(_esCuadricula ? Icons.format_list_bulleted : Icons.grid_view_rounded, color: Colors.white),
-            onPressed: () => setState(() => _esCuadricula = !_esCuadricula),
+            icon: Icon(
+              _vistaModo == 0 
+                  ? Icons.view_stream_rounded 
+                  : (_vistaModo == 1 ? Icons.grid_view_rounded : Icons.apps_rounded), 
+              color: Colors.white
+            ),
+            tooltip: 'Cambiar diseño de vista',
+            onPressed: () => setState(() => _vistaModo = (_vistaModo + 1) % 3),
           )
         ],
       ),
@@ -574,7 +637,7 @@ class _PantallaInventarioState extends State<PantallaInventario> {
               ],
             ),
           ),
-          Expanded(child: _construirVistaProductos(_esCuadricula ? 5 : 1)),
+          Expanded(child: _construirVistaProductos()), // 🔥 Ya no necesita parámetros
           if (!_esPremium)
             const AnuncioNativoWidget(key: ValueKey('admob_inventario_ad')),
         ],
@@ -764,7 +827,7 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
 
     try {
       final db = await DBHelper.instance.database;
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = await SharedPreferences.getInstance(); // 🔥 Ahora sí se usa correctamente
       bool esPremium = prefs.getBool('es_premium') ?? false;
 
       int stockAnterior = widget.producto != null ? (widget.producto!['stock'] as int) : 0;
@@ -783,17 +846,13 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
 
       String pathFinal = _imgData;
       
-      // 🔥 1. TRATAMIENTO DE IMAGEN PRINCIPAL
+      // TRATAMIENTO DE IMAGEN PRINCIPAL
       if (pathFinal.isNotEmpty && !pathFinal.startsWith('http') && pathFinal.length < 500 && File(pathFinal).existsSync()) {
-        
-        // SIEMPRE guardamos una copia en la galería Boxi local
         String rutaLocal = await _guardarImagenEnLocalPersistente(pathFinal);
 
         if (esPremium) {
-          // Si es Premium, subimos esa foto a Cloudinary
           String urlSubida = await ServicioNube.subirImagenACloudinary(rutaLocal);
           if (urlSubida.isNotEmpty) {
-             // 🔥 NUEVO: Renombramos la foto local PROD_ al nombre de Cloudinary para evitar duplicados
              try {
                String nombreCloudinary = urlSubida.split('/').last;
                File fileLocal = File(rutaLocal);
@@ -801,14 +860,14 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
                  String parentDir = fileLocal.parent.path;
                  String nuevoCamino = "$parentDir/$nombreCloudinary";
                  await fileLocal.rename(nuevoCamino);
-                 rutaLocal = nuevoCamino; // Actualizamos el puntero al nuevo archivo
+                 rutaLocal = nuevoCamino;
                }
              } catch (e) {
                debugPrint("Error renombrando imagen principal: $e");
              }
-             pathFinal = urlSubida; // En la base de datos se guarda la URL de Cloudinary
+             pathFinal = urlSubida;
           } else {
-             pathFinal = rutaLocal; // Fallback local si falla la subida
+             pathFinal = rutaLocal;
           }
         } else {
           pathFinal = rutaLocal;
@@ -835,6 +894,8 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
         idActual = DateTime.now().millisecondsSinceEpoch;
         final mapConId = {...map, 'id': idActual};
         await db.insert('productos', mapConId);
+        
+        // Manejo de anuncios para usuarios no premium
         if (!esPremium) {
           int prodsCreados = (prefs.getInt('contador_anuncios_creacion') ?? 0) + 1;
           await prefs.setInt('contador_anuncios_creacion', prodsCreados);
@@ -842,10 +903,47 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
         }
       } else {
         idActual = widget.producto!['id'];
+        
+        // VALIDACIÓN 1: El usuario modificó o quitó la foto principal
+        String oldFoto = widget.producto!['foto_path']?.toString() ?? "";
+        if (oldFoto.isNotEmpty && oldFoto != pathFinal) {
+          ServicioNube.eliminarImagenCloudinaryYLocal(oldFoto);
+        }
+
+        // VALIDACIÓN 2: El usuario modificó o quitó fotos de variantes
+        if (widget.producto!['variantes'] != null) {
+          try {
+            var oldVarDec = jsonDecode(widget.producto!['variantes']);
+            var oldVarGrupos = (oldVarDec.isNotEmpty && !oldVarDec[0].containsKey('grupo')) ? [{'opciones': oldVarDec}] : oldVarDec;
+            
+            Set<String> oldPhotos = {};
+            for (var g in oldVarGrupos) {
+              for (var o in g['opciones']) {
+                String path = o['foto_path']?.toString() ?? "";
+                if (path.isNotEmpty) oldPhotos.add(path);
+              }
+            }
+
+            Set<String> newPhotos = {};
+            for (var g in _gruposVariantes) {
+              for (var o in g['opciones']) {
+                String path = o['foto_path']?.toString() ?? "";
+                if (path.isNotEmpty) newPhotos.add(path);
+              }
+            }
+
+            for (String oldP in oldPhotos) {
+              if (!newPhotos.contains(oldP)) {
+                ServicioNube.eliminarImagenCloudinaryYLocal(oldP);
+              }
+            }
+          } catch (_) {}
+        }
+
         await db.update('productos', map, where: 'id = ?', whereArgs: [idActual]);
       }
 
-      // 🔥 2. TRATAMIENTO DE IMÁGENES DE VARIANTES
+      // TRATAMIENTO DE IMÁGENES DE VARIANTES
       for (var entry in _fotosVariantes.entries) {
         if (entry.value.isEmpty) continue;
         List<String> partes = entry.key.split('_');
@@ -855,14 +953,11 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
         String fotoVarianteUrl = entry.value;
 
         if (!fotoVarianteUrl.startsWith('http') && fotoVarianteUrl.length < 500 && File(fotoVarianteUrl).existsSync()) {
-          
-          // SIEMPRE guardamos una copia en la galería Boxi/Variantes
           String rutaLocal = await _guardarImagenEnLocalPersistente(fotoVarianteUrl, esVariante: true);
           
           if (esPremium) {
             String urlSubida = await ServicioNube.subirImagenACloudinary(rutaLocal);
             if (urlSubida.isNotEmpty) {
-               // 🔥 NUEVO: Renombramos la foto local VAR_ al nombre de Cloudinary para evitar duplicados
                try {
                  String nombreCloudinary = urlSubida.split('/').last;
                  File fileLocal = File(rutaLocal);
@@ -883,25 +978,32 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
             fotoVarianteUrl = rutaLocal;
           }
         }
-        
         _gruposVariantes[gIdx]['opciones'][oIdx]['foto_path'] = fotoVarianteUrl;
       }
       
-      // Actualizamos SQLite y la Nube con los nuevos JSON
       variantesJson = jsonEncode(_gruposVariantes);
       await db.update('productos', {'variantes': variantesJson}, where: 'id = ?', whereArgs: [idActual]);
       await db.delete('fotos_variantes', where: 'producto_id = ?', whereArgs: [idActual]);
 
+      _rutaFotosCache[idActual] = _imgData;
+      widget.onGuardar();
+
+      // 🔥 RESTAURADO: Sincronización en la nube para usuarios Premium al guardar/editar
       if (esPremium) {
-        map['variantes'] = variantesJson;
-        ServicioNube.guardarProductoNube({...map, 'id': idActual});
+        final Map<String, dynamic> mapSincro = {...map, 'id': idActual, 'variantes': variantesJson};
+        ServicioNube.guardarProductoNube(mapSincro);
         ServicioNube.compilarYSubirCatalogoRTDB();
       }
 
-      _rutaFotosCache[idActual] = _imgData;
-
-      widget.onGuardar();
-      if (mounted) Navigator.pop(context);
+      if (mounted) {
+        if (widget.producto == null && !esPremium) {
+          ServicioAnuncios.mostrarAnuncioIntersticial(() {
+            if (mounted) Navigator.pop(context);
+          });
+        } else {
+          Navigator.pop(context);
+        }
+      }
     } catch (e) {
       setState(() => _estaGuardando = false);
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Error: $e")));

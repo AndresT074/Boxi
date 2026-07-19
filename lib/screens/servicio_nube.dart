@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:async';
 import 'dart:convert';
 import 'dart:ui' as ui; // 🔥 Añadido para compresión nativa
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -211,6 +212,7 @@ class ServicioNube {
       }
 
       await batch.commit();
+      await respaldarDatosPrivadosRTDB();
 
       for (final id in idsAEliminar) {
         await dbLocal.delete(
@@ -277,6 +279,11 @@ class ServicioNube {
           });
         }
         await batch.commit();
+        await respaldarDatosPrivadosRTDB();
+        try {
+          DatabaseReference ref = FirebaseDatabase.instance.ref("sync_triggers/$_uid");
+          await ref.update({tabla: ServerValue.timestamp});
+        } catch (_) {}
 
         final dbLocal = await DBHelper.instance.database;
         await dbLocal.delete(
@@ -329,6 +336,11 @@ class ServicioNube {
         });
 
         await batch.commit();
+        await respaldarDatosPrivadosRTDB();
+        try {
+          DatabaseReference ref = FirebaseDatabase.instance.ref("sync_triggers/$_uid");
+          await ref.update({tabla: ServerValue.timestamp});
+        } catch (_) {}
 
         final dbLocal = await DBHelper.instance.database;
         await dbLocal.delete(
@@ -687,11 +699,7 @@ class ServicioNube {
 
   static Future<void> descargarTodoDesdeNube() async {
     if (_uid == null) return;
-    
-    // 1. Descargamos e importamos instantáneamente el catálogo de Realtime
-    await _importarCatalogoDesdeRTDB(_uid!);
-
-    // 2. Descargamos en paralelo el resto de tablas privadas
+    await importarCatalogoDesdeRTDB(_uid!);
     List<Future<bool>> descargas = [];
     const List<String> tablasPrivadas = [
       'vendedores',
@@ -708,7 +716,7 @@ class ServicioNube {
     await Future.wait(descargas);
   }
 
-  static Future<void> _importarCatalogoDesdeRTDB(String uid) async {
+  static Future<void> importarCatalogoDesdeRTDB(String uid) async {
     try {
       if (!await tieneInternet()) return;
       final ref = FirebaseDatabase.instance.ref("catalogos_web/$uid");
@@ -1576,7 +1584,6 @@ class ServicioNube {
   static Future<void> descargarFotoIndividualEnSegundoPlano(String url, String localPath) async {
     if (!url.startsWith('http')) return;
     
-    // Evitamos duplicidad de descargas simultáneas en paralelo
     if (_descargasActivas.contains(url)) return;
     _descargasActivas.add(url);
 
@@ -1585,26 +1592,31 @@ class ServicioNube {
       String ext = name.contains('.') ? name.split('.').last : 'jpg';
       String id = name.split('.').first;
 
-      // 1. Si ya existe físicamente en el celular, cancelamos
       String? rutaLegible = await obtenerRutaLegibleSegura(url);
       if (rutaLegible != null) return;
 
-      // 2. Descargamos de internet
       final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 15));
       if (res.statusCode == 200) {
+        
+        // 🔥 ADICIONAR ESTA COMPROBACIÓN: Si cerró sesión, abortamos la escritura
+        if (_uid == null) {
+          _descargasActivas.remove(url);
+          return;
+        }
+
         File f = File('$localPath/$name');
         try {
           await f.writeAsBytes(res.bodyBytes);
           debugPrint("✅ Imagen guardada de forma normal: ${f.path}");
         } catch (e) {
-          // Si Android bloquea la escritura (Error 13), guardamos con nombre fijos en la misma carpeta
+          if (_uid == null) return; // 🔥 Abortar
           File fallback = File('$localPath/${id}_safe.$ext');
           await fallback.writeAsBytes(res.bodyBytes);
           debugPrint("🛡️ Imagen guardada en fallback estático seguro: ${fallback.path}");
         }
       }
     } catch (_) {} finally {
-      _descargasActivas.remove(url); // Liberamos de la cola
+      _descargasActivas.remove(url); 
     }
   }
   
@@ -1642,11 +1654,15 @@ class ServicioNube {
   }
 
   static Future<void> actualizarEstadoPedidoNube(
-      int id, String est) async {
+      int id, String est, {String? fechaPago}) async {
     await _escribir(
       tabla: 'pedidos',
       docId: id.toString(),
-      datos: {'id': id, 'estado': est},
+      datos: {
+        'id': id, 
+        'estado': est,
+        if (fechaPago != null) 'fecha_pago': fechaPago,
+      },
     );
   }
 
@@ -1742,6 +1758,16 @@ class ServicioNube {
         'ultima_mod_pedidos': FieldValue.serverTimestamp(),
       });
       await batch.commit();
+      await respaldarDatosPrivadosRTDB();
+      try {
+        DatabaseReference ref = FirebaseDatabase.instance.ref("sync_triggers/$_uid");
+        await ref.update({
+          'clientes': ServerValue.timestamp,
+          'pedidos': ServerValue.timestamp,
+          'detalle_pedidos': ServerValue.timestamp,
+          'productos': ServerValue.timestamp
+        });
+      } catch (_) {}
 
       await _marcarModificacion('ultima_mod_productos');
       await _marcarModificacion('ultima_mod_pedidos');
@@ -1857,69 +1883,118 @@ class ServicioNube {
   static Future<void> eliminarCategoriaNube(int id) async =>
       _eliminar(tabla: 'categorias', docId: id.toString());
 
-  static Stream<QuerySnapshot>? escucharCategoriasEnTiempoReal() =>
-      _uid == null
-          ? null
-          : _db
-              .collection('usuarios')
-              .doc(_uid)
-              .collection('categorias')
-              .snapshots();
+  // 🔥 1. RESPALDAR SOLO DATOS PRIVADOS (Ventas, Clientes, Finanzas)
+  static Future<void> respaldarDatosPrivadosRTDB() async {
+    if (_uid == null || !await tieneInternet()) return;
+    try {
+      final dbLocal = await DBHelper.instance.database;
+      Map<String, dynamic> jsonPrivado = {
+        'timestamp_privado': DateTime.now().millisecondsSinceEpoch
+      };
+      
+      // 🚨 OJO: Ya NO incluimos productos ni categorías aquí
+      const tablasPrivadas = ['vendedores', 'clientes', 'pedidos', 'detalle_pedidos', 'reportes_guardados', 'ajustes_capital'];
+      
+      for (String t in tablasPrivadas) {
+        final data = await dbLocal.query(t);
+        List<Map<String, dynamic>> listaLimpia = [];
+        for(var row in data) {
+           Map<String, dynamic> map = Map.from(row);
+           map.forEach((k, v) {
+             if (v is Uint8List) map[k] = base64Encode(v); 
+           });
+           listaLimpia.add(map);
+        }
+        jsonPrivado[t] = listaLimpia;
+      }
+      
+      final ref = FirebaseDatabase.instance.ref("datos_privados/$_uid");
+      await ref.set(jsonEncode(jsonPrivado));
+    } catch (e) {
+      debugPrint("Error respaldando datos privados en RTDB: $e");
+    }
+  }
 
-  // ─────────────────────────────────────────────────────────────
-  //  STREAMS (para quien los necesite)
-  // ─────────────────────────────────────────────────────────────
-  static Stream<QuerySnapshot>? escucharProductosEnTiempoReal() =>
-      _uid == null
-          ? null
-          : _db
-              .collection('usuarios')
-              .doc(_uid)
-              .collection('productos')
-              .snapshots();
+  // 🔥 2. DESCARGAR SOLO DATOS PRIVADOS DESDE RTDB
+  static Future<void> descargarDatosPrivadosRTDB() async {
+    if (_uid == null || !await tieneInternet()) return;
+    try {
+      final ref = FirebaseDatabase.instance.ref("datos_privados/$_uid");
+      final snap = await ref.get();
+      if (!snap.exists) return;
 
-  static Stream<QuerySnapshot>? escucharClientesEnTiempoReal() =>
-      _uid == null
-          ? null
-          : _db
-              .collection('usuarios')
-              .doc(_uid)
-              .collection('clientes')
-              .snapshots();
+      final rawValue = snap.value;
+      Map<String, dynamic> datos = {};
+      if (rawValue is String) {
+        datos = jsonDecode(rawValue);
+      } else if (rawValue is Map) {
+        datos = Map<String, dynamic>.from(rawValue);
+      }
 
-  static Stream<QuerySnapshot>? escucharVendedoresEnTiempoReal() =>
-      _uid == null
-          ? null
-          : _db
-              .collection('usuarios')
-              .doc(_uid)
-              .collection('vendedores')
-              .snapshots();
+      final dbLocal = await DBHelper.instance.database;
+      final Batch batch = dbLocal.batch();
+      const tablasPrivadas = ['vendedores', 'clientes', 'pedidos', 'detalle_pedidos', 'reportes_guardados', 'ajustes_capital'];
+      
+      for (String t in tablasPrivadas) {
+        if (datos[t] != null) {
+          await dbLocal.delete(t); // Vaciamos local
+          final lista = List<dynamic>.from(datos[t]);
+          for (var item in lista) {
+             Map<String, dynamic> mapLocal = Map<String, dynamic>.from(item);
+             if (t == 'pedidos' && mapLocal['firma'] != null && mapLocal['firma'] is String) {
+                mapLocal['firma'] = base64Decode(mapLocal['firma']);
+             }
+             batch.insert(t, mapLocal, conflictAlgorithm: ConflictAlgorithm.replace);
+          }
+        }
+      }
+      await batch.commit(noResult: true);
+      
+      final prefs = await SharedPreferences.getInstance();
+      if (datos['timestamp_privado'] != null) {
+        await prefs.setInt('rt_timestamp_privado_$_uid', datos['timestamp_privado']);
+      }
+    } catch(e) {
+       debugPrint("Error bajando datos privados de RTDB: $e");
+    }
+  }
 
-  static Stream<QuerySnapshot>? escucharPedidosEnTiempoReal() =>
-      _uid == null
-          ? null
-          : _db
-              .collection('usuarios')
-              .doc(_uid)
-              .collection('pedidos')
-              .snapshots();
+  static StreamSubscription? escucharCambiosNubeRTDB(Function() onUpdate) {
+    if (_uid == null) return null;
+    DatabaseReference ref = FirebaseDatabase.instance.ref("sync_triggers/$_uid");
+    return ref.onValue.listen((event) {
+      if (event.snapshot.exists) {
+        onUpdate(); // Avisa a las pantallas que algo cambió
+      }
+    });
+  }
 
-  static Stream<QuerySnapshot>? escucharReportesEnTiempoReal() =>
-      _uid == null
-          ? null
-          : _db
-              .collection('usuarios')
-              .doc(_uid)
-              .collection('reportes_guardados')
-              .snapshots();
+  // 🔥 MIGRADO: Borrado seguro de archivos locales de caché para liberar espacio (0 credenciales)
+  static Future<void> eliminarImagenCloudinaryYLocal(String pathOrUrl) async {
+    if (pathOrUrl.isEmpty) return;
 
-  static Stream<QuerySnapshot>? escucharAjustesCapitalEnTiempoReal() =>
-      _uid == null
-          ? null
-          : _db
-              .collection('usuarios')
-              .doc(_uid)
-              .collection('ajustes_capital')
-              .snapshots();
+    try {
+      if (!pathOrUrl.startsWith('http')) {
+        // Si es una ruta de archivo local directa, la borramos si está dentro de la carpeta Boxi
+        final file = File(pathOrUrl);
+        if (file.existsSync() && pathOrUrl.contains('/Boxi')) {
+          await file.delete();
+          debugPrint("🗑️ Archivo local eliminado del disco: $pathOrUrl");
+        }
+      } else {
+        // Si era una URL de Cloudinary, borramos la copia local guardada en la caché del celular
+        final prefs = await SharedPreferences.getInstance();
+        String? localBoxiPath = prefs.getString('local_boxi_path');
+        if (localBoxiPath != null) {
+          String name = pathOrUrl.split('/').last;
+          File localFile = File('$localBoxiPath/$name');
+          if (localFile.existsSync()) await localFile.delete();
+          File localFileVar = File('$localBoxiPath/Variantes/$name');
+          if (localFileVar.existsSync()) await localFileVar.delete();
+        }
+      }
+    } catch (e) {
+      debugPrint("Error eliminando archivos locales de disco: $e");
+    }
+  }
 }

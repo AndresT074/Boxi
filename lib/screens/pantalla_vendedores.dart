@@ -5,10 +5,8 @@ import 'package:google_mobile_ads/google_mobile_ads.dart'; // 🔥 Import de AdM
 import '../database/db_helper.dart';
 import 'servicio_anuncios.dart';
 import 'servicio_nube.dart';
-import 'pantalla_premium.dart'; // 🔥 Import de pantalla premium para el anuncio
-import 'package:sqflite/sqflite.dart'; 
+import 'pantalla_premium.dart'; 
 import 'dart:async';
-import 'package:cloud_firestore/cloud_firestore.dart';
 
 class PantallaVendedores extends StatefulWidget {
   const PantallaVendedores({super.key});
@@ -40,29 +38,8 @@ class _PantallaVendedoresState extends State<PantallaVendedores> {
   void _activarTiempoReal() async {
     final prefs = await SharedPreferences.getInstance();
     if (prefs.getBool('es_premium') ?? false) {
-      _suscripcion = ServicioNube.escucharVendedoresEnTiempoReal()?.listen((snapshot) async {
-        final db = await DBHelper.instance.database;
-
-        for (var change in snapshot.docChanges) {
-          final data = change.doc.data() as Map<String, dynamic>;
-          final int id = data['id'];
-
-          if (change.type == DocumentChangeType.removed) {
-            await db.delete('vendedores', where: 'id = ?', whereArgs: [id]);
-          } else {
-            Map<String, dynamic> localData = Map.from(data);
-            
-            localData.forEach((key, value) {
-              if (value is Timestamp) {
-                localData[key] = value.toDate().toIso8601String();
-              }
-            });
-            const permitidas = ['id', 'nombre', 'telefono', 'email', 'ultima_modificacion'];
-            localData.removeWhere((key, value) => !permitidas.contains(key));
-
-            await db.insert('vendedores', localData, conflictAlgorithm: ConflictAlgorithm.replace);
-          }
-        }
+      _suscripcion = ServicioNube.escucharCambiosNubeRTDB(() async {
+        await ServicioNube.descargarDatosPrivadosRTDB();
         if (mounted) _cargar();
       });
     }
