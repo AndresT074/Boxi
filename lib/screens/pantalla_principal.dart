@@ -1470,7 +1470,28 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
     final prefs = await SharedPreferences.getInstance();
+    bool nombreYaSincronizado = prefs.getBool('nombre_sincronizado_nube_${user.uid}') ?? false;
+    if (!nombreYaSincronizado && await ServicioNube.tieneInternet()) {
+      try {
+        String nombreLocal = prefs.getString('nombre_negocio') ?? "MI NEGOCIO";
+        String logoLocal = prefs.getString('logo_path') ?? "";
+        
+        await FirebaseFirestore.instance
+            .collection('usuarios')
+            .doc(user.uid)
+            .set({
+              'nombre_negocio': nombreLocal,
+              'logo_path': logoLocal.startsWith('http') ? logoLocal : "",
+            }, SetOptions(merge: true));
+            
+        await prefs.setBool('nombre_sincronizado_nube_${user.uid}', true);
+        debugPrint("☁️ Nombre de negocio sincronizado automáticamente en Firebase.");
+      } catch (e) {
+        debugPrint("Error sincronizando nombre inicial: $e");
+      }
+    }
 
+    // Resto del código existente de _intentarSincronizacionNube()...
     String? ultimoUid = prefs.getString('ultimo_uid_registrado');
     if (ultimoUid != null && ultimoUid != user.uid) {
       await DBHelper.instance.limpiarTablas();
@@ -2193,17 +2214,36 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                                         });
                                       },
                                       leading: Container(
-                                        width: 45, height: 45,
+                                        width: 45, 
+                                        height: 45,
                                         decoration: BoxDecoration(
                                           color: isOscuro ? Colors.black26 : Colors.grey.shade100,
                                           borderRadius: BorderRadius.circular(10),
                                         ),
                                         clipBehavior: Clip.antiAlias,
-                                        child: fotoPath.isEmpty
-                                            ? const Icon(Icons.image, color: Colors.grey, size: 20)
-                                            : (fotoPath.length > 500
-                                                ? Image.memory(base64Decode(fotoPath), fit: BoxFit.cover, gaplessPlayback: true)
-                                                : Image.file(File(fotoPath), fit: BoxFit.cover, gaplessPlayback: true, errorBuilder: (_,__,___) => const Icon(Icons.broken_image, size: 20))),
+                                        child: () {
+                                          if (fotoPath.isEmpty) return const Icon(Icons.image, color: Colors.grey, size: 20);
+                                          String? rutaLegible = _obtenerRutaFisicaLegibleSync(fotoPath);
+                                          if (rutaLegible != null) {
+                                            return Image.file(File(rutaLegible), fit: BoxFit.cover, gaplessPlayback: true);
+                                          }
+                                          if (!fotoPath.startsWith('http') && fotoPath.length <= 500 && File(fotoPath).existsSync()) {
+                                            return Image.file(File(fotoPath), fit: BoxFit.cover, gaplessPlayback: true);
+                                          }
+                                          if (fotoPath.length > 500) {
+                                            return Image.memory(base64Decode(fotoPath), fit: BoxFit.cover, gaplessPlayback: true);
+                                          }
+                                          if (fotoPath.startsWith('http')) {
+                                            String urlLiviana = optimizarUrlCloudinary(fotoPath, width: 100);
+                                            return Image.network(
+                                              urlLiviana, 
+                                              fit: BoxFit.cover, 
+                                              errorBuilder: (_,__,___) => const Icon(Icons.image, color: Colors.grey, size: 20)
+                                            );
+                                          }
+
+                                          return const Icon(Icons.image, color: Colors.grey, size: 20);
+                                        }(),
                                       ),
                                       title: Text(
                                         p['nombre'], 
@@ -2303,6 +2343,58 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
           );
         }
       )
+    );
+  }
+
+  void _confirmarEliminarCategoria(int idCat, String nombreCat) {
+    final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
+    
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Theme.of(context).cardColor,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: [
+            const Icon(Icons.warning_amber_rounded, color: Colors.redAccent, size: 28),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                "¿Eliminar Categoría?",
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                  color: isOscuro ? Colors.white : Colors.black,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Text(
+          "¿Estás seguro de que deseas eliminar la categoría \"$nombreCat\"?\n\nLos productos asociados NO se borrarán, pasarán a la sección \"OTROS PRODUCTOS\".",
+          style: TextStyle(
+            fontSize: 13,
+            color: isOscuro ? Colors.white70 : Colors.black87,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("CANCELAR", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.redAccent,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+            onPressed: () {
+              Navigator.pop(ctx);
+              _eliminarCategoria(idCat, nombreCat);
+            },
+            child: const Text("ELIMINAR", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
     );
   }
 
@@ -3233,103 +3325,115 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
             drawer: widget.esAdmin ? _buildDrawer(user) : null,
             
             body: SafeArea(
-              child: esHorizontal 
-                ? Row(
-                    children:[
-                      Expanded(flex: 7, child: _construirVistaProductos(columnasActuales, esHorizontal)),
-                      Container(width: 1, color: Colors.grey[300]),
-                      Expanded(
-                        flex: 3, 
-                        child: Column(
-                          children: [
-                            Expanded(child: _buildCarritoUI(total, esHorizontal)),
-                            _buildPieCarrito(),
-                          ],
-                        )
-                      ),
-                    ]
-                  )
-                : LayoutBuilder(
-                    builder: (context, constraints) {
-                      double alturaPie = 180.0; // Aproximado del pie con botones
-                      double alturaBarra = 20.0;
-                      double espacioDisponible = constraints.maxHeight;
-                      double alturaRenderCarrito = _alturaCarrito;
-                      if (espacioDisponible < (_alturaCarrito + alturaPie + 50)) {
-                        alturaRenderCarrito = (espacioDisponible - alturaPie - alturaBarra - 20).clamp(0, _alturaCarrito);
-                      }
+              child: () {
+                // 🔥 CONDICIÓN INTELIGENTE: El panel se muestra si hay productos en el carrito O si hay solicitudes web pendientes.
+                bool mostrarPanelCarrito = carrito.isNotEmpty || (widget.esAdmin && _cantidadSolicitudes > 0);
 
-                      return Column(
-                        children:[
+                return esHorizontal 
+                  ? Row(
+                      children: [
+                        Expanded(flex: 7, child: _construirVistaProductos(columnasActuales, esHorizontal)),
+                        
+                        if (mostrarPanelCarrito) ...[
+                          Container(width: 1, color: Colors.grey[300]),
                           Expanded(
-                            child: Stack(
+                            flex: 3, 
+                            child: Column(
                               children: [
-                                Container(
-                                  color: Theme.of(context).scaffoldBackgroundColor,
-                                  child: _construirVistaProductos(columnasActuales, esHorizontal),
-                                ),
+                                Expanded(child: _buildCarritoUI(total, esHorizontal)),
+                                _buildPieCarrito(),
                               ],
-                            ),
+                            )
                           ),
-                          if (espacioDisponible > 300)
-                            GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              onVerticalDragStart: (_) {
-                                setState(() {
-                                  _isDraggingCarrito = true;
-                                });
-                              },
-                              onVerticalDragUpdate: (details) {
-                                setState(() {
-                                  double maxAllowedH = constraints.maxHeight - 220.0;
-                                  double nuevaAltura = _alturaCarrito - details.delta.dy;
-                                  if (nuevaAltura < _minAltura) {
-                                    nuevaAltura = _minAltura;
-                                  } else if (nuevaAltura > maxAllowedH) {
-                                    nuevaAltura = maxAllowedH;
-                                  }
-                                  _alturaCarrito = nuevaAltura;
-                                });
-                              },
-                              onVerticalDragEnd: (details) {
-                                double maxAllowedH = constraints.maxHeight - 220.0;
-                                setState(() {
-                                  _isDraggingCarrito = false;
-                                  if (_alturaCarrito < 40) _alturaCarrito = _minAltura;
-                                  if (_alturaCarrito > maxAllowedH - 40) _alturaCarrito = maxAllowedH;
-                                });
-                              },
+                        ],
+                      ]
+                    )
+                  : LayoutBuilder(
+                      builder: (context, constraints) {
+                        // 🔥 SI NO HAY PRODUCTOS Y TAMPOCO PEDIDOS WEB PENDIENTES, SE OCULTA EL CARRITO
+                        if (!mostrarPanelCarrito) {
+                          return Container(
+                            color: Theme.of(context).scaffoldBackgroundColor,
+                            child: _construirVistaProductos(columnasActuales, esHorizontal),
+                          );
+                        }
+
+                        // 🔥 SI HAY PRODUCTOS O PEDIDOS WEB PENDIENTES, SE MUESTRA EL PANEL
+                        double alturaPie = 180.0;
+                        double alturaBarra = 20.0;
+                        double espacioDisponible = constraints.maxHeight;
+                        double alturaRenderCarrito = _alturaCarrito;
+                        
+                        if (espacioDisponible < (_alturaCarrito + alturaPie + 50)) {
+                          alturaRenderCarrito = (espacioDisponible - alturaPie - alturaBarra - 20).clamp(0, _alturaCarrito);
+                        }
+
+                        return Column(
+                          children: [
+                            Expanded(
                               child: Container(
-                                width: double.infinity,
-                                height: 20,
-                                color: isOscuro ? Colors.white10 : const Color.fromARGB(54, 2, 159, 238),
-                                child: Center(
-                                  child: Container(
-                                    width: 50,
-                                    height: 6,
-                                    decoration: BoxDecoration(
-                                      color: isOscuro ? Colors.white24 : const Color.fromARGB(59, 12, 2, 32),
-                                      borderRadius: BorderRadius.circular(10)
-                                    )
+                                color: Theme.of(context).scaffoldBackgroundColor,
+                                child: _construirVistaProductos(columnasActuales, esHorizontal),
+                              ),
+                            ),
+                            if (espacioDisponible > 300)
+                              GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onVerticalDragStart: (_) {
+                                  setState(() {
+                                    _isDraggingCarrito = true;
+                                  });
+                                },
+                                onVerticalDragUpdate: (details) {
+                                  setState(() {
+                                    double maxAllowedH = constraints.maxHeight - 220.0;
+                                    double nuevaAltura = _alturaCarrito - details.delta.dy;
+                                    if (nuevaAltura < _minAltura) {
+                                      nuevaAltura = _minAltura;
+                                    } else if (nuevaAltura > maxAllowedH) {
+                                      nuevaAltura = maxAllowedH;
+                                    }
+                                    _alturaCarrito = nuevaAltura;
+                                  });
+                                },
+                                onVerticalDragEnd: (details) {
+                                  double maxAllowedH = constraints.maxHeight - 220.0;
+                                  setState(() {
+                                    _isDraggingCarrito = false;
+                                    if (_alturaCarrito < 40) _alturaCarrito = _minAltura;
+                                    if (_alturaCarrito > maxAllowedH - 40) _alturaCarrito = maxAllowedH;
+                                  });
+                                },
+                                child: Container(
+                                  width: double.infinity,
+                                  height: 20,
+                                  color: isOscuro ? Colors.white10 : const Color.fromARGB(54, 2, 159, 238),
+                                  child: Center(
+                                    child: Container(
+                                      width: 50,
+                                      height: 6,
+                                      decoration: BoxDecoration(
+                                        color: isOscuro ? Colors.white24 : const Color.fromARGB(59, 12, 2, 32),
+                                        borderRadius: BorderRadius.circular(10)
+                                      )
+                                    ),
                                   ),
                                 ),
                               ),
-                            ),
                             AnimatedContainer(
                               duration: _isDraggingCarrito ? Duration.zero : const Duration(milliseconds: 200),
                               curve: Curves.easeOut,
                               height: alturaRenderCarrito,
                               child: _buildCarritoUI(total, esHorizontal)
                             ),
-                          _buildPieCarrito(),
-                        ],
-                      );
-                    }
-                  ),
+                            _buildPieCarrito(),
+                          ],
+                        );
+                      }
+                    );
+              }(),
             ),
           ),
-          
-          // 🔥 Si _mostrarModalNombre es true, se dibuja por encima del Scaffold
           if (_mostrarModalNombre) _buildModalNombre(),
         ],
       ),
@@ -4364,7 +4468,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                                         if (val == 'edit') {
                                           _mostrarModalCrearCategoria(categoriaAEditar: cat);
                                         } else if (val == 'delete') {
-                                          _eliminarCategoria(cat['id'], nombre);
+                                          _confirmarEliminarCategoria(cat['id'], nombre);
                                         }else if (val == 'share') {
                                           // 🔥 Llamamos al nuevo selector masivo de la categoría
                                           _mostrarDialogoCompartirCategoria(nombre, grupos[nombre] ?? []);

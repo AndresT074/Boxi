@@ -460,13 +460,12 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
       String? ultimoRegistro = prefs.getString('ultimo_registro_firestore');
       String? versionGuardada = prefs.getString('version_app_registrada');
       PackageInfo packageInfo = await PackageInfo.fromPlatform();
-      String versionActual =
-          '${packageInfo.version}+${packageInfo.buildNumber}';
-      
+      String versionActual = '${packageInfo.version}+${packageInfo.buildNumber}';
+      bool nombreYaSincronizado = prefs.getBool('nombre_sincronizado_nube_${user.uid}') ?? false;
       bool necesitaActualizarDia = (ultimoRegistro != hoy);
       bool necesitaActualizarVersion = (versionGuardada != versionActual);
       
-      if (necesitaActualizarDia || necesitaActualizarVersion) {
+      if (necesitaActualizarDia || necesitaActualizarVersion || !nombreYaSincronizado) {
         Map<String, dynamic> datosAEnviar = {};
         
         if (necesitaActualizarDia) {
@@ -474,6 +473,13 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
         }
         if (necesitaActualizarVersion) {
           datosAEnviar['version_app'] = versionActual;
+        }
+        if (!nombreYaSincronizado) {
+          String nombreLocal = prefs.getString('nombre_negocio') ?? "MI NEGOCIO";
+          String logoLocal = prefs.getString('logo_path') ?? "";
+          
+          datosAEnviar['nombre_negocio'] = nombreLocal;
+          datosAEnviar['logo_path'] = logoLocal.startsWith('http') ? logoLocal : "";
         }
         
         await FirebaseFirestore.instance
@@ -488,6 +494,9 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
         if (necesitaActualizarVersion) {
           await prefs.setString('version_app_registrada', versionActual);
         }
+        
+        // 🔥 Marcamos que el nombre ya quedó respaldado en la nube
+        await prefs.setBool('nombre_sincronizado_nube_${user.uid}', true);
       }
 
       AppUpdateInfo info = await InAppUpdate.checkForUpdate();
