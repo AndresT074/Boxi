@@ -112,8 +112,9 @@ class ServicioContrasenaAdmin {
   }
 
   static Future<void> sincronizarDesdeNube(String uid) async {
+    if (!await ServicioNube.tieneInternet()) return; // 🔥 Cancela si no hay internet
     try {
-      final doc = await FirebaseFirestore.instance.collection(_colUsuarios).doc(uid).get();
+      final doc = await FirebaseFirestore.instance.collection(_colUsuarios).doc(uid).get().timeout(const Duration(seconds: 3));
       final prefs = await SharedPreferences.getInstance();
 
       // Si el usuario no existe en Firebase, borramos rastro local
@@ -168,6 +169,10 @@ class ServicioContrasenaAdmin {
 // ============================================================
 class PantallaBienvenida extends StatefulWidget {
   const PantallaBienvenida({super.key});
+  static void resetearPrimeraCarga() {
+    _PantallaBienvenidaState._primeraCargaEjecutada = false;
+  }
+
   @override
   State<PantallaBienvenida> createState() => _PantallaBienvenidaState();
 }
@@ -182,6 +187,7 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
   bool _esPremium = false;
   late AnimationController _controller;
   bool _cargandoDatos = false;
+  static bool _primeraCargaEjecutada = false; 
   final LocalAuthentication _localAuth = LocalAuthentication();
 
   @override
@@ -195,9 +201,13 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
 
   Future<void> _iniciarApp() async {
     await _cargarConfig();
-    _registrarIngresoYVerificarActualizacion();
-    _sincronizarAlEntrar();
-    _verificarReembolsosEnSilencio();
+    if (!_primeraCargaEjecutada) {
+      _primeraCargaEjecutada = true;
+      _sincronizarAlEntrar();
+      _verificarReembolsosEnSilencio();
+    } else {
+      if (mounted) setState(() => _cargandoDatos = false); // INSTANTÁNEO 0s
+    }
   }
 
   @override
@@ -269,20 +279,29 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
 
   Future<void> _sincronizarAlEntrar() async {
     User? user = FirebaseAuth.instance.currentUser;
-    if (user != null) {
-      if (mounted) setState(() => _cargandoDatos = true);
+    if (user == null) return;
+
+    if (!await ServicioNube.tieneInternet()) {
       await _cargarConfig();
-      
-      try {
-        await _sincronizacionSilenciosa(user);
-        await ServicioContrasenaAdmin.sincronizarDesdeNube(user.uid);
-        await _registrarIngresoYVerificarActualizacion();
-      } catch (e) {
-        debugPrint("Error en inicio: $e");
-      } finally {
-        if (mounted) setState(() => _cargandoDatos = false); // 🔥 Asegura apagar el loader siempre
-      }
+      if (mounted) setState(() => _cargandoDatos = false);
+      return;
     }
+
+    if (mounted) setState(() => _cargandoDatos = true);
+    await _cargarConfig();
+    
+    try {
+      // 🔥 Le damos solo 1.5 segundos a la nube
+      await _sincronizacionSilenciosa(user).timeout(const Duration(milliseconds: 1500), onTimeout: () {
+        debugPrint("⏰ Tiempo agotado buscando nube. Pasando a modo local.");
+      });
+      await ServicioContrasenaAdmin.sincronizarDesdeNube(user.uid);
+    } catch (e) {
+      debugPrint("Error en inicio: $e");
+    } finally {
+      if (mounted) setState(() => _cargandoDatos = false); // 🔥 Apaga el cargador DE INMEDIATO
+    }
+    _registrarIngresoYVerificarActualizacion();
   }
 
   Future<void> _sincronizacionSilenciosa(User user) async {
@@ -345,7 +364,11 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
           
           await prefs.setBool(llaveDescarga, true);
           await prefs.setBool('primera_carga_completada_${user.uid}', true);
-          final userDoc = await FirebaseFirestore.instance.collection('usuarios').doc(user.uid).get();
+          final userDoc = await FirebaseFirestore.instance
+              .collection('usuarios')
+              .doc(user.uid)
+              .get()
+              .timeout(const Duration(seconds: 3)); // 🔥 Timeout para evitar congelamientos offline
           if (userDoc.exists) {
             final data = userDoc.data() as Map<String, dynamic>;
             final modProd = (data['ultima_mod_productos'] as Timestamp?)?.toDate().toIso8601String();
@@ -494,12 +517,9 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
         if (necesitaActualizarVersion) {
           await prefs.setString('version_app_registrada', versionActual);
         }
-        
-        // 🔥 Marcamos que el nombre ya quedó respaldado en la nube
         await prefs.setBool('nombre_sincronizado_nube_${user.uid}', true);
       }
-
-      AppUpdateInfo info = await InAppUpdate.checkForUpdate();
+      AppUpdateInfo info = await InAppUpdate.checkForUpdate().timeout(const Duration(seconds: 2));
       if (info.updateAvailability == UpdateAvailability.updateAvailable) { 
         await InAppUpdate.performImmediateUpdate();
       }
@@ -875,7 +895,7 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
               await prefs.remove('admin_biometria_activa');
               await prefs.remove('migracion_definitiva_completa_v6');
               await prefs.remove('datos_descargados');
-
+              _primeraCargaEjecutada = false; 
               // 🔥 6. LIMPIEZA DE TABLAS LOCALES
               try {
                 await DBHelper.instance.limpiarTablas();

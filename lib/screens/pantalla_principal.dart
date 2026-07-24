@@ -1728,6 +1728,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
               await prefs.remove('admin_biometria_activa');
               await prefs.remove('migracion_definitiva_completa_v6');
               await prefs.remove('datos_descargados');
+              PantallaBienvenida.resetearPrimeraCarga();
 
               // 🔥 6. LIMPIEZA DE TABLAS LOCALES
               try {
@@ -2550,9 +2551,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                   padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12)
                 ),
                 onPressed: seleccionados.isEmpty ? null : () {
-                  Navigator.pop(ctx);
                   List<Map<String, dynamic>> prodsCompartir = prods.where((p) => seleccionados.contains(p['id'])).toList();
-                  // 🔥 Cambiado para mandar el nombre de la categoría
                   _compartirMultiplesProductos(categoriaNombre, prodsCompartir);
                 },
                 child: Text(
@@ -2627,7 +2626,10 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       sb.writeln("━━━━━━━━━━━━━━━━━━━━\n");
 
       final tempDir = await getTemporaryDirectory();
-      final String timestamp = DateTime.now().millisecondsSinceEpoch.toString();
+      final String timestamp = DateTime.now().microsecondsSinceEpoch.toString(); // 🔥 Microsegundos únicos
+
+      final shareFolder = Directory('${tempDir.path}/share_$timestamp');
+      if (!await shareFolder.exists()) await shareFolder.create(recursive: true);
 
       for (var p in seleccionados) {
         String nombre = p['nombre']?.toString() ?? "Producto";
@@ -2650,12 +2652,10 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
           try {
             Uint8List? bytesImagen;
             
-            // 🔥 1. OFFLINE-FIRST: Lee del disco duro, 0 internet
             String? rutaSegura = _obtenerRutaFisicaLegibleSync(imgData);
             if (rutaSegura != null) {
               bytesImagen = await File(rutaSegura).readAsBytes();
             } else if (imgData.startsWith('http')) {
-              // 🔥 2. FALLBACK NUBE: Si la borraron, descarga versión a 800px
               String urlOptimizada = optimizarUrlCloudinary(imgData, width: 800);
               final response = await http.get(Uri.parse(urlOptimizada)).timeout(const Duration(seconds: 8));
               if (response.statusCode == 200) bytesImagen = response.bodyBytes;
@@ -2667,14 +2667,12 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
             }
 
             if (bytesImagen != null) {
-              // 🔥 Aquí llama a la función _escribirNombreEnImagen. 
-              // Como en el paso anterior le pusimos targetWidth: 800 a esa función, 
-              // el resultado ya sale súper liviano y comprimido para WhatsApp automáticamente.
               Uint8List bytesConTexto = await _escribirNombreEnImagen(bytesImagen, nombre);
 
-              final file = File('${tempDir.path}/cat_share_${p['id']}_$timestamp.png');
-              await file.writeAsBytes(bytesConTexto);
-              files.add(XFile(file.path));
+              // 🔥 Formato JPG liviano y rápido para múltiples grupos
+              final file = File('${shareFolder.path}/cat_share_${p['id']}_$timestamp.jpg');
+              await file.writeAsBytes(bytesConTexto, flush: true);
+              files.add(XFile(file.path, mimeType: 'image/jpeg'));
             }
           } catch (e) {
             debugPrint("Error procesando imagen de categoría: $e");
@@ -2682,10 +2680,9 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         }
       }
 
-      // 🚀 QUITA EL CARTEL DE CARGANDO
       if (mounted) Navigator.pop(context); 
+      await Future.delayed(const Duration(milliseconds: 500)); 
 
-      // 🚀 ABRE WHATSAPP
       if (files.isNotEmpty) {
         await Share.shareXFiles(files, text: sb.toString());
       } else {
@@ -3148,20 +3145,21 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
 
       List<XFile> files = [];
       final tempDir = await getTemporaryDirectory(); 
-      final String timestamp = DateTime.now().millisecondsSinceEpoch.toString();
+      final String timestamp = DateTime.now().microsecondsSinceEpoch.toString(); // 🔥 Microsegundos únicos
       
-      // FUNCIÓN INTERNA: Procesa, comprime a 800px y guarda para compartir
+      final shareFolder = Directory('${tempDir.path}/share_$timestamp');
+      if (!await shareFolder.exists()) await shareFolder.create(recursive: true);
+      
       Future<void> prepararImagenParaWhatsApp(String ruta, String filename) async {
         if (ruta.isEmpty) return;
         try {
           Uint8List? bytesCrudos;
           
-          // Prioridad 100% Local
           String? rutaSegura = _obtenerRutaFisicaLegibleSync(ruta);
           if (rutaSegura != null) {
             bytesCrudos = await File(rutaSegura).readAsBytes();
           } else if (ruta.startsWith('http')) {
-            String urlOpt = optimizarUrlCloudinary(ruta, width: 800); // Evita gastar datos
+            String urlOpt = optimizarUrlCloudinary(ruta, width: 800);
             final res = await http.get(Uri.parse(urlOpt)).timeout(const Duration(seconds: 8));
             if (res.statusCode == 200) bytesCrudos = res.bodyBytes;
           } else if (ruta.length > 500) {
@@ -3172,36 +3170,32 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
           }
 
           if (bytesCrudos != null) {
-            // 🔥 COMPRESIÓN A 800px: Salva tu memoria y evita que WhatsApp se trabe
             final codec = await ui.instantiateImageCodec(bytesCrudos, targetWidth: 800);
             final frame = await codec.getNextFrame();
             final data = await frame.image.toByteData(format: ui.ImageByteFormat.png);
 
-            final file = File('${tempDir.path}/$filename');
-            await file.writeAsBytes(data!.buffer.asUint8List());
-            files.add(XFile(file.path));
+            // 🔥 Formato JPG super liviano e identificador nativo para WhatsApp
+            final file = File('${shareFolder.path}/$filename.jpg');
+            await file.writeAsBytes(data!.buffer.asUint8List(), flush: true);
+            files.add(XFile(file.path, mimeType: 'image/jpeg'));
           }
         } catch (e) {
           debugPrint("Error procesando imagen para compartir: $e");
         }
       }
 
-      // 4. PROCESAMOS LAS IMÁGENES
       if (compartirSeleccion == false || compartirSeleccion == null) {
-        await prepararImagenParaWhatsApp(imgData, 'prod_share_${p['id']}_$timestamp.png');
+        await prepararImagenParaWhatsApp(imgData, 'prod_share_${p['id']}_$timestamp');
       } else {
         for (int i = 0; i < fotosSeleccionadasRutas.length; i++) {
-          await prepararImagenParaWhatsApp(fotosSeleccionadasRutas[i], 'var_share_${p['id']}_${i}_$timestamp.png');
+          await prepararImagenParaWhatsApp(fotosSeleccionadasRutas[i], 'var_share_${p['id']}_${i}_$timestamp');
         }
       }
       
-      // ==========================================
-      // 🚀 CERRAMOS EL CARTEL "CARGANDO..." Y ABRIMOS WHATSAPP
-      // ==========================================
-      if (mounted) Navigator.pop(context);
+      if (mounted) Navigator.pop(context); 
+      await Future.delayed(const Duration(milliseconds: 500)); // 🔥 Pausa de 500ms para asegurar el envío masivo
 
       if (files.isNotEmpty) {
-        // WhatsApp se abrirá al instante con el texto pegado en la descripción
         await Share.shareXFiles(files, text: text);
       } else {
         await Share.share(text);
@@ -3326,7 +3320,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
             
             body: SafeArea(
               child: () {
-                // 🔥 CONDICIÓN INTELIGENTE: El panel se muestra si hay productos en el carrito O si hay solicitudes web pendientes.
                 bool mostrarPanelCarrito = carrito.isNotEmpty || (widget.esAdmin && _cantidadSolicitudes > 0);
 
                 return esHorizontal 
@@ -3350,15 +3343,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                     )
                   : LayoutBuilder(
                       builder: (context, constraints) {
-                        // 🔥 SI NO HAY PRODUCTOS Y TAMPOCO PEDIDOS WEB PENDIENTES, SE OCULTA EL CARRITO
-                        if (!mostrarPanelCarrito) {
-                          return Container(
-                            color: Theme.of(context).scaffoldBackgroundColor,
-                            child: _construirVistaProductos(columnasActuales, esHorizontal),
-                          );
-                        }
-
-                        // 🔥 SI HAY PRODUCTOS O PEDIDOS WEB PENDIENTES, SE MUESTRA EL PANEL
                         double alturaPie = 180.0;
                         double alturaBarra = 20.0;
                         double espacioDisponible = constraints.maxHeight;
@@ -3368,6 +3352,8 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                           alturaRenderCarrito = (espacioDisponible - alturaPie - alturaBarra - 20).clamp(0, _alturaCarrito);
                         }
 
+                        // 🔥 ESTRUCTURA UNIFICADA: La lista de productos mantiene siempre el mismo nodo
+                        // en la jerarquía, preservando el scroll exacto al aparecer o desaparecer el carrito.
                         return Column(
                           children: [
                             Expanded(
@@ -3376,57 +3362,59 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                                 child: _construirVistaProductos(columnasActuales, esHorizontal),
                               ),
                             ),
-                            if (espacioDisponible > 300)
-                              GestureDetector(
-                                behavior: HitTestBehavior.opaque,
-                                onVerticalDragStart: (_) {
-                                  setState(() {
-                                    _isDraggingCarrito = true;
-                                  });
-                                },
-                                onVerticalDragUpdate: (details) {
-                                  setState(() {
+                            if (mostrarPanelCarrito) ...[
+                              if (espacioDisponible > 300)
+                                GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  onVerticalDragStart: (_) {
+                                    setState(() {
+                                      _isDraggingCarrito = true;
+                                    });
+                                  },
+                                  onVerticalDragUpdate: (details) {
+                                    setState(() {
+                                      double maxAllowedH = constraints.maxHeight - 220.0;
+                                      double nuevaAltura = _alturaCarrito - details.delta.dy;
+                                      if (nuevaAltura < _minAltura) {
+                                        nuevaAltura = _minAltura;
+                                      } else if (nuevaAltura > maxAllowedH) {
+                                        nuevaAltura = maxAllowedH;
+                                      }
+                                      _alturaCarrito = nuevaAltura;
+                                    });
+                                  },
+                                  onVerticalDragEnd: (details) {
                                     double maxAllowedH = constraints.maxHeight - 220.0;
-                                    double nuevaAltura = _alturaCarrito - details.delta.dy;
-                                    if (nuevaAltura < _minAltura) {
-                                      nuevaAltura = _minAltura;
-                                    } else if (nuevaAltura > maxAllowedH) {
-                                      nuevaAltura = maxAllowedH;
-                                    }
-                                    _alturaCarrito = nuevaAltura;
-                                  });
-                                },
-                                onVerticalDragEnd: (details) {
-                                  double maxAllowedH = constraints.maxHeight - 220.0;
-                                  setState(() {
-                                    _isDraggingCarrito = false;
-                                    if (_alturaCarrito < 40) _alturaCarrito = _minAltura;
-                                    if (_alturaCarrito > maxAllowedH - 40) _alturaCarrito = maxAllowedH;
-                                  });
-                                },
-                                child: Container(
-                                  width: double.infinity,
-                                  height: 20,
-                                  color: isOscuro ? Colors.white10 : const Color.fromARGB(54, 2, 159, 238),
-                                  child: Center(
-                                    child: Container(
-                                      width: 50,
-                                      height: 6,
-                                      decoration: BoxDecoration(
-                                        color: isOscuro ? Colors.white24 : const Color.fromARGB(59, 12, 2, 32),
-                                        borderRadius: BorderRadius.circular(10)
-                                      )
+                                    setState(() {
+                                      _isDraggingCarrito = false;
+                                      if (_alturaCarrito < 40) _alturaCarrito = _minAltura;
+                                      if (_alturaCarrito > maxAllowedH - 40) _alturaCarrito = maxAllowedH;
+                                    });
+                                  },
+                                  child: Container(
+                                    width: double.infinity,
+                                    height: 20,
+                                    color: isOscuro ? Colors.white10 : const Color.fromARGB(54, 2, 159, 238),
+                                    child: Center(
+                                      child: Container(
+                                        width: 50,
+                                        height: 6,
+                                        decoration: BoxDecoration(
+                                          color: isOscuro ? Colors.white24 : const Color.fromARGB(59, 12, 2, 32),
+                                          borderRadius: BorderRadius.circular(10)
+                                        )
+                                      ),
                                     ),
                                   ),
                                 ),
+                              AnimatedContainer(
+                                duration: _isDraggingCarrito ? Duration.zero : const Duration(milliseconds: 200),
+                                curve: Curves.easeOut,
+                                height: alturaRenderCarrito,
+                                child: _buildCarritoUI(total, esHorizontal)
                               ),
-                            AnimatedContainer(
-                              duration: _isDraggingCarrito ? Duration.zero : const Duration(milliseconds: 200),
-                              curve: Curves.easeOut,
-                              height: alturaRenderCarrito,
-                              child: _buildCarritoUI(total, esHorizontal)
-                            ),
-                            _buildPieCarrito(),
+                              _buildPieCarrito(),
+                            ],
                           ],
                         );
                       }

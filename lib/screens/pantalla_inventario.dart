@@ -357,7 +357,7 @@ class _PantallaInventarioState extends State<PantallaInventario> {
                                     Text('STOCK: ${p['stock']}',
                                         style: TextStyle(
                                             fontSize: 11 * factorTexto,
-                                            color: mostrarAlerta ? const Color.fromARGB(255, 201, 20, 7) : (isOscuro ? Colors.white70 : Colors.blueGrey))),
+                                            color: mostrarAlerta ? const Color.fromARGB(255, 250, 41, 26) : (isOscuro ? Colors.white70 : Colors.blueGrey))),
                                     const SizedBox(height: 2),
                                     Text('Costo: \$${precioCompra.toStringAsFixed(2)}',
                                         style: TextStyle(
@@ -431,7 +431,7 @@ class _PantallaInventarioState extends State<PantallaInventario> {
                                 style: TextStyle(
                                     fontSize: (esCompacto ? 9 : 11) * factorTexto,
                                     height: esCompacto ? 1.1 : null, // 🔥 Elimina el margen invisible
-                                    color: mostrarAlerta ? const Color.fromARGB(255, 216, 18, 3) : (isOscuro ? Colors.white70 : Colors.black54))),
+                                    color: mostrarAlerta ? const Color.fromARGB(255, 247, 85, 85) : (isOscuro ? Colors.white70 : Colors.black54))),
                             
                             Text('Costo: \$${precioCompra.toStringAsFixed(0)}', 
                                 style: TextStyle(

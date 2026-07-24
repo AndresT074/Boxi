@@ -320,11 +320,20 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
   }
 
   Map<String, List<Map<String, dynamic>>> _agruparPorFecha(
-      List<Map<String, dynamic>> pedidos) {
+    List<Map<String, dynamic>> pedidos) {
     final Map<String, List<Map<String, dynamic>>> grupos = {};
     for (var p in pedidos) {
-      String fechaHora = p['fecha_hora']?.toString() ?? p['fecha']?.toString() ?? '';
-      String fechaKey = fechaHora.length >= 10 ? fechaHora.substring(0, 10) : 'Sin fecha';
+      String fechaEfectiva = "";
+      if (p['estado'] == 'Completado' &&
+          p['fecha_pago'] != null &&
+          p['fecha_pago'].toString().trim().isNotEmpty &&
+          p['fecha_pago'].toString() != "null") {
+        fechaEfectiva = p['fecha_pago'].toString();
+      } else {
+        fechaEfectiva = p['fecha_hora']?.toString() ?? p['fecha']?.toString() ?? '';
+      }
+
+      String fechaKey = fechaEfectiva.length >= 10 ? fechaEfectiva.substring(0, 10) : 'Sin fecha';
       grupos.putIfAbsent(fechaKey, () => []).add(p);
     }
     return grupos;
@@ -379,11 +388,12 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
       int c = (d['cantidad'] as int?) ?? 1;
       subtotalSinDescuento += (pU * c);
     }
+    bool algunItemTieneDescuento = detallesEditables.any((d) => ((d['descuento'] as num?)?.toDouble() ?? 0.0) > 0);
 
     double descGlobalFaltante = 0.0;
-    // Si la suma teórica es mayor al total cobrado (Tolerancia de $1 por decimales)
-    if (subtotalSinDescuento > 0 && totalRealProductos > 0 && (subtotalSinDescuento - totalRealProductos) > 1.0) {
-      descGlobalFaltante = ((subtotalSinDescuento - totalRealProductos) / subtotalSinDescuento) * 100;
+    if (!algunItemTieneDescuento && subtotalSinDescuento > 0 && totalRealProductos > 0 && (subtotalSinDescuento - totalRealProductos) > 1.0) {
+      double rawDesc = ((subtotalSinDescuento - totalRealProductos) / subtotalSinDescuento) * 100;
+      descGlobalFaltante = double.parse(rawDesc.toStringAsFixed(2));
     }
 
     for (var d in detallesEditables) {
@@ -939,8 +949,10 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
 
     String formatearInicial(dynamic val) {
+      if (val == null) return "";
       double d = (val as num).toDouble();
-      return d == 0 ? "" : d.toString();
+      if (d <= 0) return "";
+      return (d == d.roundToDouble()) ? d.toInt().toString() : d.toStringAsFixed(2);
     }
 
     TextEditingController domiCtrl =
@@ -973,10 +985,21 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                         color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1),
                         fontWeight: FontWeight.bold,
                         fontSize: 20)),
-                IconButton(
-                    icon: const Icon(Icons.add_circle, color: Colors.green, size: 30),
-                    onPressed: () =>
-                        _buscarYAgregar(pedId, setSt, (newList) => detalles = newList))
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                        icon: const Icon(Icons.add_circle, color: Colors.green, size: 30),
+                        tooltip: "Añadir producto",
+                        onPressed: () =>
+                            _buscarYAgregar(pedId, setSt, (newList) => detalles = newList)),
+                    IconButton(
+                        icon: Icon(Icons.close,
+                            color: isOscuro ? Colors.white54 : Colors.grey, size: 26),
+                        tooltip: "Cerrar",
+                        onPressed: () => Navigator.pop(ctx)), // 🔥 BOTÓN X PARA SALIR
+                  ],
+                ),
               ],
             ),
             content: SizedBox(
@@ -1103,14 +1126,11 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                                       ),
                                       onChanged: (v) {
                                         setSt(() {
-                                          item['descuento'] = double.tryParse(v) ?? 0;
-                                          double pU =
-                                              (item['precio_unitario'] as num).toDouble();
-                                          double dP =
-                                              (item['descuento'] as num).toDouble();
-                                          item['subtotal'] =
-                                              (pU - (pU * (dP / 100))) *
-                                                  (item['cantidad'] as int);
+                                          double parsed = double.tryParse(v) ?? 0;
+                                          item['descuento'] = double.parse(parsed.toStringAsFixed(2));
+                                          double pU = (item['precio_unitario'] as num).toDouble();
+                                          double dP = (item['descuento'] as num).toDouble();
+                                          item['subtotal'] = (pU - (pU * (dP / 100))) * (item['cantidad'] as int);
                                         });
                                       },
                                       onEditingComplete: () {
@@ -1443,7 +1463,7 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                             var p = filtrados[i];
                             return ListTile(
                               contentPadding: const EdgeInsets.symmetric(vertical: 4),
-                              leading: MiniaturaProductoLocal(id: p['id'] as int, isOscuro: isOscuro),
+                              leading: MiniaturaProductoLocal(key: ValueKey("min_${p['id']}"), id: p['id'] as int, isOscuro: isOscuro), // 🔥 Clave única para evitar reutilizar fotos de otros productos
                               title: Text(p['nombre'].toString(),
                                   maxLines: 2,
                                   overflow: TextOverflow.ellipsis,
@@ -1566,7 +1586,7 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                                                 pId, entry.value, nombreVar);
                                           }
                                         }
-                                        _recalcularTotal(pedId);
+                                        await _recalcularTotal(pedId); 
                                         _actualizarVistaEditor(
                                             pedId, setStEditor, callback);
                                         _cargar();
@@ -1606,8 +1626,8 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                                     });
                                   }
                                   await _modificarStockBD(pId, 1, nombre);
-                                  _recalcularTotal(pedId);
-                                  Navigator.pop(ctx);
+                                  await _recalcularTotal(pedId);
+                                  if (mounted) Navigator.pop(ctx);
                                   _actualizarVistaEditor(pedId, setStEditor, callback);
                                   _cargar();
                                 }
@@ -2611,6 +2631,16 @@ class _MiniaturaProductoLocalState extends State<MiniaturaProductoLocal> {
   void initState() {
     super.initState();
     _fotoFuture = _cargarFoto();
+  }
+
+  @override
+  void didUpdateWidget(covariant MiniaturaProductoLocal oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.id != widget.id) {
+      setState(() {
+        _fotoFuture = _cargarFoto(); // 🔥 Fuerza a cargar la foto correcta si el ID cambia al buscar
+      });
+    }
   }
 
   Future<String?> _cargarFoto() async {
