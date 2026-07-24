@@ -487,7 +487,7 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
       try {
         bool autenticado = await _localAuth.authenticate(
           localizedReason: 'Confirmar acción de seguridad financiera',
-          options: const AuthenticationOptions(biometricOnly: false, stickyAuth: true, useErrorDialogs: true),
+          biometricOnly: false,
         );
         if (autenticado) return true;
       } catch (e) { debugPrint("Error biometría: $e"); }
@@ -1460,7 +1460,7 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
                         lineTouchData: LineTouchData(
                           touchSpotThreshold: 35, 
                           touchTooltipData: LineTouchTooltipData(
-                            tooltipBgColor: isOscuro ? const Color(0xFF1E293B) : Colors.blueGrey.shade900,
+                            getTooltipColor: (spot) => isOscuro ? const Color(0xFF1E293B) : Colors.blueGrey.shade900,
                             getTooltipItems: (touchedSpots) {
                               return touchedSpots.map((spot) {
                                 int idx = spot.x.toInt();
@@ -1516,7 +1516,7 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
                                   return const SizedBox.shrink();
                                 }
                                 return SideTitleWidget(
-                                  axisSide: meta.axisSide,
+                                  meta: meta,
                                   angle: -1.5708, // Rotación de -90 grados
                                   space: 8,
                                   // 🔥 CORREGIDO: Desplazamiento corrector para alinear el texto bajo el punto vertical exacto
@@ -1596,7 +1596,7 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
                     maxY: _maxYPedidosGrafico,
                     barTouchData: BarTouchData(
                       touchTooltipData: BarTouchTooltipData(
-                        tooltipBgColor: isOscuro ? const Color(0xFF1E293B) : Colors.blueGrey.shade900,
+                        getTooltipColor: (spot) => isOscuro ? const Color(0xFF1E293B) : Colors.blueGrey.shade900,
                         getTooltipItem: (group, groupIndex, rod, rodIndex) {
                           int idx = group.x.toInt();
                           // 🔥 CORREGIDO: Muestra las fechas detalladas en las columnas de pedidos
@@ -1641,7 +1641,7 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
                               return const SizedBox.shrink();
                             }
                             return SideTitleWidget(
-                              axisSide: meta.axisSide,
+                              meta: meta,
                               angle: -1.5708, // 🔥 CORREGIDO: Rotación vertical aplicada
                               space: 8,
                               // 🔥 CORREGIDO: Desplazamiento corrector para alinear el texto de barras

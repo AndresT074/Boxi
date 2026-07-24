@@ -17,7 +17,7 @@ class ServicioNotificaciones {
         InitializationSettings(android: androidInit);
 
     await _plugin.initialize(
-      initSettings,
+      settings: initSettings,
       onDidReceiveNotificationResponse: (NotificationResponse response) {},
     );
 
@@ -54,10 +54,10 @@ class ServicioNotificaciones {
   static Future<void> mostrarNotificacionInactividad(String titulo, String cuerpo) async {
     int notificationId = 99999; // ID fijo para que se sobrescriba y no llene la barra
     await _plugin.show(
-      notificationId,
-      titulo,
-      cuerpo,
-      const NotificationDetails(
+      id: notificationId,
+      title: titulo,
+      body: cuerpo,
+      notificationDetails: const NotificationDetails(
         android: AndroidNotificationDetails(
           _canalInactividadId,
           _canalInactividadNombre,
@@ -75,10 +75,10 @@ class ServicioNotificaciones {
       String nombreNegocio, String nombreCliente) async {
     int notificationId = DateTime.now().millisecondsSinceEpoch % 100000;
     await _plugin.show(
-      notificationId,
-      '📦 ¡Nuevo Pedido Web!',
-      'Hola $nombreNegocio, $nombreCliente te hizo un pedido.',
-      const NotificationDetails(
+      id: notificationId,
+      title: '📦 ¡Nuevo Pedido Web!',
+      body: 'Hola $nombreNegocio, $nombreCliente te hizo un pedido.',
+      notificationDetails: const NotificationDetails(
         android: AndroidNotificationDetails(
           _canalPedidosId,
           _canalPedidosNombre,

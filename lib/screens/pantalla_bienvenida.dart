@@ -1227,15 +1227,9 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
     // INTENTO DE BIOMETRÍA / PIN
     if (biometriaActiva) {
       try {
-        // Quitamos el if (availableBiometrics.isNotEmpty) 
-        // porque en muchos dispositivos esto falla aunque tengan PIN.
         bool autenticado = await _localAuth.authenticate(
           localizedReason: 'Acceso a Administración',
-          options: const AuthenticationOptions(
-            biometricOnly: false, // CLAVE: False permite PIN, Patrón o Contraseña
-            stickyAuth: true,
-            useErrorDialogs: true,
-          ),
+          biometricOnly: false,
         );
         
         if (autenticado && mounted) {
@@ -1366,16 +1360,10 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
                           final prefs = await SharedPreferences.getInstance();
                           
                           try {
-                            // 🔥 NUEVO: Forzamos la autenticación biométrica real para verificarla antes de dar acceso
                             bool autenticado = await _localAuth.authenticate(
                               localizedReason: 'Confirmar activación de seguridad',
-                              options: const AuthenticationOptions(
-                                biometricOnly: false,
-                                stickyAuth: true,
-                                useErrorDialogs: true,
-                              ),
+                              biometricOnly: false,
                             );
-
                             if (autenticado) {
                               await ServicioContrasenaAdmin.actualizarBiometria(true);
                               if (noRecordarCheckbox) {
