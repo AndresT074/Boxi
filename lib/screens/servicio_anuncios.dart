@@ -11,15 +11,6 @@ class ServicioAnuncios {
   // ID de prueba de AdMob ca-app-pub-3940256099942544/1033173712
   static Future<void> iniciar() async {
     await MobileAds.instance.initialize();
-    
-    RequestConfiguration configuration = RequestConfiguration(
-        testDeviceIds:[
-          "9429C0EA3E575F262DDCCA7961A764E5", // Mi celular
-          "DB4D4DE07471DF5616645D832696C7AA"  // Mi tablet
-        ]
-      );
-    await MobileAds.instance.updateRequestConfiguration(configuration);
-    
     cargarAnuncio();
   }
 

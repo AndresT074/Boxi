@@ -4152,14 +4152,16 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                 onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PantallaInventario())).then((_) => _cargar()),
                 icon: const Icon(Icons.add_shopping_cart_rounded), label: const Text("IR A INVENTARIO", style: TextStyle(fontWeight: FontWeight.w900)),
               ),
+              const SizedBox(height: 25),
+              // 🔥 AHORA SÍ: Carga el anuncio real de AdMob cuando la lista de productos esté vacía
+              if (!_esPremium && widget.esAdmin)
+                const AnuncioNativoWidget(key: ValueKey('admob_native_empty_key')),
             ],
           ),
         ),
       );
     }
-
     if (filtrados.isEmpty) return const Center(child: Text('Sin productos'));
-
     Map<String, List<Map<String, dynamic>>> grupos = {'_sin_categoria': []};
     for (var cat in categorias) grupos[cat['nombre']] = [];
     
