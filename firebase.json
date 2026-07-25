@@ -8,36 +8,11 @@
   "hosting": [
     {
       "site": "boxi-4a68c",
-      "public": "build/web",
-      "ignore": [
-        "firebase.json",
-        "**/.*",
-        "**/node_modules/**"
-      ],
-      "rewrites": [
+      "redirects": [
         {
-          "source": "**",
-          "destination": "/index.html"
-        }
-      ],
-      "headers": [
-        {
-          "source": "**/*.@(css|wasm|png|jpg|jpeg|gif|svg|woff|woff2|ttf|eot)",
-          "headers": [
-            {
-              "key": "Cache-Control",
-              "value": "public, max-age=31536000, immutable"
-            }
-          ]
-        },
-        {
-          "source": "/index.html",
-          "headers": [
-            {
-              "key": "Cache-Control",
-              "value": "no-cache, no-store, must-revalidate"
-            }
-          ]
+          "source": "/**",
+          "destination": "https://boxi-catalogo.web.app",
+          "type": 301
         }
       ]
     },
@@ -57,20 +32,29 @@
       ],
       "headers": [
         {
-          "source": "**/*.@(css|wasm|png|jpg|jpeg|gif|svg|woff|woff2|ttf|eot)",
-          "headers": [
-            {
-              "key": "Cache-Control",
-              "value": "public, max-age=31536000, immutable"
-            }
-          ]
-        },
-        {
           "source": "/index.html",
           "headers": [
             {
               "key": "Cache-Control",
               "value": "no-cache, no-store, must-revalidate"
+            }
+          ]
+        },
+        {
+          "source": "**/*.@(js|json)",
+          "headers": [
+            {
+              "key": "Cache-Control",
+              "value": "no-cache, no-store, must-revalidate"
+            }
+          ]
+        },
+        {
+          "source": "**/*.@(css|png|jpg|jpeg|gif|svg|woff|woff2|ttf|eot)",
+          "headers": [
+            {
+              "key": "Cache-Control",
+              "value": "public, max-age=86400"
             }
           ]
         }

@@ -59,7 +59,31 @@
     .status-txt { font-size: 12px; color: rgba(255,255,255,.42); transition: opacity .25s; }
     @keyframes dotPulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.55); } }
   </style>
-  <script src="/flutter.js" defer></script> 
+  <script>
+    const APP_VERSION = "5.6.2";
+
+    // 🔥 1. CARGA INSTANTÁNEA (Arranca en 0.5s en Incógnito y Celulares sin esperar bloqueos)
+    var flutterScript = document.createElement('script');
+    flutterScript.src = 'flutter_bootstrap.js?v=' + APP_VERSION;
+    flutterScript.async = true;
+    document.head.appendChild(flutterScript);
+
+    // 🔥 2. LIMPIEZA EN SEGUNDO PLANO (Elimina Service Workers sin frenar el inicio)
+    setTimeout(function() {
+      try {
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.getRegistrations().then(function(regs) {
+            for (let r of regs) r.unregister();
+          });
+        }
+        if ('caches' in window) {
+          caches.keys().then(function(names) {
+            for (let n of names) caches.delete(n);
+          });
+        }
+      } catch(e) {}
+    }, 800);
+  </script>
 </head>
 <body>
 
@@ -76,7 +100,7 @@
       <div class="status-txt" id="statusTxt">Iniciando sistema...</div>
     </div>
   </div>
-  <div style="position: absolute; bottom: 20px; font-size: 10px; color: rgba(255,255,255,0.3); font-weight: bold;">V 5.5.2</div>
+  <div style="position: absolute; bottom: 20px; font-size: 10px; color: rgba(255,255,255,0.3); font-weight: bold;">V 5.6.2</div>
 </div>
 
 <script>
@@ -130,17 +154,6 @@
       }, 400);
     }
   }
-
-  window.addEventListener('load', function() {
-    _flutter.loader.loadEntrypoint({
-      onEntrypointLoaded: async function(engineInit) {
-        const appRunner = await engineInit.initializeEngine({
-          renderer: 'html', 
-        });
-        await appRunner.runApp(); 
-      }
-    });
-  });
 </script>
 </body>
 </html>

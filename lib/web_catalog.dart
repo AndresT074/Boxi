@@ -1,4 +1,5 @@
 import 'dart:ui'; 
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -42,7 +43,15 @@ class _CatalogoWebState extends State<CatalogoWeb> {
   Map<String, dynamic>? _negocioData;
   String? adminEmail;
   bool _estaCargando = true; 
-  bool _enviandoPedido = false; 
+  bool _enviandoPedido = false;
+
+  // 🔥 CONTROLADORES DE ANIMACIÓN Y SCROLL
+  final ScrollController _mainScrollCtrl = ScrollController();
+  final ScrollController _categoryBarScrollCtrl = ScrollController(); 
+  final Map<String, GlobalKey> _categoriaKeys = {};
+  String _categoriaSeleccionada = "";
+  Timer? _tickerTimer;
+  bool _userIsDragging = false; // 🔥 Pausa el movimiento automático mientras el usuario arrastra
 
   @override
   void initState() {
@@ -52,8 +61,32 @@ class _CatalogoWebState extends State<CatalogoWeb> {
 
   @override
   void dispose() {
+    _tickerTimer?.cancel();
     _searchCtrl.dispose();
+    _mainScrollCtrl.dispose();
+    _categoryBarScrollCtrl.dispose();
     super.dispose();
+  }
+
+  String _fmtDesc(dynamic val) {
+    double d = (val as num? ?? 0).toDouble();
+    if (d <= 0) return "0";
+    return d == d.roundToDouble() ? d.toInt().toString() : d.toStringAsFixed(1);
+  }
+
+  // 🔥 Movimiento Ultra Fluido a 60 FPS (16 ms)
+  void _iniciarTickerCategorias() {
+    _tickerTimer?.cancel();
+    _tickerTimer = Timer.periodic(const Duration(milliseconds: 16), (timer) {
+      if (_categoryBarScrollCtrl.hasClients && !_estaCargando && !_userIsDragging) {
+        double nextOffset = _categoryBarScrollCtrl.offset + 0.4; // Micro-paso imperceptible
+        if (nextOffset >= _categoryBarScrollCtrl.position.maxScrollExtent) {
+          _categoryBarScrollCtrl.jumpTo(0);
+        } else {
+          _categoryBarScrollCtrl.jumpTo(nextOffset);
+        }
+      }
+    });
   }
 
   Future<void> _iniciarCargaProgresiva() async {
@@ -103,15 +136,16 @@ class _CatalogoWebState extends State<CatalogoWeb> {
               listaCats.add(Map<String, dynamic>.from(e));
             }
           }
-          
-          // 🔥 Ordenar de forma segura convirtiendo a int
           listaCats.sort((a, b) {
             int oA = int.tryParse(a['orden']?.toString() ?? '0') ?? 0;
             int oB = int.tryParse(b['orden']?.toString() ?? '0') ?? 0;
             return oA.compareTo(oB);
           });
-          
           _categoriasOrdenadas = listaCats.map((c) => c['nombre'].toString()).toList();
+          for (var cat in _categoriasOrdenadas) {
+            _categoriaKeys[cat] = GlobalKey();
+          }
+          _categoriaKeys['Otros Productos'] = GlobalKey();
           debugPrint("🚀 [DIAGNOSIS] Categorías ordenadas cargadas: $_categoriasOrdenadas");
         }
 
@@ -125,6 +159,7 @@ class _CatalogoWebState extends State<CatalogoWeb> {
         setState(() {
           _estaCargando = false;
         });
+        _iniciarTickerCategorias(); // 🔥 Arranca el tren infinito al cargar las categorías
       } else {
         debugPrint("⚠️ [DIAGNOSIS] No se encontraron datos en esa ruta de Realtime Database (snapshot.exists es falso).");
         setState(() => _estaCargando = false);
@@ -172,6 +207,139 @@ class _CatalogoWebState extends State<CatalogoWeb> {
         if (carrito[idKey]!['cantidad'] <= 0) carrito.remove(idKey);
       }
     });
+  }
+
+  // 🔥 Centrado perfecto relativo a la posición actual del tren infinito
+  void _scrollToCategoria(String catNombre, int catIdx) {
+    setState(() => _categoriaSeleccionada = catNombre);
+
+    if (_categoryBarScrollCtrl.hasClients) {
+      double currentOffset = _categoryBarScrollCtrl.offset;
+      List<String> todasLasCategorias = List.from(_categoriasOrdenadas);
+      if (_productos.any((p) => p['categoria'] == null || p['categoria'].toString().isEmpty)) {
+        todasLasCategorias.add("Otros Productos");
+      }
+
+      int totalCats = todasLasCategorias.length;
+      if (totalCats <= 0) totalCats = 1;
+
+      double aproxItemWidth = 145.0; // Ancho aproximado de cada chip
+      int currentItemIdx = (currentOffset / aproxItemWidth).round();
+      int currentCycle = (currentItemIdx / totalCats).floor();
+      
+      int targetIdx = (currentCycle * totalCats) + catIdx;
+      
+      // Si la meta quedó atrás de la posición actual del scroll, avanzamos al ciclo más cercano
+      if ((targetIdx * aproxItemWidth) < currentOffset - (aproxItemWidth * 2)) {
+        targetIdx += totalCats;
+      }
+
+      double targetOffset = (targetIdx * aproxItemWidth) - (MediaQuery.of(context).size.width / 2) + (aproxItemWidth / 2);
+      if (targetOffset < 0) targetOffset = 0;
+
+      _categoryBarScrollCtrl.animateTo(
+        targetOffset,
+        duration: const Duration(milliseconds: 450),
+        curve: Curves.easeOutCubic,
+      );
+    }
+
+    // 2. Desliza suavemente la página principal hasta la sección de la categoría
+    final key = _categoriaKeys[catNombre];
+    if (key?.currentContext != null) {
+      Scrollable.ensureVisible(
+        key!.currentContext!,
+        duration: const Duration(milliseconds: 700),
+        curve: Curves.easeInOutCubic,
+      );
+    }
+  }
+
+  // 🔥 Barra Deslizante con Arrastre Libre y Tren Infinito
+  Widget _barraCategoriasHorizontal() {
+    if (_categoriasOrdenadas.isEmpty || _estaCargando) return const SizedBox.shrink();
+
+    List<String> todasLasCategorias = List.from(_categoriasOrdenadas);
+    if (_productos.any((p) => p['categoria'] == null || p['categoria'].toString().isEmpty)) {
+      todasLasCategorias.add("Otros Productos");
+    }
+
+    return Listener(
+      // 🔥 Al tocar o hacer clic, pausa el movimiento automático para dejar arrastrar libremente
+      onPointerDown: (_) => _userIsDragging = true,
+      onPointerUp: (_) {
+        // 🔥 2 segundos después de soltar, reanuda el movimiento automático suave
+        Future.delayed(const Duration(seconds: 2), () {
+          if (mounted) _userIsDragging = false;
+        });
+      },
+      child: Container(
+        height: 48,
+        margin: const EdgeInsets.symmetric(vertical: 6),
+        child: ScrollConfiguration(
+          behavior: MyCustomScrollBehavior(),
+          child: ListView.builder(
+            controller: _categoryBarScrollCtrl,
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            itemCount: 10000,
+            itemBuilder: (context, index) {
+              String cat = todasLasCategorias[index % todasLasCategorias.length];
+              bool esSeleccionada = _categoriaSeleccionada == cat;
+
+              return Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: InkWell(
+                  onTap: () => _scrollToCategoria(cat, index % todasLasCategorias.length), 
+                  borderRadius: BorderRadius.circular(25),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 300),
+                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+                    decoration: BoxDecoration(
+                      gradient: esSeleccionada
+                          ? const LinearGradient(colors: [Color(0xFF0D47A1), Color(0xFF1976D2)])
+                          : null,
+                      color: esSeleccionada ? null : Colors.white,
+                      borderRadius: BorderRadius.circular(25),
+                      border: Border.all(
+                        color: esSeleccionada ? Colors.transparent : Colors.grey.shade300,
+                      ),
+                      boxShadow: [
+                        if (esSeleccionada)
+                          BoxShadow(
+                            color: const Color(0xFF0D47A1).withOpacity(0.3),
+                            blurRadius: 10,
+                            offset: const Offset(0, 4),
+                          )
+                      ],
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.category_rounded,
+                          size: 15,
+                          color: esSeleccionada ? Colors.white : const Color(0xFF0D47A1),
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          cat,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: esSeleccionada ? FontWeight.w900 : FontWeight.bold,
+                            color: esSeleccionada ? Colors.white : Colors.black87,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ),
+    );
   }
 
   void _irABoxi() async {
@@ -255,36 +423,39 @@ class _CatalogoWebState extends State<CatalogoWeb> {
 
       body: Column(
         children: [
-          const SizedBox(height: 15),
+          const SizedBox(height: 10),
           _bannerDescargaBoxi(),
+          _barraCategoriasHorizontal(), // 🔥 BARRA DE CATEGORÍAS DESLIZANTE SUPERIOR
           Expanded(
             child: _estaCargando
-                ? const SizedBox() // 🔥 Se deja vacío porque el HTML lo está tapando
+                ? const SizedBox()
                 : LayoutBuilder(builder: (context, constraints) {
                     int columnas = constraints.maxWidth > 1200 ? 5 : (constraints.maxWidth > 800 ? 3 : 2);
                     bool esCelular = constraints.maxWidth < 600;
-                    return ListView(
-                      children: [
-                        if (docsFiltrados.isEmpty)
-                          const Padding(
-                            padding: EdgeInsets.all(50),
-                            child: Center(child: Text("No se encontraron productos")),
-                          ),
-                        // 🔥 1. Iterar sobre las categorías ordenadas
-                        ..._categoriasOrdenadas.map((cat) {
-                          return _construirBloqueCategoria(cat, grupos[cat]!, columnas, esCelular);
-                        }).toList(),
+                    // 🔥 SingleChildScrollView garantiza que todas las llaves existan en memoria para el scroll suave
+                    return SingleChildScrollView(
+                      controller: _mainScrollCtrl,
+                      physics: const BouncingScrollPhysics(),
+                      child: Column(
+                        children: [
+                          if (docsFiltrados.isEmpty)
+                            const Padding(
+                              padding: EdgeInsets.all(50),
+                              child: Center(child: Text("No se encontraron productos")),
+                            ),
+                          ..._categoriasOrdenadas.map((cat) {
+                            return _construirBloqueCategoria(cat, grupos[cat]!, columnas, esCelular);
+                          }).toList(),
 
-                        // 🔥 2. Mostrar los que no tienen categoría 
-                        // (Si no existen categorías, el título se oculta y queda idéntico a la versión vieja)
-                        _construirBloqueCategoria(
-                          _categoriasOrdenadas.isEmpty ? "" : "Otros Productos", 
-                          grupos['_sin_categoria']!, 
-                          columnas, 
-                          esCelular
-                        ),
-                        _boxiFooter(),
-                      ],
+                          _construirBloqueCategoria(
+                            _categoriasOrdenadas.isEmpty ? "" : "Otros Productos", 
+                            grupos['_sin_categoria']!, 
+                            columnas, 
+                            esCelular
+                          ),
+                          _boxiFooter(),
+                        ],
+                      ),
                     );
                   }),
           ),
@@ -311,7 +482,7 @@ class _CatalogoWebState extends State<CatalogoWeb> {
                   Expanded(
                     flex: 3,
                     child: _btnAccion(
-                      label: "Enviar pedido \$${totalPedido.toStringAsFixed(0)}",
+                      label: "Enviar solicitud \$${totalPedido.toStringAsFixed(0)}",
                       icon: Icons.check_circle_outline_rounded,
                       color: const Color(0xFF2E7D32),
                       onTap: _abrirFinalizar,
@@ -583,7 +754,7 @@ class _CatalogoWebState extends State<CatalogoWeb> {
                         borderRadius: BorderRadius.circular(12),
                         boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 4)],
                       ),
-                      child: Text("-$descPct%", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 14)),
+                      child: Text("-${_fmtDesc(descPct)}%", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 14)), // 🔥 1 decimal máx
                     ),
                   ),
 
@@ -755,7 +926,7 @@ class _CatalogoWebState extends State<CatalogoWeb> {
                           child: Container(
                             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                             decoration: BoxDecoration(color: Colors.red, borderRadius: BorderRadius.circular(10)),
-                            child: Text("OFERTA -$descPct%", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                            child: Text("OFERTA -${_fmtDesc(descPct)}%", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), // 🔥 1 decimal máx
                           ),
                         )
                     ],
@@ -1170,17 +1341,17 @@ class _CatalogoWebState extends State<CatalogoWeb> {
                           height: 24,
                           child: CircularProgressIndicator(color: Colors.white, strokeWidth: 3),
                         )
-                      : const Text("ENVIAR PEDIDO", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18)),
-                ), // 1. Cierra ElevatedButton
+                      : const Text("ENVIAR SOLICITUD", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18)),
+                ), 
                 const SizedBox(height: 10),
-              ], // 2. Cierra children de Column
-            ), // 3. Cierra Column
-          ), // 4. Cierra SingleChildScrollView
-        ), // 5. Cierra Container
-      ), // 6. Cierra Center
-    ), // 7. Cierra StatefulBuilder (🔥 Añadido)
-  ); // 8. Cierra showModalBottomSheet
-} // 9. Cierra _abrirFinalizar()
+              ], 
+            ), 
+          ), 
+        ), 
+      ), 
+    ),
+  ); 
+} 
 
   void _mostrarDialogoExito(String mensajeWhatsapp) {
     showDialog(
@@ -1278,19 +1449,20 @@ class _CatalogoWebState extends State<CatalogoWeb> {
   Widget _construirBloqueCategoria(String titulo, List<Map<String, dynamic>> prods, int columnas, bool esCelular) {
     if (prods.isEmpty) return const SizedBox.shrink();
     return Column(
+      key: _categoriaKeys[titulo], // 🔥 Asigna la clave para permitir el scroll automático a esta categoría
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (titulo.isNotEmpty)
           Container(
-            margin: const EdgeInsets.fromLTRB(15, 30, 15, 10),
+            margin: const EdgeInsets.fromLTRB(15, 25, 15, 10),
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
             decoration: BoxDecoration(
               gradient: const LinearGradient(
-                colors: [Color(0xFF0D47A1), Color(0xFF42A5F5)], // Degradado azul llamativo
+                colors: [Color(0xFF0D47A1), Color(0xFF42A5F5)],
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
               ),
-              borderRadius: BorderRadius.circular(20), // Bordes bien redondeados
+              borderRadius: BorderRadius.circular(20),
               boxShadow: [
                 BoxShadow(
                   color: const Color(0xFF0D47A1).withOpacity(0.3),
@@ -1300,7 +1472,7 @@ class _CatalogoWebState extends State<CatalogoWeb> {
               ]
             ),
             child: Row(
-              mainAxisSize: MainAxisSize.min, // Se ajusta al tamaño del texto
+              mainAxisSize: MainAxisSize.min,
               children: [
                 const Icon(Icons.local_offer_rounded, color: Colors.white, size: 20),
                 const SizedBox(width: 8),
@@ -1322,7 +1494,7 @@ class _CatalogoWebState extends State<CatalogoWeb> {
           padding: const EdgeInsets.all(15),
           gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: columnas,
-            childAspectRatio: esCelular ? 0.66 : 0.58,
+            childAspectRatio: esCelular ? 0.68 : (columnas == 5 ? 0.70 : 0.72), 
             crossAxisSpacing: 15,
             mainAxisSpacing: 15,
           ),
