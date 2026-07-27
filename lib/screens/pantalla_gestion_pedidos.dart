@@ -10,6 +10,10 @@ import 'servicio_anuncios.dart';
 import 'dart:async';
 import 'pantalla_premium.dart';
 import 'package:sqflite/sqflite.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'servicio_fidelidad.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 final Map<String, Uint8List> _imageCache = {};
 String _localBoxiPathGlobal = "/storage/emulated/0/Pictures/Boxi"; // 🔥 Añadido para gestionar la ruta offline
@@ -708,10 +712,19 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
           {
             'estado': nuevoEstado, 
             'ultima_modificacion': DateTime.now().toIso8601String(),
-            if (fechaPagoVal != null) 'fecha_pago': fechaPagoVal, // Guardamos la fecha de pago
+            if (fechaPagoVal != null) 'fecha_pago': fechaPagoVal,
           },
           where: 'id = ?',
           whereArgs: [pedidoId]);
+
+      // 🔥 Otorgar punto de fidelidad automático si pasa a Completado
+      if (nuevoEstado == 'Completado') {
+        final pedDoc = await db.query('pedidos', columns: ['cliente_id'], where: 'id = ?', whereArgs: [pedidoId]);
+        if (pedDoc.isNotEmpty && pedDoc.first['cliente_id'] != null) {
+          int clienteIdPedido = pedDoc.first['cliente_id'] as int;
+          await _otorgarPuntoFidelidadAutomatico(clienteIdPedido);
+        }
+      }
 
       if (nuevoEstado == 'Cancelado') {
         final detalles =
@@ -742,6 +755,226 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     } else {
       ejecutar();
     }
+  }
+
+  Future<void> _otorgarPuntoFidelidadAutomatico(int clienteId) async {
+    try {
+      final db = await DBHelper.instance.database;
+      final prefs = await SharedPreferences.getInstance();
+      
+      final tarjetas = await db.query('tarjetas_fidelidad', where: 'activa = 1', limit: 1);
+      if (tarjetas.isEmpty) return;
+      
+      int tarjetaId = tarjetas.first['id'] as int;
+      String tituloTarjeta = tarjetas.first['titulo'].toString();
+      String premioDesc = tarjetas.first['premio_descripcion']?.toString() ?? "Premio especial";
+      int meta = tarjetas.first['meta_compras'] as int;
+      String nomNegocio = prefs.getString('nombre_negocio') ?? 'Nuestro Negocio';
+      String logoPath = prefs.getString('logo_path') ?? '';
+
+      final user = FirebaseAuth.instance.currentUser;
+      bool clienteEncontradoEnNube = false;
+
+      // 1. VERIFICAR SI EL CLIENTE YA TIENE TARJETA VINCULADA EN LA NUBE
+      if (user != null) {
+        try {
+          final clientSnap = await FirebaseFirestore.instance
+              .collection('usuarios')
+              .doc(user.uid)
+              .collection('mis_tarjetas_creadas')
+              .doc(tarjetaId.toString())
+              .collection('clientes')
+              .get();
+
+          for (var doc in clientSnap.docs) {
+            var cData = doc.data();
+            String locId = cData['clienteLocalId']?.toString() ?? '';
+            
+            if (locId == clienteId.toString()) {
+              clienteEncontradoEnNube = true;
+              String clientUid = doc.id;
+              int ptsAntiguos = ((cData['puntosActuales'] ?? 0) as num).toInt();
+              int newComp = ((cData['completadasTotales'] ?? 0) as num).toInt();
+              int newPts;
+
+              if (ptsAntiguos >= meta) {
+                // Si la tarjeta anterior ya estaba llena, esta venta inicia la siguiente tarjeta en 1
+                newPts = 1;
+              } else {
+                newPts = ptsAntiguos + 1;
+                if (newPts >= meta) {
+                  newComp++; // Completa la tarjeta actual
+                }
+              }
+
+              // Actualizar en SQLite local
+              final puntosRes = await db.query('puntos_clientes', where: 'cliente_id = ? AND tarjeta_id = ?', whereArgs: [clienteId, tarjetaId]);
+              if (puntosRes.isNotEmpty) {
+                await db.update('puntos_clientes', {
+                  'puntos_actuales': newPts,
+                  'completadas_totales': newComp,
+                  'ultima_modificacion': DateTime.now().toIso8601String(),
+                }, where: 'cliente_id = ? AND tarjeta_id = ?', whereArgs: [clienteId, tarjetaId]);
+              } else {
+                await db.insert('puntos_clientes', {
+                  'cliente_id': clienteId,
+                  'tarjeta_id': tarjetaId,
+                  'puntos_actuales': newPts,
+                  'completadas_totales': newComp,
+                  'ultima_modificacion': DateTime.now().toIso8601String(),
+                });
+              }
+
+              // Actualizar en Firestore para el Vendedor
+              await doc.reference.update({
+                'puntosActuales': newPts,
+                'completadasTotales': newComp,
+                'ultimaModificacion': FieldValue.serverTimestamp(),
+              });
+
+              // 🔥 FIX CLAVE: Guardar la estructura COMPLETA en la cuenta del cliente para que su pantalla la renderice al instante
+              await FirebaseFirestore.instance
+                  .collection('usuarios')
+                  .doc(clientUid)
+                  .collection('tarjetas_acumuladas')
+                  .doc(user.uid)
+                  .set({
+                'vendorUid': user.uid,
+                'tarjetaId': tarjetaId.toString(),
+                'nombreNegocio': nomNegocio,
+                'logoPath': logoPath,
+                'tarjetaTitulo': tituloTarjeta,
+                'metaCompras': meta,
+                'premioDesc': premioDesc,
+                'puntosActuales': newPts,
+                'completadasTotales': newComp,
+                'ultimaModificacion': FieldValue.serverTimestamp(),
+              }, SetOptions(merge: true));
+
+              // 🔥 NOTIFICAR AL CLIENTE POR NOTIFICACIÓN PUSH
+              ServicioFidelidad.notificarClientePuntoOtorgado(
+                clientUid: clientUid,
+                nombreNegocio: nomNegocio,
+                puntosActuales: newPts,
+                meta: meta,
+              );
+            }
+          }
+        } catch (e) {
+          debugPrint("Error sumando punto en Firestore: $e");
+        }
+      }
+
+      // 2. SI EL CLIENTE NO HA VINCULADO LA TARJETA, ENVIAR INVITACIÓN
+      if (!clienteEncontradoEnNube && user != null) {
+        final clienteRes = await db.query('clientes', columns: ['telefono', 'nombre_completo'], where: 'id = ?', whereArgs: [clienteId]);
+        if (clienteRes.isNotEmpty) {
+          String tel = clienteRes.first['telefono']?.toString() ?? "";
+          String nombreCli = clienteRes.first['nombre_completo']?.toString() ?? "Cliente";
+
+          String token = await ServicioFidelidad.crearTokenUnicoNube(
+            vendorUid: user.uid,
+            tarjetaId: tarjetaId.toString(),
+            clienteLocalId: clienteId,
+            nombreNegocio: nomNegocio,
+            logoPath: logoPath,
+            tarjetaTitulo: tituloTarjeta,
+            metaCompras: meta,
+            premioDesc: premioDesc,
+            clienteTelefono: tel,
+          );
+
+          if (mounted) {
+            _mostrarModalInvitacionWhatsApp(nombreCli, tel, premioDesc, token, meta, tituloTarjeta);
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint("Error en _otorgarPuntoFidelidadAutomatico: $e");
+    }
+  }
+
+  void _mostrarModalInvitacionWhatsApp(String clienteNombre, String telefono, String premioDesc, String token, int meta, String tituloTarjeta) {
+    String numLimpio = telefono.replaceAll(RegExp(r'\D'), '');
+    String ind = "57";
+    String telSolo = numLimpio;
+
+    if (numLimpio.length > 10) {
+      ind = numLimpio.substring(0, numLimpio.length - 10);
+      telSolo = numLimpio.substring(numLimpio.length - 10);
+    }
+
+    TextEditingController indCtrl = TextEditingController(text: ind == "57" ? "" : ind);
+    TextEditingController numCtrl = TextEditingController(text: telSolo);
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Theme.of(context).cardColor,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: [
+            const Icon(Icons.card_giftcard_rounded, color: Colors.green, size: 26),
+            const SizedBox(width: 8),
+            Expanded(child: Text("¡Invita a $clienteNombre!", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16))),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text("Invita a $clienteNombre a acumular sus compras para la tarjeta \"$tituloTarjeta\".", style: const TextStyle(fontSize: 12, color: Colors.grey)),
+            const SizedBox(height: 15),
+            const Text("Número de WhatsApp del cliente:", style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                SizedBox(
+                  width: 65,
+                  child: TextField(
+                    controller: indCtrl,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(prefixText: "+", hintText: "57", border: OutlineInputBorder(), isDense: true),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: TextField(
+                    controller: numCtrl,
+                    keyboardType: TextInputType.phone,
+                    decoration: const InputDecoration(border: OutlineInputBorder(), isDense: true),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("DESPUÉS")),
+          ElevatedButton.icon(
+            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF25D366), foregroundColor: Colors.white),
+            icon: const Icon(Icons.send_rounded, size: 16),
+            label: const Text("ENVIAR WHATSAPP"),
+            onPressed: () async {
+              Navigator.pop(ctx);
+              final prefs = await SharedPreferences.getInstance();
+              String nomNegocio = prefs.getString('nombre_negocio') ?? "Nuestro Negocio";
+              String indClean = indCtrl.text.trim().replaceAll(RegExp(r'\D'), '');
+              if (indClean.isEmpty) indClean = "57";
+              String telClean = numCtrl.text.trim().replaceAll(RegExp(r'\D'), '');
+              String fullNum = "$indClean$telClean";
+              String enlaceUnico = "https://boxi-catalogo.web.app/reclamar?token=$token";
+
+              String mensaje = "¡Hola *$clienteNombre*! 🎁 Felicidades, *$nomNegocio* te obsequió tu primer punto.\n\nPor *$meta* compras obtienes *$premioDesc*.\n\nDescarga la app Boxi y empieza a sumar puntos aquí:\n$enlaceUnico";
+              String urlWa = "https://wa.me/$fullNum?text=${Uri.encodeComponent(mensaje)}";
+              if (await canLaunchUrl(Uri.parse(urlWa))) {
+                await launchUrl(Uri.parse(urlWa), mode: LaunchMode.externalApplication);
+              }
+            },
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _actualizarCantidadDetalle(

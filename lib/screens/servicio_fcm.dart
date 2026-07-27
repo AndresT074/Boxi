@@ -40,7 +40,28 @@ class ServicioFCM {
         String titulo = message.notification?.title ?? '¡Te extrañamos!';
         String cuerpo = message.notification?.body ?? 'Tu negocio te espera 🚀';
         await ServicioNotificaciones.mostrarNotificacionInactividad(titulo, cuerpo);
+      } else if (tipo == 'punto_fidelidad' || tipo == 'fidelidad_vendedor') {
+        String titulo = message.notification?.title ?? message.data['titulo'] ?? '🎁 Punto de Fidelidad';
+        String cuerpo = message.notification?.body ?? message.data['cuerpo'] ?? 'Tienes una actualización de puntos.';
+        await ServicioNotificaciones.mostrarNotificacionInactividad(titulo, cuerpo);
       }
+
+      // 🔥 Captura el toque en la notificación cuando la app estaba en segundo plano o cerrada
+    FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) async {
+      if (message.data['tipo'] == 'punto_fidelidad' && message.data['token'] != null) {
+        String token = message.data['token'];
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('pending_fidelidad_token', token);
+        ServicioNotificaciones.onFidelidadTap?.call(token);
+      }
+    });
+
+    RemoteMessage? initialMessage = await FirebaseMessaging.instance.getInitialMessage();
+    if (initialMessage != null && initialMessage.data['tipo'] == 'punto_fidelidad' && initialMessage.data['token'] != null) {
+      String token = initialMessage.data['token'];
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('pending_fidelidad_token', token);
+    }
     });
   }
 

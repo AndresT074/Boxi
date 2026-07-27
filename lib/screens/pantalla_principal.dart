@@ -22,6 +22,7 @@ import 'pantalla_registrar_pedido.dart';
 import 'pantalla_gestion_pedidos.dart';
 import 'pantalla_vendedores.dart';
 import 'pantalla_clientes.dart';
+import 'pantalla_fidelidad.dart';
 import 'pantalla_presupuestos.dart';
 import 'pantalla_bienvenida.dart';
 import 'pantalla_premium.dart';
@@ -38,6 +39,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'servicio_notificaciones.dart';
 import 'package:flutter/foundation.dart'; 
+import 'package:app_links/app_links.dart';
 
 String optimizarUrlCloudinary(String urlOriginal, {int width = 400}) {
   if (urlOriginal.isEmpty) return urlOriginal;
@@ -75,7 +77,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   int _cantidadSolicitudes = 0;
   bool _primeraCargaSolicitudes = true;
   StreamSubscription? _subSolicitudes;
-  StreamSubscription<DocumentSnapshot>? _subPerfil;
   String _logoPath = "";
   ImageProvider? _logoImageCached; 
   String _nombreNegocio = "MI NEGOCIO";
@@ -108,11 +109,15 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   Offset? _startPos;
   final Set<String> _categoriasEnModoEliminacion = {};
   String _localBoxiPath = ""; 
+  static bool _initialLinkProcesado = false;
+  late final AppLinks _appLinks;
+  StreamSubscription<Uri>? _linkSubscription;
 
   @override
   void initState() {
     super.initState();
     _inicializarTodo(); // 🔥 INICIALIZACIÓN SECUENCIAL SIN CONCURRENCIA
+    _initDeepLinks();
     WidgetsBinding.instance.addObserver(this);
   }
 
@@ -120,34 +125,70 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     try {
       await ServicioNotificaciones.inicializar();
       await _cargarConfig();
-      await _cargar(); // Carga de SQLite instantánea
-      
-      // 🔥 NUEVO: Forzar un respaldo inmediato en RTDB si acabamos de migrar a la versión 17
-      final prefs = await SharedPreferences.getInstance();
-      bool migradoV17 = prefs.getBool('migracion_v17_completada') ?? false;
-      if (!migradoV17) {
-        await ServicioNube.respaldarDatosPrivadosRTDB();
-        await prefs.setBool('migracion_v17_completada', true);
-        debugPrint("⚡ Migración v17 respaldada con éxito en RTDB.");
-      }
-
-      await _intentarSincronizacionNube(); // Sincroniza la nube de forma segura
+      await _cargar();
+      await _intentarSincronizacionNube();
       _escucharSolicitudes();
     } catch (e) {
       debugPrint("Error en inicialización secuencial: $e");
     }
   }
+
+  Future<void> _intentarSincronizacionNube() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    final prefs = await SharedPreferences.getInstance();
+
+    // 1. Sincronización de Nombre de Negocio y Logo Inicial
+    bool nombreYaSincronizado = prefs.getBool('nombre_sincronizado_nube_${user.uid}') ?? false;
+    if (!nombreYaSincronizado && await ServicioNube.tieneInternet()) {
+      try {
+        String nombreLocal = prefs.getString('nombre_negocio') ?? "MI NEGOCIO";
+        String logoLocal = prefs.getString('logo_path') ?? "";
+        
+        await FirebaseFirestore.instance
+            .collection('usuarios')
+            .doc(user.uid)
+            .set({
+              'nombre_negocio': nombreLocal,
+              'logo_path': logoLocal.startsWith('http') ? logoLocal : "",
+            }, SetOptions(merge: true));
+            
+        await prefs.setBool('nombre_sincronizado_nube_${user.uid}', true);
+      } catch (e) {
+        debugPrint("Error sincronizando nombre inicial: $e");
+      }
+    }
+
+    // 2. Actualizar Token FCM para Notificaciones Push
+    try {
+      String? fcmToken = await FirebaseMessaging.instance.getToken();
+      if (fcmToken != null) {
+        await FirebaseFirestore.instance
+            .collection('usuarios').doc(user.uid)
+            .set({'fcm_token': fcmToken}, SetOptions(merge: true));
+      }
+    } catch (e) { debugPrint("Error FCM: $e"); }
+
+    // 3. Verificación de cambios ligeros en Realtime DB
+    await _sincronizarSoloSiHayCambios();
+  }
   
   @override
   void dispose() {
-    _nombreController.dispose();
+    _linkSubscription?.cancel();
+    // 🔥 Cancelar todos los timers primero para que no intenten mover los ScrollControllers
     _timerReorden?.cancel();
-    _subSolicitudes?.cancel();
-    _subPerfil?.cancel();
-    _searchCtrl.dispose();
-    _mainScroll.dispose();
     _autoScrollTimer?.cancel();
     _dragTimer?.cancel();
+    
+    // 🔥 Limpiar variables
+    _nombreController.dispose();
+    _searchCtrl.dispose();
+    
+    // 🔥 Desechar los controladores de scroll de forma segura
+    if (_mainScroll.hasClients) _mainScroll.jumpTo(0);
+    _mainScroll.dispose();
+
     for (var ctrl in _cantControllers.values) {
       ctrl.dispose();
     }
@@ -369,6 +410,109 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
           onError: (e) =>
               debugPrint("Error suscripción solicitudes web: $e"),
         );
+  }
+
+  Future<void> _initDeepLinks() async {
+    try {
+      _appLinks = AppLinks();
+
+      // 🔥 SOLO lee el enlace inicial la primera vez que se abre la app
+      if (!_initialLinkProcesado) {
+        _initialLinkProcesado = true;
+        final Uri? initialUri = await _appLinks.getInitialLink();
+        if (initialUri != null) _procesarUriFidelidad(initialUri);
+      }
+
+      // Escuchar nuevos enlaces si la app ya está abierta
+      _linkSubscription = _appLinks.uriLinkStream.listen((Uri uri) {
+        _procesarUriFidelidad(uri);
+      }, onError: (err) {
+        debugPrint("Error escuchando deep link: $err");
+      });
+    } catch (e) {
+      debugPrint("Error inicializando app_links: $e");
+    }
+  }
+
+  void _procesarUriFidelidad(Uri uri) async {
+    String? token = uri.queryParameters['token'];
+    
+    if (token == null || token.isEmpty) {
+      String uriStr = uri.toString();
+      if (uriStr.contains("token=")) {
+        token = uriStr.split("token=").last.split("&").first;
+      }
+    }
+
+    if (token != null && token.isNotEmpty) {
+      token = token.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_]'), '');
+
+      final user = FirebaseAuth.instance.currentUser;
+      final prefs = await SharedPreferences.getInstance();
+
+      // 🔥 PERMITIR QUE EL VENDEDOR TAMBIÉN PUEDA RECLAMAR (Para clientes de iPhone)
+      await prefs.setString('pending_fidelidad_token', token);
+      debugPrint("🎁 Token guardado limpio: $token");
+      if (mounted) {
+        setState(() {}); // Muestra el banner morado
+      }
+    }
+  }
+
+  Widget _buildBannerFidelidadPendiente() {
+    return FutureBuilder<String?>(
+      key: const ValueKey('future_fidelidad_banner'),
+      future: SharedPreferences.getInstance().then((p) => p.getString('pending_fidelidad_token')),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData || snapshot.data == null || snapshot.data!.isEmpty) {
+          return const SizedBox.shrink(); 
+        }
+
+        String token = snapshot.data!;
+
+        return Container(
+          key: const ValueKey('banner_fidelidad'),
+          margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(colors: [Colors.purpleAccent, Color(0xFF0D47A1)]),
+            borderRadius: BorderRadius.circular(20),
+            boxShadow: [BoxShadow(color: Colors.purple.withOpacity(0.3), blurRadius: 10, offset: const Offset(0, 4))],
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.card_giftcard_rounded, color: Colors.white, size: 28),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text("¡Tienes un punto de fidelidad!", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13)),
+                    Text("Toca para reclamarlo en tu tarjeta.", style: TextStyle(color: Colors.white70, fontSize: 11)),
+                  ],
+                ),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.cyanAccent, foregroundColor: Colors.black),
+                onPressed: () async {
+                  final prefs = await SharedPreferences.getInstance();
+                  await prefs.remove('pending_fidelidad_token'); // 🔥 BORRADO INMEDIATO
+                  if (mounted) setState(() {}); // Oculta el banner de inmediato
+
+                  if (context.mounted) {
+                    await Navigator.push(
+                      context, 
+                      MaterialPageRoute(builder: (_) => PantallaFidelidad(tokenParaReclamarDirecto: token))
+                    );
+                  }
+                },
+                child: const Text("RECLAMAR", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11)),
+              )
+            ],
+          ),
+        );
+      },
+    );
   }
 
   Future<void> _sincronizarSoloSiHayCambios() async {
@@ -1466,87 +1610,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     }
   }
 
-  Future<void> _intentarSincronizacionNube() async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
-    final prefs = await SharedPreferences.getInstance();
-    bool nombreYaSincronizado = prefs.getBool('nombre_sincronizado_nube_${user.uid}') ?? false;
-    if (!nombreYaSincronizado && await ServicioNube.tieneInternet()) {
-      try {
-        String nombreLocal = prefs.getString('nombre_negocio') ?? "MI NEGOCIO";
-        String logoLocal = prefs.getString('logo_path') ?? "";
-        
-        await FirebaseFirestore.instance
-            .collection('usuarios')
-            .doc(user.uid)
-            .set({
-              'nombre_negocio': nombreLocal,
-              'logo_path': logoLocal.startsWith('http') ? logoLocal : "",
-            }, SetOptions(merge: true));
-            
-        await prefs.setBool('nombre_sincronizado_nube_${user.uid}', true);
-        debugPrint("☁️ Nombre de negocio sincronizado automáticamente en Firebase.");
-      } catch (e) {
-        debugPrint("Error sincronizando nombre inicial: $e");
-      }
-    }
-
-    // Resto del código existente de _intentarSincronizacionNube()...
-    String? ultimoUid = prefs.getString('ultimo_uid_registrado');
-    if (ultimoUid != null && ultimoUid != user.uid) {
-      await DBHelper.instance.limpiarTablas();
-      await prefs.remove('datos_descargados');
-      await prefs.remove('primera_carga_completada_$ultimoUid');
-    }
-    await prefs.setString('ultimo_uid_registrado', user.uid);
-    await prefs.setString('user_uid', user.uid);
-
-    try {
-      String? fcmToken = await FirebaseMessaging.instance.getToken();
-      if (fcmToken != null) {
-        await FirebaseFirestore.instance
-            .collection('usuarios').doc(user.uid)
-            .set({'fcm_token': fcmToken}, SetOptions(merge: true));
-      }
-    } catch (e) { debugPrint("Error FCM: $e"); }
-
-    try {
-      final userDoc = await FirebaseFirestore.instance
-          .collection('usuarios').doc(user.uid).get();
-      bool esPremiumNube = userDoc.exists ? (userDoc.data()?['es_premium'] ?? false) : false;
-      await prefs.setBool('es_premium', esPremiumNube);
-      if (mounted) setState(() => _esPremium = esPremiumNube);
-    } catch (e) { debugPrint("Error leyendo premium: $e"); }
-    bool yaDescargoTodo = prefs.getBool("descarga_completa_${user.uid}") ?? false;
-    
-    if (_esPremium && !yaDescargoTodo && await ServicioNube.tieneInternet()) {
-      try {
-        await ServicioNube.descargarTodoDesdeNube();
-        await prefs.setBool('migracion_definitiva_completa_v6', false);
-        ServicioNube.migrarVariantesAlJSONyCarpetas();
-        await ServicioNube.limpiarFantasmasNubeYLocal(user.uid); 
-        await prefs.setBool("descarga_completa_${user.uid}", true);
-        await prefs.setBool("primera_carga_completada_${user.uid}", true);
-        
-        final userDoc = await FirebaseFirestore.instance.collection('usuarios').doc(user.uid).get();
-        if (userDoc.exists) {
-          final data = userDoc.data() as Map<String, dynamic>;
-          final modProd = (data['ultima_mod_productos'] as Timestamp?)?.microsecondsSinceEpoch.toString();
-          final modPed = (data['ultima_mod_pedidos'] as Timestamp?)?.microsecondsSinceEpoch.toString();
-          final modCat = (data['ultima_mod_categorias'] as Timestamp?)?.microsecondsSinceEpoch.toString();
-          if (modProd != null) await prefs.setString('ultima_mod_productos_local_${user.uid}', modProd);
-          if (modPed != null) await prefs.setString('ultima_mod_pedidos_local_${user.uid}', modPed);
-          if (modCat != null) await prefs.setString('ultima_mod_categorias_local_${user.uid}', modCat);
-        }
-        await _cargar();
-      } catch (e) {
-        debugPrint("Error forzando descarga inicial en Principal: $e");
-      }
-    } else {
-      _sincronizarSoloSiHayCambios();
-    }
-  }
-
   void _aplicarFiltro() {
     setState(() {
       if (_estaBuscando && _searchCtrl.text.isNotEmpty) {
@@ -1683,8 +1746,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF1A1A1A),
-        title: const Text("¿Cerrar Sesión?",
-            style: TextStyle(color: Colors.white)),
+        title: const Text("¿Cerrar Sesión?", style: TextStyle(color: Colors.white)),
         content: Text(
             _esPremium
                 ? "Tu sesión se cerrará, pero tus datos quedarán guardados en este celular para un acceso rápido."
@@ -1697,78 +1759,86 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
             onPressed: () async {
-              // 🔥 1. CAPTURAR EL UID ANTES DE QUE PASE A NULL
-              final user = FirebaseAuth.instance.currentUser;
-              final String? uid = user?.uid; 
+              // 1. Cierra el diálogo de confirmación de inmediato
+              Navigator.pop(ctx);
 
-              // 🔥 2. LIBERAR MEMORIA RAM Y BLOQUEOS DE ARCHIVOS
-              PaintingBinding.instance.imageCache.clear();
-              PaintingBinding.instance.imageCache.clearLiveImages();
+              if (!mounted) return;
 
-              // 🔥 3. CERRAR SESIÓN EN FIREBASE
-              await ServicioAuth.cerrarSesion();
+              // 2. Muestra un indicador de carga limpio mientras destruye datos
+              showDialog(
+                context: context,
+                barrierDismissible: false,
+                builder: (_) => const PopScope(
+                  canPop: false,
+                  child: Center(
+                    child: CircularProgressIndicator(color: Colors.redAccent),
+                  ),
+                ),
+              );
 
-              // 🔥 4. ESPERA DE SEGURIDAD (500ms)
-              await Future.delayed(const Duration(milliseconds: 500));
-
-              final prefs = await SharedPreferences.getInstance();
-
-              // 🔥 5. BORRAR BANDERAS DE USUARIO CON LA VARIABLE "uid" CAPTURADA AL INICIO
-              if (uid != null) {
-                await prefs.remove("descarga_completa_$uid");
-                await prefs.remove("primera_carga_completada_$uid");
-                await prefs.remove('ultima_mod_productos_local_$uid');
-                await prefs.remove('ultima_mod_pedidos_local_$uid');
-                await prefs.remove('ultima_mod_categorias_local_$uid');
-              }
-              
-              await prefs.remove('admin_password');
-              await prefs.remove('admin_pregunta');
-              await prefs.remove('admin_respuesta');
-              await prefs.remove('admin_biometria_activa');
-              await prefs.remove('migracion_definitiva_completa_v6');
-              await prefs.remove('datos_descargados');
-              PantallaBienvenida.resetearPrimeraCarga();
-
-              // 🔥 6. LIMPIEZA DE TABLAS LOCALES
               try {
-                await DBHelper.instance.limpiarTablas();
-              } catch (e) {
-                debugPrint("Error limpiando BD local: $e");
-              }
+                final user = FirebaseAuth.instance.currentUser;
+                final String? uid = user?.uid;
 
-              // 🔥 7. DESTRUCCIÓN ABSOLUTA DE LAS CARPETAS
-              try {
-                String pathBoxi = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
-                
-                Future<void> aniquilarCarpeta(Directory dir) async {
-                  if (!await dir.exists()) return;
-                  try {
-                    final List<FileSystemEntity> entidades = dir.listSync(recursive: true);
-                    for (FileSystemEntity entity in entidades) {
-                      if (entity is File) {
-                        try {
-                          await entity.delete();
-                        } catch (_) {}
-                      }
-                    }
-                    try { await dir.delete(recursive: true); } catch (_) {}
-                  } catch (_) {}
+                PaintingBinding.instance.imageCache.clear();
+                PaintingBinding.instance.imageCache.clearLiveImages();
+
+                await ServicioAuth.cerrarSesion();
+                await Future.delayed(const Duration(milliseconds: 300));
+
+                final prefs = await SharedPreferences.getInstance();
+
+                if (uid != null) {
+                  await prefs.remove("descarga_completa_$uid");
+                  await prefs.remove("primera_carga_completada_$uid");
+                  await prefs.remove('ultima_mod_productos_local_$uid');
+                  await prefs.remove('ultima_mod_pedidos_local_$uid');
+                  await prefs.remove('ultima_mod_categorias_local_$uid');
+                }
+                await prefs.remove('pending_fidelidad_token');
+                await prefs.remove('admin_password');
+                await prefs.remove('admin_pregunta');
+                await prefs.remove('admin_respuesta');
+                await prefs.remove('admin_biometria_activa');
+                await prefs.remove('migracion_definitiva_completa_v6');
+                await prefs.remove('datos_descargados');
+                PantallaBienvenida.resetearPrimeraCarga();
+
+                try {
+                  await DBHelper.instance.limpiarTablas();
+                } catch (e) {
+                  debugPrint("Error limpiando BD local: $e");
                 }
 
-                await aniquilarCarpeta(Directory(pathBoxi));
-                await aniquilarCarpeta(Directory('/storage/emulated/0/Pictures/Boxi'));
-                
-                final appDir = await getApplicationDocumentsDirectory();
-                await aniquilarCarpeta(Directory('${appDir.path}/Boxi'));
-                
-                debugPrint("🗑️ Carpetas Boxi vaciadas y eliminadas en cero absoluto.");
+                try {
+                  String pathBoxi = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
+                  
+                  Future<void> aniquilarCarpeta(Directory dir) async {
+                    if (!await dir.exists()) return;
+                    try {
+                      final List<FileSystemEntity> entidades = dir.listSync(recursive: true);
+                      for (FileSystemEntity entity in entidades) {
+                        if (entity is File) {
+                          try { await entity.delete(); } catch (_) {}
+                        }
+                      }
+                      try { await dir.delete(recursive: true); } catch (_) {}
+                    } catch (_) {}
+                  }
+
+                  await aniquilarCarpeta(Directory(pathBoxi));
+                  await aniquilarCarpeta(Directory('/storage/emulated/0/Pictures/Boxi'));
+                  
+                  final appDir = await getApplicationDocumentsDirectory();
+                  await aniquilarCarpeta(Directory('${appDir.path}/Boxi'));
+                } catch (e) {
+                  debugPrint("Error eliminando carpetas: $e");
+                }
               } catch (e) {
-                debugPrint("Error eliminando carpetas: $e");
+                debugPrint("Error al cerrar sesión: $e");
               }
 
-              Navigator.pop(ctx);
-              
+              // 3. Reinicia la Pantalla de Bienvenida de forma limpia y sin crasheos
               if (mounted) {
                 Navigator.pushAndRemoveUntil(
                   context,
@@ -1777,8 +1847,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                 );
               }
             },
-            child: const Text("SÍ, SALIR",
-                style: TextStyle(color: Colors.white)),
+            child: const Text("SÍ, SALIR", style: TextStyle(color: Colors.white)),
           ),
         ],
       ),
@@ -3526,6 +3595,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                 _tile(Icons.inventory, 'Inventario', const PantallaInventario(), badgeCount: _badgeInventario, badgeColor: Colors.red),
                 _tile(Icons.people, 'Vendedores', const PantallaVendedores()),
                 _tile(Icons.person_search, 'Clientes', const PantallaClientes()),
+                _tile(Icons.card_giftcard_rounded, 'Premios Fidelidad', const PantallaFidelidad()),
                 _tile(Icons.receipt_long, 'Gestión Pedidos', const PantallaGestionPedidos(), badgeCount: _badgePedidos, badgeColor: Colors.blue),
                 _tile(Icons.bar_chart, 'Finanzas y Estadisticas', const PantallaPresupuestos()),             
                 ValueListenableBuilder<ThemeMode>(
@@ -4136,548 +4206,469 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   Widget _construirVistaProductos(int columnas, bool esHorizontal) {
     final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
 
-    if (productos.isEmpty) {
-      return Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(25.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.inventory_2_rounded, size: 75, color: isOscuro ? Colors.white24 : Colors.blueGrey.withOpacity(0.3)),
-              const SizedBox(height: 20),
-              Text("¡Hola! Empieza a crear tus productos desde la sección de inventario", textAlign: TextAlign.center, style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: isOscuro ? Colors.white70 : Colors.black54)),
-              const SizedBox(height: 20),
-              ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(backgroundColor: isOscuro ? Colors.cyanAccent.shade700 : const Color(0xFF0D47A1), foregroundColor: isOscuro ? Colors.black : Colors.white, padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 14)),
-                onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PantallaInventario())).then((_) => _cargar()),
-                icon: const Icon(Icons.add_shopping_cart_rounded), label: const Text("IR A INVENTARIO", style: TextStyle(fontWeight: FontWeight.w900)),
-              ),
-              const SizedBox(height: 25),
-              // 🔥 AHORA SÍ: Carga el anuncio real de AdMob cuando la lista de productos esté vacía
-              if (!_esPremium && widget.esAdmin)
-                const AnuncioNativoWidget(key: ValueKey('admob_native_empty_key')),
-            ],
-          ),
-        ),
-      );
-    }
-    if (filtrados.isEmpty) return const Center(child: Text('Sin productos'));
-    Map<String, List<Map<String, dynamic>>> grupos = {'_sin_categoria': []};
-    for (var cat in categorias) grupos[cat['nombre']] = [];
-    
-    for (var p in filtrados) {
-      String? cat = p['categoria'];
-      if (cat != null && grupos.containsKey(cat)) grupos[cat]!.add(p);
-      else grupos['_sin_categoria']!.add(p);
-    }
-
-    Widget construirTarjeta(BuildContext context, Map<String, dynamic> p) {
-      bool select = carrito.any((item) => item['id'] == p['id']);
-      double precioOriginal = (p['precio_venta'] as num).toDouble();
-      double desc = (p['descuento'] ?? 0).toDouble();
-      double precioFinal = precioOriginal - (precioOriginal * (desc / 100));
-      
-      // Modo remover activo para este bloque de categoría
-      bool modoSacarActivo = p['categoria'] != null && _categoriasEnModoEliminacion.contains(p['categoria']);
-
-      return Card(
-        key: ValueKey(p['id']),
-        elevation: select ? 8 : 2,
-        clipBehavior: Clip.antiAlias,
-        color: Theme.of(context).cardColor,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: select ? (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)) : Colors.transparent, width: 1.5)),
-        child: Stack(
-          children: [
-            InkWell(
-              onTap: () {
-                List<dynamic> gruposVariantes = [];
-                if (p['variantes'] != null && p['variantes'].toString().length > 5) {
-                  try {
-                    var dec = jsonDecode(p['variantes']);
-                    if (dec.isNotEmpty && !dec[0].containsKey('grupo')) gruposVariantes = [{'grupo': 'Opciones', 'opciones': dec}];
-                    else gruposVariantes = dec;
-                  } catch (e) {}
-                }
-                if (gruposVariantes.isNotEmpty) {
-                  showModalBottomSheet(context: context, isScrollControlled: true, backgroundColor: Colors.transparent, builder: (_) => _DialogoVariantes(
-                      producto: p, gruposVariantes: gruposVariantes,
-                      onAceptar: (cantidades) { cantidades.forEach((key, qty) { if (qty > 0) {
-                          List<String> partes = key.split('_'); int gIdx = int.parse(partes[0]); int oIdx = int.parse(partes[1]);
-                          var o = gruposVariantes[gIdx]['opciones'][oIdx];
-                          _actualizarCarrito(p, qty, cartId: "${p['id']}_$key", variantData: {'nombre': "${p['nombre']} - ${o['nombre']}", 'es_variante': true, 'g_index': gIdx, 'o_index': oIdx, 'stock_real': o['stock']});
-                      }});}));
-                } else _actualizarCarrito(p, 1, cartId: p['id'].toString());
-              },
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch, 
-                children: [
-                  Expanded(child: _construirFotoConEtiqueta(p, columnas)), 
-                  Padding(padding: const EdgeInsets.all(4.0), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                      Text(p['nombre'], style: TextStyle(fontWeight: FontWeight.bold, fontSize: columnas >= 5 ? 9 : 12), maxLines: 3, overflow: TextOverflow.ellipsis),
-                      if (desc > 0) Text('\$$precioOriginal', style: TextStyle(color: isOscuro ? Colors.redAccent.shade100 : Colors.red, fontSize: 10, decoration: TextDecoration.lineThrough)),
-                      Text('\$${precioFinal.toStringAsFixed(0)}', style: TextStyle(color: desc > 0 ? (isOscuro ? Colors.greenAccent : Colors.green) : (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)), fontWeight: FontWeight.bold, fontSize: columnas >= 5 ? 9 : 13)),
-                  ])),
-                ],
-              ),
-            ),
-            
-            Positioned(
-              top: 5, right: 5,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  // 🔥 Si el modo "sacar" está activo para esta categoría, se dibuja la "X"
-                  if (widget.esAdmin && modoSacarActivo)
-                    InkWell(
-                      onTap: () => _confirmarSacarDeCategoria(p),
-                      child: Container(
-                        margin: const EdgeInsets.only(right: 5),
-                        padding: const EdgeInsets.all(6),
-                        decoration: const BoxDecoration(color: Colors.redAccent, shape: BoxShape.circle),
-                        child: const Icon(Icons.close_rounded, color: Colors.white, size: 16),
+    // 🔥 El cartel morado se renderiza siempre arriba, exista o no inventario
+    return Column(
+      children: [
+        _buildBannerFidelidadPendiente(),
+        Expanded(
+          child: () {
+            if (productos.isEmpty) {
+              return Center(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.all(25.0),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.inventory_2_rounded, size: 75, color: isOscuro ? Colors.white24 : Colors.blueGrey.withOpacity(0.3)),
+                      const SizedBox(height: 20),
+                      Text("¡Hola! Empieza a crear tus productos desde la sección de inventario", textAlign: TextAlign.center, style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: isOscuro ? Colors.white70 : Colors.black54)),
+                      const SizedBox(height: 20),
+                      ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(backgroundColor: isOscuro ? Colors.cyanAccent.shade700 : const Color(0xFF0D47A1), foregroundColor: isOscuro ? Colors.black : Colors.white, padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 14)),
+                        onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PantallaInventario())).then((_) => _cargar()),
+                        icon: const Icon(Icons.add_shopping_cart_rounded), label: const Text("IR A INVENTARIO", style: TextStyle(fontWeight: FontWeight.w900)),
                       ),
-                    ),
-                  InkWell(
-                    onTap: () => _mostrarDetalleProducto(p),
-                    child: Container(
-                      padding: const EdgeInsets.all(6),
-                      decoration: BoxDecoration(color: Colors.black.withOpacity(0.6), shape: BoxShape.circle),
-                      child: const Icon(Icons.remove_red_eye, color: Colors.white, size: 16),
-                    ),
+                      const SizedBox(height: 25),
+                      if (!_esPremium && widget.esAdmin)
+                        const AnuncioNativoWidget(key: ValueKey('admob_native_empty_key')),
+                    ],
                   ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
-    bool mostrarBanner = widget.esAdmin && _mostrarAvisoReorganizar;
-
-    int offsetTopItems = 0;
-    if (mostrarBanner) offsetTopItems++;
-    if (widget.esAdmin) offsetTopItems++;
-
-    return Listener(
-      onPointerDown: (e) {
-        _startPos = e.position;
-        _dragTimer = Timer(const Duration(milliseconds: 350), () => _isDragging = true);
-      },
-      onPointerMove: (e) {
-        if (!_isDragging && _startPos != null) {
-          if ((e.position - _startPos!).distance > 15) _dragTimer?.cancel();
-        }
-        if (_isDragging) {
-          double y = e.position.dy;
-          double h = MediaQuery.of(context).size.height;
-          double edge = 150.0;
-          
-          if (y < edge) { // Scroll Hacia Arriba
-            if (_autoScrollTimer == null || !_autoScrollTimer!.isActive) {
-              _autoScrollTimer = Timer.periodic(const Duration(milliseconds: 20), (_) {
-                if (_mainScroll.hasClients) {
-                  _mainScroll.jumpTo((_mainScroll.offset - 10).clamp(0.0, _mainScroll.position.maxScrollExtent));
-                }
-              });
-            }
-          } else if (y > h - edge) { // Scroll Hacia Abajo
-            if (_autoScrollTimer == null || !_autoScrollTimer!.isActive) {
-              _autoScrollTimer = Timer.periodic(const Duration(milliseconds: 20), (_) {
-                if (_mainScroll.hasClients) {
-                  _mainScroll.jumpTo((_mainScroll.offset + 10).clamp(0.0, _mainScroll.position.maxScrollExtent));
-                }
-              });
-            }
-          } else {
-            _autoScrollTimer?.cancel();
-          }
-        }
-      },
-      onPointerUp: (e) => _detenerArrastreGlobal(),
-      onPointerCancel: (e) => _detenerArrastreGlobal(),
-      child: ReorderableListView(
-        scrollController: _mainScroll,
-        physics: const BouncingScrollPhysics(),
-        buildDefaultDragHandles: false,
-        proxyDecorator: (Widget child, int index, Animation<double> animation) {
-          return AnimatedBuilder(
-            animation: animation,
-            builder: (BuildContext context, Widget? childWidget) {
-              final double animValue = Curves.easeInOut.transform(animation.value);
-              final double elevation = ui.lerpDouble(0, 8, animValue)!;
-              return Material(
-                elevation: elevation,
-                color: Colors.transparent,
-                shadowColor: Colors.black.withOpacity(0.35),
-                child: childWidget ?? child,
+                ),
               );
-            },
-            child: child,
-          );
-        },
-        // 🔥 1. LA FOTO FANTASMA YA SE TOMÓ PEQUEÑA. AHORA CONTRAEMOS EL RESTO.
-        onReorderStart: (int index) {
-          setState(() {
-            for (var c in categorias) {
-              categoriasExpandidas[c['nombre']] = false;
             }
-          });
-        },
-        // 🔥 2. SI CANCELAS O SUELTAS EN EL MISMO LUGAR, RESTAURA TODO
-        onReorderEnd: (int index) {
-          setState(() {
-            categoriasExpandidas = Map<String, bool>.from(_categoriasExpandidasBackup);
-          });
-        },
-        // 🔥 3. SI LA CAMBIAS DE POSICIÓN, GUARDA Y RESTAURA TODO
-        onReorder: (oldIndex, newIndex) {
-          if (oldIndex < offsetTopItems || newIndex < offsetTopItems) return;
-          if (oldIndex >= offsetTopItems + categorias.length) return;
-          
-          if (newIndex > oldIndex) newIndex -= 1;
+            if (filtrados.isEmpty) return const Center(child: Text('Sin productos'));
 
-          int oldCatIdx = oldIndex - offsetTopItems;
-          int newCatIdx = newIndex - offsetTopItems;
-
-          if (newCatIdx >= categorias.length) newCatIdx = categorias.length - 1;
-
-          setState(() {
-            final cat = categorias.removeAt(oldCatIdx);
-            categorias.insert(newCatIdx, cat);
-            categoriasExpandidas = Map<String, bool>.from(_categoriasExpandidasBackup);
-          });
-          _guardarOrdenCategorias();
-        },
-        children: [
-          if (mostrarBanner)
-            Container(
-              key: const ValueKey('banner_info'),
-              width: double.infinity, padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 10),
-              color: isOscuro ? Colors.white.withOpacity(0.05) : Colors.blueGrey.shade50,
-              child: Row(
-                children: [
-                  const Icon(Icons.touch_app, size: 14, color: Colors.blueGrey), const SizedBox(width: 8),
-                  const Expanded(child: Text("Mantén presionado para reordenar productos", style: TextStyle(fontSize: 11, color: Colors.blueGrey))),
-                  InkWell(onTap: () => setState(() => _mostrarAvisoReorganizar = false), child: const Icon(Icons.close, size: 16, color: Colors.grey))
-                ],
-              ),
-            ),
-
-          if (widget.esAdmin)
-            Padding(
-              key: const ValueKey('btn_crear_cat'),
-              padding: const EdgeInsets.fromLTRB(10, 10, 10, 0),
-              child: ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(backgroundColor: isOscuro ? Colors.white10 : Colors.blue.shade50, foregroundColor: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1), elevation: 0, side: BorderSide(color: isOscuro ? Colors.white24 : Colors.blue.shade200)),
-                onPressed: () => _mostrarModalCrearCategoria(),
-                icon: const Icon(Icons.create_new_folder), label: const Text("Crear Nueva Categoría", style: TextStyle(fontWeight: FontWeight.bold)),
-              ),
-            ),
-
-          // 1. BLOQUES DE CATEGORÍAS
-          ...categorias.asMap().entries.map((entry) {
-            int idx = entry.key;
-            var cat = entry.value;
-            String nombre = cat['nombre'];
-            bool isExpanded = categoriasExpandidas[nombre] ?? true;
-            bool isActivo = cat['activo'] == 1;
+            Map<String, List<Map<String, dynamic>>> grupos = {'_sin_categoria': []};
+            for (var cat in categorias) grupos[cat['nombre']] = [];
             
-            // Calculo hiper-preciso del índice para que no se desfase en el ReorderableListView
-            int globalIndex = offsetTopItems + idx;
-            bool removalMode = _categoriasEnModoEliminacion.contains(nombre);
+            for (var p in filtrados) {
+              String? cat = p['categoria'];
+              if (cat != null && grupos.containsKey(cat)) grupos[cat]!.add(p);
+              else grupos['_sin_categoria']!.add(p);
+            }
 
-            if (!widget.esAdmin && !isActivo) return SizedBox.shrink(key: ValueKey('cat_hide_${cat['id']}'));
+            Widget construirTarjeta(BuildContext context, Map<String, dynamic> p) {
+              bool select = carrito.any((item) => item['id'] == p['id']);
+              double precioOriginal = (p['precio_venta'] as num).toDouble();
+              double desc = (p['descuento'] ?? 0).toDouble();
+              double precioFinal = precioOriginal - (precioOriginal * (desc / 100));
+              bool modoSacarActivo = p['categoria'] != null && _categoriasEnModoEliminacion.contains(p['categoria']);
 
-            return Container(
-              key: ValueKey('cat_${cat['id']}'),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // 🔥 BANNER DE CATEGORÍA ULTRA COMPACTO (Tocar el cuadro completo para contraer/expandir)
-                  GestureDetector(
-                    onTap: () {
-                      setState(() {
-                        categoriasExpandidas[nombre] = !isExpanded;
-                      });
-                    },
-                    child: Container(
-                      margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                      decoration: BoxDecoration(
-                        color: isOscuro ? const Color.fromARGB(255, 33, 40, 63) : const Color.fromARGB(84, 168, 209, 251), 
-                        borderRadius: BorderRadius.circular(16),
-                        boxShadow: [
-                          if (!isOscuro) 
-                            BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 8, offset: const Offset(0, 3))
+              return Card(
+                key: ValueKey(p['id']),
+                elevation: select ? 8 : 2,
+                clipBehavior: Clip.antiAlias,
+                color: Theme.of(context).cardColor,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: select ? (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)) : Colors.transparent, width: 1.5)),
+                child: Stack(
+                  children: [
+                    InkWell(
+                      onTap: () {
+                        List<dynamic> gruposVariantes = [];
+                        if (p['variantes'] != null && p['variantes'].toString().length > 5) {
+                          try {
+                            var dec = jsonDecode(p['variantes']);
+                            if (dec.isNotEmpty && !dec[0].containsKey('grupo')) gruposVariantes = [{'grupo': 'Opciones', 'opciones': dec}];
+                            else gruposVariantes = dec;
+                          } catch (e) {}
+                        }
+                        if (gruposVariantes.isNotEmpty) {
+                          showModalBottomSheet(context: context, isScrollControlled: true, backgroundColor: Colors.transparent, builder: (_) => _DialogoVariantes(
+                              producto: p, gruposVariantes: gruposVariantes,
+                              onAceptar: (cantidades) { cantidades.forEach((key, qty) { if (qty > 0) {
+                                  List<String> partes = key.split('_'); int gIdx = int.parse(partes[0]); int oIdx = int.parse(partes[1]);
+                                  var o = gruposVariantes[gIdx]['opciones'][oIdx];
+                                  _actualizarCarrito(p, qty, cartId: "${p['id']}_$key", variantData: {'nombre': "${p['nombre']} - ${o['nombre']}", 'es_variante': true, 'g_index': gIdx, 'o_index': oIdx, 'stock_real': o['stock']});
+                              }});}));
+                        } else _actualizarCarrito(p, 1, cartId: p['id'].toString());
+                      },
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch, 
+                        children: [
+                          Expanded(child: _construirFotoConEtiqueta(p, columnas)), 
+                          Padding(padding: const EdgeInsets.all(4.0), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                              Text(p['nombre'], style: TextStyle(fontWeight: FontWeight.bold, fontSize: columnas >= 5 ? 9 : 12), maxLines: 3, overflow: TextOverflow.ellipsis),
+                              if (desc > 0) Text('\$$precioOriginal', style: TextStyle(color: isOscuro ? Colors.redAccent.shade100 : Colors.red, fontSize: 10, decoration: TextDecoration.lineThrough)),
+                              Text('\$${precioFinal.toStringAsFixed(0)}', style: TextStyle(color: desc > 0 ? (isOscuro ? Colors.greenAccent : Colors.green) : (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)), fontWeight: FontWeight.bold, fontSize: columnas >= 5 ? 9 : 13)),
+                          ])),
                         ],
-                        border: Border.all(color: isOscuro ? const Color.fromARGB(213, 49, 162, 227) : const Color.fromARGB(255, 103, 153, 234)), 
                       ),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-                        child: Row(
-                          children: [
-                            Icon(isExpanded ? Icons.folder_open_rounded : Icons.folder_rounded, color: isActivo ? (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)) : Colors.grey, size: 26),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                nombre, 
-                                style: TextStyle(fontWeight: FontWeight.w900, fontSize: 15, color: isActivo ? (isOscuro ? Colors.white : Colors.black87) : Colors.grey),
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
+                    ),
+                    Positioned(
+                      top: 5, right: 5,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (widget.esAdmin && modoSacarActivo)
+                            InkWell(
+                              onTap: () => _confirmarSacarDeCategoria(p),
+                              child: Container(
+                                margin: const EdgeInsets.only(right: 5),
+                                padding: const EdgeInsets.all(6),
+                                decoration: const BoxDecoration(color: Colors.redAccent, shape: BoxShape.circle),
+                                child: const Icon(Icons.close_rounded, color: Colors.white, size: 16),
                               ),
                             ),
-                            const SizedBox(width: 4),
-                            Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                if (widget.esAdmin) ...[
-                                  // Switch empaquetado
-                                  SizedBox(
-                                    height: 24,
-                                    width: 38,
-                                    child: Transform.scale(
-                                      scale: 0.7,
-                                      child: Switch(
-                                        value: isActivo, 
-                                        activeColor: Colors.green, 
-                                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap, 
-                                        onChanged: (v) => _cambiarEstadoCategoria(cat['id'], v)
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 6),
-                                  
-                                  // Menú empaquetado
-                                  SizedBox(
-                                    width: 24,
-                                    child: PopupMenuButton<String>(
-                                      icon: const Icon(Icons.more_vert, color: Colors.grey, size: 22),
-                                      padding: EdgeInsets.zero,
-                                      constraints: const BoxConstraints(),
-                                      onSelected: (val) {
-                                        if (val == 'edit') {
-                                          _mostrarModalCrearCategoria(categoriaAEditar: cat);
-                                        } else if (val == 'delete') {
-                                          _confirmarEliminarCategoria(cat['id'], nombre);
-                                        }else if (val == 'share') {
-                                          // 🔥 Llamamos al nuevo selector masivo de la categoría
-                                          _mostrarDialogoCompartirCategoria(nombre, grupos[nombre] ?? []);
-                                        }
-                                      },
-                                      itemBuilder: (ctx) => [
-                                        const PopupMenuItem(value: 'edit', child: Row(children: [Icon(Icons.edit, size: 16, color: Colors.orangeAccent), SizedBox(width: 8), Text("Editar", style: TextStyle(fontSize: 13))])),
-                                        const PopupMenuItem(value: 'delete', child: Row(children: [Icon(Icons.delete_outline, size: 16, color: Colors.redAccent), SizedBox(width: 8), Text("Eliminar", style: TextStyle(fontSize: 13))])),
-                                        const PopupMenuItem(value: 'share', child: Row(children: [Icon(Icons.share, size: 16, color: Colors.blueAccent), SizedBox(width: 8), Text("Compartir", style: TextStyle(fontSize: 13))])),
-                                      ],
-                                    ),
-                                  ),
-                                ],
-                                const SizedBox(width: 4),
-                                if (widget.esAdmin) ...[
-                                  const SizedBox(width: 2),
-                                  // 🔥 Tocar alterna y muestra globo, Mantener presiona contrae y arrastra
-                                  StatefulBuilder(
-                                    builder: (context, setInnerState) {
-                                      Timer? preDragTimer;
-                                      return Listener(
-                                        onPointerDown: (_) {
-                                          // Si el usuario mantiene presionado 250ms, consideramos que va a arrastrar
-                                          // y contraemos la categoría para que el fantasma salga pequeño.
-                                          preDragTimer = Timer(const Duration(milliseconds: 250), () {
-                                            if (mounted) {
-                                              setState(() {
-                                                _categoriasExpandidasBackup = Map<String, bool>.from(categoriasExpandidas);
-                                                categoriasExpandidas[nombre] = false;
-                                              });
-                                            }
-                                          });
-                                        },
-                                        onPointerUp: (_) {
-                                          // Si soltó antes de los 250ms, es un toque normal (un solo tap).
-                                          // Cancelamos el timer y alternamos (contraer/expandir) manualmente una sola vez.
-                                          if (preDragTimer != null && preDragTimer!.isActive) {
-                                            preDragTimer!.cancel();
-                                            setState(() {
-                                              categoriasExpandidas[nombre] = !isExpanded;
-                                            });
-                                          }
-                                        },
-                                        onPointerCancel: (_) {
-                                          // Si el arrastre inicia o se hace scroll, el gesto se cancela
-                                          if (preDragTimer != null && preDragTimer!.isActive) {
-                                            preDragTimer!.cancel();
-                                          }
-                                        },
-                                        child: Tooltip(
-                                          message: "Mantén presionado para arrastrar",
-                                          triggerMode: TooltipTriggerMode.tap, // Muestra el mensaje con 1 toque
-                                          preferBelow: true,
-                                          decoration: BoxDecoration(
-                                            // 🔥 Color que cambia según el tema (Oscuro: Cyan, Claro: Azul Profundo)
-                                            color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1), 
-                                            borderRadius: BorderRadius.circular(8),
-                                            boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(0, 2))],
-                                          ),
-                                          textStyle: TextStyle(
-                                            // 🔥 Letras de alto contraste según el fondo
-                                            color: isOscuro ? Colors.black : Colors.white, 
-                                            fontWeight: FontWeight.w900, 
-                                            fontSize: 12
-                                          ),
-                                          showDuration: const Duration(seconds: 2),
-                                          child: ReorderableDelayedDragStartListener(
-                                            index: globalIndex,
-                                            child: const Padding(
-                                              padding: EdgeInsets.only(left: 4.0, right: 2.0, top: 6.0, bottom: 6.0),
-                                              child: Icon(Icons.swap_vert_rounded, color: Colors.grey, size: 24),
+                          InkWell(
+                            onTap: () => _mostrarDetalleProducto(p),
+                            child: Container(
+                              padding: const EdgeInsets.all(6),
+                              decoration: BoxDecoration(color: Colors.black.withOpacity(0.6), shape: BoxShape.circle),
+                              child: const Icon(Icons.remove_red_eye, color: Colors.white, size: 16),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }
+
+            bool mostrarBanner = widget.esAdmin && _mostrarAvisoReorganizar;
+            int offsetTopItems = 0;
+            if (mostrarBanner) offsetTopItems++;
+            if (widget.esAdmin) offsetTopItems++;
+
+            return Listener(
+              onPointerDown: (e) {
+                _startPos = e.position;
+                _dragTimer = Timer(const Duration(milliseconds: 350), () => _isDragging = true);
+              },
+              onPointerMove: (e) {
+                if (!_isDragging && _startPos != null) {
+                  if ((e.position - _startPos!).distance > 15) _dragTimer?.cancel();
+                }
+                if (_isDragging) {
+                  double y = e.position.dy;
+                  double h = MediaQuery.of(context).size.height;
+                  double edge = 150.0;
+                  
+                  if (y < edge) {
+                    if (_autoScrollTimer == null || !_autoScrollTimer!.isActive) {
+                      _autoScrollTimer = Timer.periodic(const Duration(milliseconds: 20), (_) {
+                        if (_mainScroll.hasClients) {
+                          _mainScroll.jumpTo((_mainScroll.offset - 10).clamp(0.0, _mainScroll.position.maxScrollExtent));
+                        }
+                      });
+                    }
+                  } else if (y > h - edge) {
+                    if (_autoScrollTimer == null || !_autoScrollTimer!.isActive) {
+                      _autoScrollTimer = Timer.periodic(const Duration(milliseconds: 20), (_) {
+                        if (_mainScroll.hasClients) {
+                          _mainScroll.jumpTo((_mainScroll.offset + 10).clamp(0.0, _mainScroll.position.maxScrollExtent));
+                        }
+                      });
+                    }
+                  } else {
+                    _autoScrollTimer?.cancel();
+                  }
+                }
+              },
+              onPointerUp: (e) => _detenerArrastreGlobal(),
+              onPointerCancel: (e) => _detenerArrastreGlobal(),
+              child: ReorderableListView(
+                scrollController: _mainScroll,
+                physics: const BouncingScrollPhysics(),
+                buildDefaultDragHandles: false,
+                proxyDecorator: (Widget child, int index, Animation<double> animation) {
+                  return AnimatedBuilder(
+                    animation: animation,
+                    builder: (BuildContext context, Widget? childWidget) {
+                      final double animValue = Curves.easeInOut.transform(animation.value);
+                      final double elevation = ui.lerpDouble(0, 8, animValue)!;
+                      return Material(
+                        elevation: elevation,
+                        color: Colors.transparent,
+                        shadowColor: Colors.black.withOpacity(0.35),
+                        child: childWidget ?? child,
+                      );
+                    },
+                    child: child,
+                  );
+                },
+                onReorderStart: (int index) {
+                  setState(() {
+                    for (var c in categorias) {
+                      categoriasExpandidas[c['nombre']] = false;
+                    }
+                  });
+                },
+                onReorderEnd: (int index) {
+                  setState(() {
+                    categoriasExpandidas = Map<String, bool>.from(_categoriasExpandidasBackup);
+                  });
+                },
+                onReorder: (oldIndex, newIndex) {
+                  if (oldIndex < offsetTopItems || newIndex < offsetTopItems) return;
+                  if (oldIndex >= offsetTopItems + categorias.length) return;
+                  
+                  if (newIndex > oldIndex) newIndex -= 1;
+
+                  int oldCatIdx = oldIndex - offsetTopItems;
+                  int newCatIdx = newIndex - offsetTopItems;
+
+                  if (newCatIdx >= categorias.length) newCatIdx = categorias.length - 1;
+
+                  setState(() {
+                    final cat = categorias.removeAt(oldCatIdx);
+                    categorias.insert(newCatIdx, cat);
+                    categoriasExpandidas = Map<String, bool>.from(_categoriasExpandidasBackup);
+                  });
+                  _guardarOrdenCategorias();
+                },
+                children: [
+                  if (mostrarBanner)
+                    Container(
+                      key: const ValueKey('banner_info'),
+                      width: double.infinity, padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 10),
+                      color: isOscuro ? Colors.white.withOpacity(0.05) : Colors.blueGrey.shade50,
+                      child: Row(
+                        children: [
+                          const Icon(Icons.touch_app, size: 14, color: Colors.blueGrey), const SizedBox(width: 8),
+                          const Expanded(child: Text("Mantén presionado para reordenar productos", style: TextStyle(fontSize: 11, color: Colors.blueGrey))),
+                          InkWell(onTap: () => setState(() => _mostrarAvisoReorganizar = false), child: const Icon(Icons.close, size: 16, color: Colors.grey))
+                        ],
+                      ),
+                    ),
+
+                  if (widget.esAdmin)
+                    Padding(
+                      key: const ValueKey('btn_crear_cat'),
+                      padding: const EdgeInsets.fromLTRB(10, 10, 10, 0),
+                      child: ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(backgroundColor: isOscuro ? Colors.white10 : Colors.blue.shade50, foregroundColor: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1), elevation: 0, side: BorderSide(color: isOscuro ? Colors.white24 : Colors.blue.shade200)),
+                        onPressed: () => _mostrarModalCrearCategoria(),
+                        icon: const Icon(Icons.create_new_folder), label: const Text("Crear Nueva Categoría", style: TextStyle(fontWeight: FontWeight.bold)),
+                      ),
+                    ),
+
+                  // BLOQUES DE CATEGORÍAS
+                  ...categorias.asMap().entries.map((entry) {
+                    int idx = entry.key;
+                    var cat = entry.value;
+                    String nombre = cat['nombre'];
+                    bool isExpanded = categoriasExpandidas[nombre] ?? true;
+                    bool isActivo = cat['activo'] == 1;
+                    int globalIndex = offsetTopItems + idx;
+                    bool removalMode = _categoriasEnModoEliminacion.contains(nombre);
+
+                    if (!widget.esAdmin && !isActivo) return SizedBox.shrink(key: ValueKey('cat_hide_${cat['id']}'));
+
+                    return Container(
+                      key: ValueKey('cat_${cat['id']}'),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          GestureDetector(
+                            onTap: () => setState(() => categoriasExpandidas[nombre] = !isExpanded),
+                            child: Container(
+                              margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                              decoration: BoxDecoration(
+                                color: isOscuro ? const Color.fromARGB(255, 33, 40, 63) : const Color.fromARGB(84, 168, 209, 251), 
+                                borderRadius: BorderRadius.circular(16),
+                                boxShadow: [if (!isOscuro) BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 8, offset: const Offset(0, 3))],
+                                border: Border.all(color: isOscuro ? const Color.fromARGB(213, 49, 162, 227) : const Color.fromARGB(255, 103, 153, 234)), 
+                              ),
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                                child: Row(
+                                  children: [
+                                    Icon(isExpanded ? Icons.folder_open_rounded : Icons.folder_rounded, color: isActivo ? (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)) : Colors.grey, size: 26),
+                                    const SizedBox(width: 8),
+                                    Expanded(child: Text(nombre, style: TextStyle(fontWeight: FontWeight.w900, fontSize: 15, color: isActivo ? (isOscuro ? Colors.white : Colors.black87) : Colors.grey), maxLines: 2, overflow: TextOverflow.ellipsis)),
+                                    const SizedBox(width: 4),
+                                    Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        if (widget.esAdmin) ...[
+                                          SizedBox(
+                                            height: 24, width: 38,
+                                            child: Transform.scale(
+                                              scale: 0.7,
+                                              child: Switch(value: isActivo, activeColor: Colors.green, materialTapTargetSize: MaterialTapTargetSize.shrinkWrap, onChanged: (v) => _cambiarEstadoCategoria(cat['id'], v)),
                                             ),
                                           ),
+                                          const SizedBox(width: 6),
+                                          SizedBox(
+                                            width: 24,
+                                            child: PopupMenuButton<String>(
+                                              icon: const Icon(Icons.more_vert, color: Colors.grey, size: 22),
+                                              padding: EdgeInsets.zero, constraints: const BoxConstraints(),
+                                              onSelected: (val) {
+                                                if (val == 'edit') _mostrarModalCrearCategoria(categoriaAEditar: cat);
+                                                else if (val == 'delete') _confirmarEliminarCategoria(cat['id'], nombre);
+                                                else if (val == 'share') _mostrarDialogoCompartirCategoria(nombre, grupos[nombre] ?? []);
+                                              },
+                                              itemBuilder: (ctx) => [
+                                                const PopupMenuItem(value: 'edit', child: Row(children: [Icon(Icons.edit, size: 16, color: Colors.orangeAccent), SizedBox(width: 8), Text("Editar", style: TextStyle(fontSize: 13))])),
+                                                const PopupMenuItem(value: 'delete', child: Row(children: [Icon(Icons.delete_outline, size: 16, color: Colors.redAccent), SizedBox(width: 8), Text("Eliminar", style: TextStyle(fontSize: 13))])),
+                                                const PopupMenuItem(value: 'share', child: Row(children: [Icon(Icons.share, size: 16, color: Colors.blueAccent), SizedBox(width: 8), Text("Compartir", style: TextStyle(fontSize: 13))])),
+                                              ],
+                                            ),
+                                          ),
+                                        ],
+                                        const SizedBox(width: 4),
+                                        if (widget.esAdmin) ...[
+                                          const SizedBox(width: 2),
+                                          StatefulBuilder(
+                                            builder: (context, setInnerState) {
+                                              Timer? preDragTimer;
+                                              return Listener(
+                                                onPointerDown: (_) {
+                                                  preDragTimer = Timer(const Duration(milliseconds: 250), () {
+                                                    if (mounted) {
+                                                      setState(() {
+                                                        _categoriasExpandidasBackup = Map<String, bool>.from(categoriasExpandidas);
+                                                        categoriasExpandidas[nombre] = false;
+                                                      });
+                                                    }
+                                                  });
+                                                },
+                                                onPointerUp: (_) {
+                                                  if (preDragTimer != null && preDragTimer!.isActive) {
+                                                    preDragTimer!.cancel();
+                                                    setState(() => categoriasExpandidas[nombre] = !isExpanded);
+                                                  }
+                                                },
+                                                onPointerCancel: (_) {
+                                                  if (preDragTimer != null && preDragTimer!.isActive) preDragTimer!.cancel();
+                                                },
+                                                child: Tooltip(
+                                                  message: "Mantén presionado para arrastrar",
+                                                  triggerMode: TooltipTriggerMode.tap, preferBelow: true,
+                                                  decoration: BoxDecoration(color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1), borderRadius: BorderRadius.circular(8), boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(0, 2))]),
+                                                  textStyle: TextStyle(color: isOscuro ? Colors.black : Colors.white, fontWeight: FontWeight.w900, fontSize: 12),
+                                                  showDuration: const Duration(seconds: 2),
+                                                  child: ReorderableDelayedDragStartListener(
+                                                    index: globalIndex,
+                                                    child: const Padding(padding: EdgeInsets.only(left: 4.0, right: 2.0, top: 6.0, bottom: 6.0), child: Icon(Icons.swap_vert_rounded, color: Colors.grey, size: 24)),
+                                                  ),
+                                                ),
+                                              );
+                                            }
+                                          ),
+                                        ],
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                          if (isExpanded) ...[
+                            if (grupos[nombre]!.isEmpty)
+                              const Padding(padding: EdgeInsets.all(20), child: Center(child: Text("Sin productos", style: TextStyle(color: Colors.grey, fontSize: 12))))
+                            else widget.esAdmin 
+                              ? ReorderableGridView.builder(
+                                  key: PageStorageKey('grid_$nombre'),
+                                  physics: const NeverScrollableScrollPhysics(), shrinkWrap: true, padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: columnas, childAspectRatio: columnas == 1 ? 1.0 : 0.72, crossAxisSpacing: 8, mainAxisSpacing: 8),
+                                  itemCount: grupos[nombre]!.length,
+                                  onReorder: (oldIdx, newIdx) => _onReorderCategoria(grupos[nombre]!, oldIdx, newIdx),
+                                  itemBuilder: (ctx, i) => construirTarjeta(ctx, grupos[nombre]![i]),
+                                )
+                              : GridView.builder(
+                                  physics: const NeverScrollableScrollPhysics(), shrinkWrap: true, padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: columnas, childAspectRatio: columnas == 1 ? 1.0 : 0.72, crossAxisSpacing: 8, mainAxisSpacing: 8),
+                                  itemCount: grupos[nombre]!.length,
+                                  itemBuilder: (ctx, i) => construirTarjeta(ctx, grupos[nombre]![i]),
+                                ),
+                            if (widget.esAdmin)
+                              Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                      child: OutlinedButton.icon(
+                                        style: OutlinedButton.styleFrom(
+                                          foregroundColor: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1),
+                                          side: BorderSide(color: isOscuro ? Colors.white10 : Colors.grey.shade300),
+                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                          padding: const EdgeInsets.symmetric(vertical: 10),
                                         ),
-                                      );
-                                    }
-                                  ),
-                                ],
-                              ],
-                            ),
+                                        onPressed: () => _mostrarDialogoAnadirProductosExistentes(nombre),
+                                        icon: const Icon(Icons.add_circle_outline_rounded, size: 18),
+                                        label: const Text("AÑADIR PRODUCTO", style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: OutlinedButton.icon(
+                                        style: OutlinedButton.styleFrom(
+                                          foregroundColor: removalMode ? Colors.redAccent : Colors.grey,
+                                          side: BorderSide(color: removalMode ? Colors.redAccent.withOpacity(0.5) : Colors.grey.shade300),
+                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                          padding: const EdgeInsets.symmetric(vertical: 10),
+                                        ),
+                                        onPressed: () {
+                                          setState(() {
+                                            if (removalMode) _categoriasEnModoEliminacion.remove(nombre);
+                                            else _categoriasEnModoEliminacion.add(nombre);
+                                          });
+                                        },
+                                        icon: Icon(removalMode ? Icons.cancel_outlined : Icons.remove_circle_outline_rounded, size: 18),
+                                        label: Text(removalMode ? "CANCELAR" : "SACAR PRODUCTO", style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
                           ],
-                        ),
+                          const SizedBox(height: 15),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 14),
+                            child: Divider(height: 1, thickness: 1.5, color: isOscuro ? Colors.white24 : Colors.grey.shade400),
+                          ),
+                          const SizedBox(height: 15),
+                        ],
+                      ),
+                    );
+                  }).toList(),
+                  if (grupos['_sin_categoria']!.isNotEmpty)
+                    Container(
+                      key: const ValueKey('grid_sin_cat'),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                            child: Text("OTROS PRODUCTOS", style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900, letterSpacing: 0.5, color: isOscuro ? Colors.white70 : const Color(0xFF0D47A1))),
+                          ),
+                          widget.esAdmin 
+                            ? ReorderableGridView.builder(
+                                key: const PageStorageKey('rsincat'),
+                                physics: const NeverScrollableScrollPhysics(), shrinkWrap: true, padding: const EdgeInsets.all(10),
+                                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: columnas, childAspectRatio: columnas == 1 ? 1.0 : 0.72, crossAxisSpacing: 8, mainAxisSpacing: 8),
+                                itemCount: grupos['_sin_categoria']!.length,
+                                onReorder: (oldIdx, newIdx) => _onReorderCategoria(grupos['_sin_categoria']!, oldIdx, newIdx),
+                                itemBuilder: (ctx, i) => construirTarjeta(ctx, grupos['_sin_categoria']![i]),
+                              )
+                            : GridView.builder(
+                                physics: const NeverScrollableScrollPhysics(), shrinkWrap: true, padding: const EdgeInsets.all(10),
+                                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: columnas, childAspectRatio: columnas == 1 ? 1.0 : 0.72, crossAxisSpacing: 8, mainAxisSpacing: 8),
+                                itemCount: grupos['_sin_categoria']!.length,
+                                itemBuilder: (ctx, i) => construirTarjeta(ctx, grupos['_sin_categoria']![i]),
+                              ),
+                          const SizedBox(height: 15),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 14),
+                            child: Divider(height: 1, thickness: 1, color: isOscuro ? Colors.white.withOpacity(0.08) : Colors.grey.shade200),
+                          ),
+                          const SizedBox(height: 15),
+                        ],
                       ),
                     ),
-                  ),
-                  if (isExpanded) ...[
-                    if (grupos[nombre]!.isEmpty)
-                      const Padding(padding: EdgeInsets.all(20), child: Center(child: Text("Sin productos", style: TextStyle(color: Colors.grey, fontSize: 12))))
-                    else widget.esAdmin 
-                      ? ReorderableGridView.builder(
-                          key: PageStorageKey('grid_$nombre'),
-                          physics: const NeverScrollableScrollPhysics(), shrinkWrap: true, padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: columnas, childAspectRatio: columnas == 1 ? 1.0 : 0.72, crossAxisSpacing: 8, mainAxisSpacing: 8),
-                          itemCount: grupos[nombre]!.length,
-                          onReorder: (oldIdx, newIdx) => _onReorderCategoria(grupos[nombre]!, oldIdx, newIdx),
-                          itemBuilder: (ctx, i) => construirTarjeta(ctx, grupos[nombre]![i]),
-                        )
-                      : GridView.builder(
-                          physics: const NeverScrollableScrollPhysics(), shrinkWrap: true, padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: columnas, childAspectRatio: columnas == 1 ? 1.0 : 0.72, crossAxisSpacing: 8, mainAxisSpacing: 8),
-                          itemCount: grupos[nombre]!.length,
-                          itemBuilder: (ctx, i) => construirTarjeta(ctx, grupos[nombre]![i]),
-                        ),
-                    
-                    // 🔥 CONTROLES INLINE DE CADA CATEGORÍA (Añadir y Sacar integrados)
-                    if (widget.esAdmin)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: OutlinedButton.icon(
-                                style: OutlinedButton.styleFrom(
-                                  foregroundColor: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1),
-                                  side: BorderSide(color: isOscuro ? Colors.white10 : Colors.grey.shade300),
-                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                                  padding: const EdgeInsets.symmetric(vertical: 10),
-                                ),
-                                onPressed: () => _mostrarDialogoAnadirProductosExistentes(nombre),
-                                icon: const Icon(Icons.add_circle_outline_rounded, size: 18),
-                                label: const Text("AÑADIR PRODUCTO", style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-                              ),
-                            ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: OutlinedButton.icon(
-                                style: OutlinedButton.styleFrom(
-                                  foregroundColor: removalMode ? Colors.redAccent : Colors.grey,
-                                  side: BorderSide(color: removalMode ? Colors.redAccent.withOpacity(0.5) : Colors.grey.shade300),
-                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                                  padding: const EdgeInsets.symmetric(vertical: 10),
-                                ),
-                                onPressed: () {
-                                  setState(() {
-                                    if (removalMode) {
-                                      _categoriasEnModoEliminacion.remove(nombre);
-                                    } else {
-                                      _categoriasEnModoEliminacion.add(nombre);
-                                    }
-                                  });
-                                },
-                                icon: Icon(removalMode ? Icons.cancel_outlined : Icons.remove_circle_outline_rounded, size: 18),
-                                label: Text(removalMode ? "CANCELAR" : "SACAR PRODUCTO", style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                  ],
-                  
-                  const SizedBox(height: 15),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 14),
-                    child: Divider(
-                      height: 1, 
-                      thickness: 1.5, // 👈 Grosor aumentado para mayor presencia
-                      // 🔥 Colores ajustados para que contrasten perfectamente
-                      color: isOscuro ? Colors.white24 : Colors.grey.shade400, 
-                    ),
-                  ),
-                  const SizedBox(height: 15),
+                  if (!_esPremium && widget.esAdmin)
+                    const AnuncioNativoWidget(key: ValueKey('admob_native_ad_key')),
+
+                  const SizedBox(key: ValueKey('spacer_end'), height: 100),
                 ],
               ),
             );
-          }).toList(),
-          if (grupos['_sin_categoria']!.isNotEmpty)
-            Container(
-              key: const ValueKey('grid_sin_cat'),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                    child: Text(
-                      "OTROS PRODUCTOS", 
-                      style: TextStyle(
-                        fontSize: 16, 
-                        fontWeight: FontWeight.w900, 
-                        letterSpacing: 0.5,
-                        color: isOscuro ? Colors.white70 : const Color(0xFF0D47A1), 
-                      ),
-                    ),
-                  ),
-                  
-                  widget.esAdmin 
-                    ? ReorderableGridView.builder(
-                        key: const PageStorageKey('rsincat'),
-                        physics: const NeverScrollableScrollPhysics(), shrinkWrap: true, padding: const EdgeInsets.all(10),
-                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: columnas, childAspectRatio: columnas == 1 ? 1.0 : 0.72, crossAxisSpacing: 8, mainAxisSpacing: 8),
-                        itemCount: grupos['_sin_categoria']!.length,
-                        onReorder: (oldIdx, newIdx) => _onReorderCategoria(grupos['_sin_categoria']!, oldIdx, newIdx),
-                        itemBuilder: (ctx, i) => construirTarjeta(ctx, grupos['_sin_categoria']![i]),
-                      )
-                    : GridView.builder(
-                        physics: const NeverScrollableScrollPhysics(), shrinkWrap: true, padding: const EdgeInsets.all(10),
-                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: columnas, childAspectRatio: columnas == 1 ? 1.0 : 0.72, crossAxisSpacing: 8, mainAxisSpacing: 8),
-                        itemCount: grupos['_sin_categoria']!.length,
-                        itemBuilder: (ctx, i) => construirTarjeta(ctx, grupos['_sin_categoria']![i]),
-                      ),
-                  
-                  const SizedBox(height: 15),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 14),
-                    child: Divider(
-                      height: 1, 
-                      thickness: 1, 
-                      color: isOscuro ? Colors.white.withOpacity(0.08) : Colors.grey.shade200
-                    ),
-                  ),
-                  const SizedBox(height: 15),
-                ],
-              ),
-            ),
-          if (!_esPremium && widget.esAdmin)
-            const AnuncioNativoWidget(key: ValueKey('admob_native_ad_key')),
-
-          const SizedBox(key: ValueKey('spacer_end'), height: 100),
-        ],
-      ),
+          }(),
+        ),
+      ],
     );
   }
 

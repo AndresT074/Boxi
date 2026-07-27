@@ -20,7 +20,7 @@ class DBHelper {
     final path = join(dbPath, filePath);
     return await openDatabase(
       path,
-      version: 17, // 🔥 Incrementado a 17
+      version: 18,
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
     );
@@ -53,6 +53,38 @@ class DBHelper {
         activo INTEGER DEFAULT 1,
         orden INTEGER DEFAULT 0, 
         ultima_modificacion TEXT
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE tarjetas_fidelidad (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        titulo TEXT NOT NULL,
+        meta_compras INTEGER NOT NULL,
+        premio_descripcion TEXT,
+        activa INTEGER DEFAULT 1,
+        ultima_modificacion TEXT
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE puntos_clientes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cliente_id INTEGER NOT NULL,
+        tarjeta_id INTEGER NOT NULL,
+        puntos_actuales INTEGER DEFAULT 0,
+        completadas_totales INTEGER DEFAULT 0,
+        ultima_modificacion TEXT,
+        FOREIGN KEY (cliente_id) REFERENCES clientes (id) ON DELETE CASCADE,
+        FOREIGN KEY (tarjeta_id) REFERENCES tarjetas_fidelidad (id) ON DELETE CASCADE
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE tokens_qr_usados (
+        id TEXT PRIMARY KEY,
+        cliente_id INTEGER NOT NULL,
+        tarjeta_id INTEGER NOT NULL,
+        fecha_uso TEXT NOT NULL
       )
     ''');
   }
@@ -105,6 +137,45 @@ class DBHelper {
       // Saneamiento: Para pedidos antiguos ya completados, rellenamos fecha_pago con su fecha de pedido original
       try { await db.execute("UPDATE pedidos SET fecha_pago = fecha_hora WHERE estado = 'Completado' AND (fecha_pago IS NULL OR fecha_pago = '')"); } catch (_) {}
     }
+    // 🔥 MIGRACIÓN DE LA VERSIÓN 18 (Sistema de Fidelidad)
+    if (oldVersion < 18) {
+      try {
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS tarjetas_fidelidad (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            titulo TEXT NOT NULL,
+            meta_compras INTEGER NOT NULL,
+            premio_descripcion TEXT,
+            activa INTEGER DEFAULT 1,
+            ultima_modificacion TEXT
+          )
+        ''');
+      } catch (_) {}
+
+      try {
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS puntos_clientes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cliente_id INTEGER NOT NULL,
+            tarjeta_id INTEGER NOT NULL,
+            puntos_actuales INTEGER DEFAULT 0,
+            completadas_totales INTEGER DEFAULT 0,
+            ultima_modificacion TEXT
+          )
+        ''');
+      } catch (_) {}
+
+      try {
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS tokens_qr_usados (
+            id TEXT PRIMARY KEY,
+            cliente_id INTEGER NOT NULL,
+            tarjeta_id INTEGER NOT NULL,
+            fecha_uso TEXT NOT NULL
+          )
+        ''');
+      } catch (_) {}
+    }
   }
 
   Future<void> close() async { final db = _database; if (db != null) { await db.close(); _database = null; } }
@@ -116,5 +187,8 @@ class DBHelper {
     await db.delete('reportes_guardados'); await db.delete('operaciones_pendientes');
     try { await db.delete('fotos_variantes'); } catch (_) {}
     try { await db.delete('categorias'); } catch (_) {} 
+    try { await db.delete('tarjetas_fidelidad'); } catch (_) {}
+    try { await db.delete('puntos_clientes'); } catch (_) {}
+    try { await db.delete('tokens_qr_usados'); } catch (_) {}
   }
 }

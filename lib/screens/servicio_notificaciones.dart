@@ -1,4 +1,5 @@
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class ServicioNotificaciones {
   static final FlutterLocalNotificationsPlugin _plugin =
@@ -9,7 +10,9 @@ class ServicioNotificaciones {
   static const String _canalInactividadId = 'inactividad';
   static const String _canalInactividadNombre = 'Recordatorios';
 
-  // Inicializa los canales necesarios para recibir las notificaciones push de Firebase
+  // 🔥 Callback global que se activa cuando el cliente TOCA la notificación
+  static Function(String token)? onFidelidadTap;
+
   static Future<void> inicializar() async {
     const AndroidInitializationSettings androidInit =
         AndroidInitializationSettings('@mipmap/ic_launcher');
@@ -18,7 +21,14 @@ class ServicioNotificaciones {
 
     await _plugin.initialize(
       settings: initSettings,
-      onDidReceiveNotificationResponse: (NotificationResponse response) {},
+      onDidReceiveNotificationResponse: (NotificationResponse response) async {
+        // 🔥 SI EL CLIENTE TOCA LA NOTIFICACIÓN: Guarda el token y abre la ficha directo
+        if (response.payload != null && response.payload!.isNotEmpty) {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('pending_fidelidad_token', response.payload!);
+          onFidelidadTap?.call(response.payload!);
+        }
+      },
     );
 
     final androidPlugin = _plugin
@@ -50,9 +60,8 @@ class ServicioNotificaciones {
     }
   }
 
-  // Dibuja la notificación en pantalla cuando Firebase recibe una campaña de inactividad con la app abierta
   static Future<void> mostrarNotificacionInactividad(String titulo, String cuerpo) async {
-    int notificationId = 99999; // ID fijo para que se sobrescriba y no llene la barra
+    int notificationId = 99999;
     await _plugin.show(
       id: notificationId,
       title: titulo,
@@ -70,7 +79,6 @@ class ServicioNotificaciones {
     );
   }
 
-  // Dibuja la notificación en pantalla cuando Firebase recibe un pedido web en tiempo real
   static Future<void> mostrarNotificacionPedido(
       String nombreNegocio, String nombreCliente) async {
     int notificationId = DateTime.now().millisecondsSinceEpoch % 100000;
@@ -90,6 +98,30 @@ class ServicioNotificaciones {
           enableVibration: true,
         ),
       ),
+    );
+  }
+
+  // 🔥 Notificación de Fidelidad vinculada al Token
+  static Future<void> mostrarNotificacionFidelidad(
+      String nombreNegocio, String nombreCliente, String token) async {
+    int notificationId = DateTime.now().millisecondsSinceEpoch % 100000;
+    await _plugin.show(
+      id: notificationId,
+      title: '🎁 ¡Punto de Fidelidad!',
+      body: 'Hola $nombreCliente, $nombreNegocio te ha dado un punto de fidelidad.',
+      notificationDetails: const NotificationDetails(
+        android: AndroidNotificationDetails(
+          _canalPedidosId,
+          _canalPedidosNombre,
+          channelDescription: 'Notificaciones de puntos de fidelidad',
+          importance: Importance.max,
+          priority: Priority.high,
+          icon: '@mipmap/ic_launcher',
+          playSound: true,
+          enableVibration: true,
+        ),
+      ),
+      payload: token, // 🔥 Pasa el token para abrir la ficha de inmediato al tocar
     );
   }
 }

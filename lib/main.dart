@@ -11,6 +11,8 @@ import 'package:Boxi/database/db_helper.dart';
 import 'package:Boxi/screens/servicio_notificaciones.dart';
 import 'package:Boxi/screens/servicio_fcm.dart'; 
 import 'api_keys.dart'; // 🔥 NUEVO: Importamos el archivo de llaves oculto
+import 'package:app_links/app_links.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -64,6 +66,29 @@ void main() async {
     ServicioNotificaciones.inicializar();
     ServicioAnuncios.iniciar().catchError((e) => debugPrint("Error Anuncios: $e"));
     ServicioFCM.inicializar().catchError((e) => debugPrint("Error FCM: $e"));
+
+    // 🎁 Captura automática de links de fidelidad desde cualquier estado de la app
+    try {
+      final appLinks = AppLinks();
+      appLinks.getInitialLink().then((uri) async {
+        if (uri != null) {
+          String? token = uri.queryParameters['token'] ?? (uri.toString().contains("token=") ? uri.toString().split("token=").last.split("&").first : null);
+          if (token != null && token.isNotEmpty) {
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setString('pending_fidelidad_token', token);
+          }
+        }
+      });
+      appLinks.uriLinkStream.listen((uri) async {
+        String? token = uri.queryParameters['token'] ?? (uri.toString().contains("token=") ? uri.toString().split("token=").last.split("&").first : null);
+        if (token != null && token.isNotEmpty) {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('pending_fidelidad_token', token);
+        }
+      });
+    } catch (e) {
+      debugPrint("Error escuchando appLinks global: $e");
+    }
   }
 }
 

@@ -303,6 +303,7 @@ class PantallaFormularioCliente extends StatefulWidget {
 
 class _PantallaFormularioClienteState extends State<PantallaFormularioCliente> {
   final _n = TextEditingController(), _neg = TextEditingController(), _d = TextEditingController(), _t = TextEditingController();
+  final _ind = TextEditingController(); // 👈 Indicativo por defecto
   final _deptoC = TextEditingController(), _ciuC = TextEditingController();
 
   List<String> _deptosExistentes = [];
@@ -318,7 +319,14 @@ class _PantallaFormularioClienteState extends State<PantallaFormularioCliente> {
       _n.text = widget.cliente!['nombre_completo'] ?? '';
       _neg.text = widget.cliente!['nombre_negocio'] ?? '';
       _d.text = widget.cliente!['direccion'] ?? '';
-      _t.text = widget.cliente!['telefono'] ?? '';
+      String rawTel = widget.cliente!['telefono']?.toString() ?? '';
+      String telLimpio = rawTel.replaceAll(RegExp(r'\D'), '');
+      if (telLimpio.length > 10) {
+        _ind.text = telLimpio.substring(0, telLimpio.length - 10);
+        _t.text = telLimpio.substring(telLimpio.length - 10);
+      } else {
+        _t.text = telLimpio;
+      }
       _deptoC.text = widget.cliente!['departamento'] ?? '';
       _ciuC.text = widget.cliente!['ciudad'] ?? '';
     }
@@ -358,11 +366,16 @@ class _PantallaFormularioClienteState extends State<PantallaFormularioCliente> {
 
     final db = await DBHelper.instance.database;
     final prefs = await SharedPreferences.getInstance();
+    String indClean = _ind.text.trim().replaceAll(RegExp(r'\D'), '');
+    if (indClean.isEmpty) indClean = "57"; // Fallback automático si lo deja vacío
+    String telClean = _t.text.trim().replaceAll(RegExp(r'\D'), '');
+    String telefonoCompleto = "$indClean$telClean";
+
     final map = {
       'nombre_completo': _n.text.trim(),
       'nombre_negocio': _neg.text.trim(),
       'direccion': _d.text.trim(),
-      'telefono': _t.text.trim(),
+      'telefono': telefonoCompleto,
       'departamento': _deptoC.text.trim(),
       'ciudad': _ciuC.text.trim()
     };
@@ -406,7 +419,32 @@ class _PantallaFormularioClienteState extends State<PantallaFormularioCliente> {
           children: [
             _buildInput(_n, 'Nombre Completo *', Icons.person, isOscuro),
             const SizedBox(height: 15),
-            _buildInput(_t, 'Teléfono *', Icons.phone, isOscuro, keyboard: TextInputType.phone),
+            Row(
+              children: [
+                SizedBox(
+                  width: 80,
+                  child: TextField(
+                    controller: _ind,
+                    keyboardType: TextInputType.number,
+                    style: TextStyle(color: isOscuro ? Colors.white : Colors.black),
+                    decoration: InputDecoration(
+                      labelText: "Ind.+*",
+                      hintText: "57", // 👈 Ejemplo gris que desaparece al tocar/escribir
+                      hintStyle: TextStyle(color: isOscuro ? Colors.white38 : Colors.grey),
+                      prefixText: "+",
+                      filled: true,
+                      fillColor: isOscuro ? Colors.white.withOpacity(0.05) : Colors.grey.shade50,
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(15)),
+                      isDense: true,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _buildInput(_t, 'Teléfono *', Icons.phone, isOscuro, keyboard: TextInputType.phone),
+                ),
+              ],
+            ),
             const SizedBox(height: 15),
             _buildBuscador(_deptoC, 'Departamento *', Icons.map, _filtrarDeptos, isOscuro),
             _listaSugerencias(_deptosFiltrados, (val) { _deptoC.text = val; setState(() => _deptosFiltrados = []); }, isOscuro),

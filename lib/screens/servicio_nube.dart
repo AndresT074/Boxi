@@ -708,6 +708,8 @@ class ServicioNube {
       'detalle_pedidos',
       'reportes_guardados',
       'ajustes_capital',
+      'tarjetas_fidelidad', // 👈 Agregado
+      'puntos_clientes',     // 👈 Agregado
     ];
     
     for (final t in tablasPrivadas) {
@@ -1892,8 +1894,16 @@ class ServicioNube {
         'timestamp_privado': DateTime.now().millisecondsSinceEpoch
       };
       
-      // 🚨 OJO: Ya NO incluimos productos ni categorías aquí
-      const tablasPrivadas = ['vendedores', 'clientes', 'pedidos', 'detalle_pedidos', 'reportes_guardados', 'ajustes_capital'];
+      const tablasPrivadas = [
+        'vendedores', 
+        'clientes', 
+        'pedidos', 
+        'detalle_pedidos', 
+        'reportes_guardados', 
+        'ajustes_capital',
+        'tarjetas_fidelidad', // 👈 Agregado
+        'puntos_clientes'      // 👈 Agregado
+      ];
       
       for (String t in tablasPrivadas) {
         final data = await dbLocal.query(t);
@@ -1933,7 +1943,16 @@ class ServicioNube {
 
       final dbLocal = await DBHelper.instance.database;
       final Batch batch = dbLocal.batch();
-      const tablasPrivadas = ['vendedores', 'clientes', 'pedidos', 'detalle_pedidos', 'reportes_guardados', 'ajustes_capital'];
+      const tablasPrivadas = [
+        'vendedores', 
+        'clientes', 
+        'pedidos', 
+        'detalle_pedidos', 
+        'reportes_guardados', 
+        'ajustes_capital',
+        'tarjetas_fidelidad', // 👈 Agregado
+        'puntos_clientes'      // 👈 Agregado
+      ];
       
       for (String t in tablasPrivadas) {
         if (datos[t] != null) {

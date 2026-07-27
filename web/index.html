@@ -84,6 +84,18 @@
       } catch(e) {}
     }, 800);
   </script>
+  <!-- 🔥 REDIRECCIONADOR DE ENLACES DE RECLAMO A LA APP / PLAY STORE -->
+  <script>
+    if (window.location.pathname.includes('/reclamar') || window.location.search.includes('token=')) {
+      var urlParams = new URLSearchParams(window.location.search);
+      var token = urlParams.get('token');
+      var playStoreUrl = "https://play.google.com/store/apps/details?id=com.andres074.boxi";
+      var appIntentUrl = "intent://reclamar?token=" + token + "#Intent;scheme=boxi;package=com.andres074.boxi;S.browser_fallback_url=" + encodeURIComponent(playStoreUrl) + ";end";
+      
+      // Intenta abrir la app de Boxi. Si no está instalada, salta a la Play Store
+      window.location.href = appIntentUrl;
+    }
+  </script>
 </head>
 <body>
 

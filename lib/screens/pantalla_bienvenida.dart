@@ -270,6 +270,7 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
       }
     }
 
+    if (!mounted) return; // 🔥 Cancela si la pantalla ya no está activa para evitar el crash
     setState(() {
       _nombreNegocio = (nuevoNombre == "nombredenegocioaqui") ? "NOMBREDETUNEGOCIOAQUI" : nuevoNombre;
       _logoPath = nuevaPath;
@@ -291,15 +292,25 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
     await _cargarConfig();
     
     try {
-      // 🔥 Le damos solo 1.5 segundos a la nube
-      await _sincronizacionSilenciosa(user).timeout(const Duration(milliseconds: 1500), onTimeout: () {
-        debugPrint("⏰ Tiempo agotado buscando nube. Pasando a modo local.");
-      });
+      final prefs = await SharedPreferences.getInstance();
+      bool yaDescargoTodo = prefs.getBool("descarga_completa_${user.uid}") ?? false;
+
+      // 🔥 SI ES PRIMER INGRESO O CAMBIO DE CUENTA, ESPERA EL 100% DE LA DESCARGA SIN TIMEOUT
+      if (!yaDescargoTodo) {
+        debugPrint("☁️ Descargando negocio completo antes de entrar...");
+        await _sincronizacionSilenciosa(user); 
+      } else {
+        // Modo Offline-First: Chequeo rápido de 2.5s si ya tiene los datos locales
+        await _sincronizacionSilenciosa(user).timeout(
+          const Duration(milliseconds: 2500),
+          onTimeout: () => debugPrint("⏰ Verificación de nube lista."),
+        );
+      }
       await ServicioContrasenaAdmin.sincronizarDesdeNube(user.uid);
     } catch (e) {
       debugPrint("Error en inicio: $e");
     } finally {
-      if (mounted) setState(() => _cargandoDatos = false); // 🔥 Apaga el cargador DE INMEDIATO
+      if (mounted) setState(() => _cargandoDatos = false); // 🔥 Desbloquea el acceso solo cuando SQLite está 100% lista
     }
     _registrarIngresoYVerificarActualizacion();
   }
@@ -850,8 +861,7 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF1A1A1A),
-        title: const Text("¿Cerrar Sesión?",
-            style: TextStyle(color: Colors.white)),
+        title: const Text("¿Cerrar Sesión?", style: TextStyle(color: Colors.white)),
         content: Text(
             _esPremium
                 ? "Tu sesión se cerrará, pero tus datos quedarán guardados en este celular para un acceso rápido."
@@ -864,77 +874,86 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
             onPressed: () async {
-              // 🔥 1. CAPTURAR EL UID ANTES DE QUE PASE A NULL
-              final user = FirebaseAuth.instance.currentUser;
-              final String? uid = user?.uid; 
+              // 1. Cierra el diálogo de confirmación de inmediato
+              Navigator.pop(ctx);
 
-              // 🔥 2. LIBERAR MEMORIA RAM Y BLOQUEOS DE ARCHIVOS
-              PaintingBinding.instance.imageCache.clear();
-              PaintingBinding.instance.imageCache.clearLiveImages();
+              if (!mounted) return;
 
-              // 🔥 3. CERRAR SESIÓN EN FIREBASE
-              await ServicioAuth.cerrarSesion();
+              // 2. Muestra un indicador de carga limpio mientras destruye datos
+              showDialog(
+                context: context,
+                barrierDismissible: false,
+                builder: (_) => const PopScope(
+                  canPop: false,
+                  child: Center(
+                    child: CircularProgressIndicator(color: Colors.redAccent),
+                  ),
+                ),
+              );
 
-              // 🔥 4. ESPERA DE SEGURIDAD (500ms)
-              await Future.delayed(const Duration(milliseconds: 500));
-
-              final prefs = await SharedPreferences.getInstance();
-
-              // 🔥 5. BORRAR BANDERAS DE USUARIO CON LA VARIABLE "uid" CAPTURADA AL INICIO
-              if (uid != null) {
-                await prefs.remove("descarga_completa_$uid");
-                await prefs.remove("primera_carga_completada_$uid");
-                await prefs.remove('ultima_mod_productos_local_$uid');
-                await prefs.remove('ultima_mod_pedidos_local_$uid');
-                await prefs.remove('ultima_mod_categorias_local_$uid');
-              }
-              
-              await prefs.remove('admin_password');
-              await prefs.remove('admin_pregunta');
-              await prefs.remove('admin_respuesta');
-              await prefs.remove('admin_biometria_activa');
-              await prefs.remove('migracion_definitiva_completa_v6');
-              await prefs.remove('datos_descargados');
-              _primeraCargaEjecutada = false; 
-              // 🔥 6. LIMPIEZA DE TABLAS LOCALES
               try {
-                await DBHelper.instance.limpiarTablas();
-              } catch (e) {
-                debugPrint("Error limpiando BD local: $e");
-              }
+                final user = FirebaseAuth.instance.currentUser;
+                final String? uid = user?.uid;
 
-              // 🔥 7. DESTRUCCIÓN ABSOLUTA DE LAS CARPETAS
-              try {
-                String pathBoxi = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
-                
-                Future<void> aniquilarCarpeta(Directory dir) async {
-                  if (!await dir.exists()) return;
-                  try {
-                    final List<FileSystemEntity> entidades = dir.listSync(recursive: true);
-                    for (FileSystemEntity entity in entidades) {
-                      if (entity is File) {
-                        try {
-                          await entity.delete();
-                        } catch (_) {}
-                      }
-                    }
-                    try { await dir.delete(recursive: true); } catch (_) {}
-                  } catch (_) {}
+                PaintingBinding.instance.imageCache.clear();
+                PaintingBinding.instance.imageCache.clearLiveImages();
+
+                await ServicioAuth.cerrarSesion();
+                await Future.delayed(const Duration(milliseconds: 300));
+
+                final prefs = await SharedPreferences.getInstance();
+
+                if (uid != null) {
+                  await prefs.remove("descarga_completa_$uid");
+                  await prefs.remove("primera_carga_completada_$uid");
+                  await prefs.remove('ultima_mod_productos_local_$uid');
+                  await prefs.remove('ultima_mod_pedidos_local_$uid');
+                  await prefs.remove('ultima_mod_categorias_local_$uid');
+                }
+                await prefs.remove('pending_fidelidad_token');
+                await prefs.remove('admin_password');
+                await prefs.remove('admin_pregunta');
+                await prefs.remove('admin_respuesta');
+                await prefs.remove('admin_biometria_activa');
+                await prefs.remove('migracion_definitiva_completa_v6');
+                await prefs.remove('datos_descargados');
+                _primeraCargaEjecutada = false;
+
+                try {
+                  await DBHelper.instance.limpiarTablas();
+                } catch (e) {
+                  debugPrint("Error limpiando BD local: $e");
                 }
 
-                await aniquilarCarpeta(Directory(pathBoxi));
-                await aniquilarCarpeta(Directory('/storage/emulated/0/Pictures/Boxi'));
-                
-                final appDir = await getApplicationDocumentsDirectory();
-                await aniquilarCarpeta(Directory('${appDir.path}/Boxi'));
-                
-                debugPrint("🗑️ Carpetas Boxi vaciadas y eliminadas en cero absoluto.");
+                try {
+                  String pathBoxi = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
+                  
+                  Future<void> aniquilarCarpeta(Directory dir) async {
+                    if (!await dir.exists()) return;
+                    try {
+                      final List<FileSystemEntity> entidades = dir.listSync(recursive: true);
+                      for (FileSystemEntity entity in entidades) {
+                        if (entity is File) {
+                          try { await entity.delete(); } catch (_) {}
+                        }
+                      }
+                      try { await dir.delete(recursive: true); } catch (_) {}
+                    } catch (_) {}
+                  }
+
+                  await aniquilarCarpeta(Directory(pathBoxi));
+                  await aniquilarCarpeta(Directory('/storage/emulated/0/Pictures/Boxi'));
+                  
+                  final appDir = await getApplicationDocumentsDirectory();
+                  await aniquilarCarpeta(Directory('${appDir.path}/Boxi'));
+                } catch (e) {
+                  debugPrint("Error eliminando carpetas: $e");
+                }
               } catch (e) {
-                debugPrint("Error eliminando carpetas: $e");
+                debugPrint("Error al cerrar sesión: $e");
               }
 
-              Navigator.pop(ctx);
-              
+              // 3. Reinicia la Pantalla de Bienvenida de forma limpia y sin crasheos
               if (mounted) {
                 Navigator.pushAndRemoveUntil(
                   context,
@@ -943,8 +962,7 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
                 );
               }
             },
-            child: const Text("SÍ, SALIR",
-                style: TextStyle(color: Colors.white)),
+            child: const Text("SÍ, SALIR", style: TextStyle(color: Colors.white)),
           ),
         ],
       ),
@@ -1213,6 +1231,18 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
   }
 
   void _acceder(bool admin) {
+    // 🛑 IMPIDE ENTRAR SI AÚN ESTÁ DESCARGANDO
+    if (_cargandoDatos) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("⏳ Descargando tu negocio... Por favor espera un momento."),
+          duration: Duration(seconds: 2),
+          backgroundColor: Color(0xFF0D1B2A),
+        ),
+      );
+      return;
+    }
+
     if (FirebaseAuth.instance.currentUser == null) {
       Navigator.push(context,
               MaterialPageRoute(builder: (_) => const PantallaLogin()))
@@ -1224,11 +1254,11 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
       _verificarAccesoAdmin();
     } else {
       Navigator.pushReplacement(context,
-          MaterialPageRoute(builder: (_) => PantallaPrincipal(esAdmin: false)));
+          MaterialPageRoute(builder: (_) => const PantallaPrincipal(esAdmin: false)));
     }
   }
 
- Future<void> _verificarAccesoAdmin() async {
+  Future<void> _verificarAccesoAdmin() async {
     final prefs = await SharedPreferences.getInstance();
     final user = FirebaseAuth.instance.currentUser;
 

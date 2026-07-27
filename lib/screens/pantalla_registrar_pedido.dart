@@ -36,10 +36,11 @@ class _PantallaRegistrarPedidoState extends State<PantallaRegistrarPedido> {
   final _nC = TextEditingController();
   final _negC = TextEditingController();
   final _dC = TextEditingController();
-  final _tC = TextEditingController();
+  final _indC = TextEditingController(); // 🔥 Indicativo por defecto (ej: Colombia)
+  final _tC = TextEditingController();          // 🔥 Número de WhatsApp local
   final _deptoC = TextEditingController();
   final _ciuC = TextEditingController();
-  final _vendC = TextEditingController(); 
+  final _vendC = TextEditingController();
 
   int? _vId; 
   List<Map<String, dynamic>> _vendedores = [];
@@ -92,17 +93,34 @@ class _PantallaRegistrarPedidoState extends State<PantallaRegistrarPedido> {
       _ciudadesExistentes = cRaw.map((e) => e['ciudad'].toString()).toList();
     });
 
+    // Función auxiliar para separar indicativo y número al cargar cliente existente
+    void separarTelefono(String telCompleto) {
+      String clean = telCompleto.replaceAll(RegExp(r'\D'), '');
+      if (clean.startsWith('57') && clean.length > 10) {
+        _indC.text = '57';
+        _tC.text = clean.substring(2);
+      } else if (clean.startsWith('52') && clean.length > 10) {
+        _indC.text = '52';
+        _tC.text = clean.substring(2);
+      } else if (clean.length > 10) {
+        _indC.text = clean.substring(0, clean.length - 10);
+        _tC.text = clean.substring(clean.length - 10);
+      } else {
+        _tC.text = clean;
+      }
+    }
+
     if (widget.datosPreCargados != null) {
       final d = widget.datosPreCargados!;
       _nC.text = d['nombre']?.toString() ?? "";
       _negC.text = d['negocio']?.toString() ?? "";
       _dC.text = d['direccion']?.toString() ?? "";
-      _tC.text = d['telefono']?.toString() ?? "";
+      if (d['telefono'] != null) separarTelefono(d['telefono'].toString());
       _ciuC.text = d['ciudad']?.toString() ?? "";
       _deptoC.text = d['departamento']?.toString() ?? ""; 
     } else {
       if (widget.nombreWeb != null) _nC.text = widget.nombreWeb!;
-      if (widget.telefonoWeb != null) _tC.text = widget.telefonoWeb!;
+      if (widget.telefonoWeb != null) separarTelefono(widget.telefonoWeb!);
     }
   }
   
@@ -119,11 +137,21 @@ class _PantallaRegistrarPedidoState extends State<PantallaRegistrarPedido> {
   }
 
   void _seleccionarCliente(Map<String, dynamic> c) {
+    String tel = c['telefono']?.toString() ?? '';
+    String ind = "57";
+    String num = tel;
+    String clean = tel.replaceAll(RegExp(r'\D'), '');
+    if (clean.length > 10) {
+      ind = clean.substring(0, clean.length - 10);
+      num = clean.substring(clean.length - 10);
+    }
+
     setState(() {
       _nC.text = c['nombre_completo'] ?? ''; 
       _negC.text = c['nombre_negocio'] ?? '';
       _dC.text = c['direccion'] ?? ''; 
-      _tC.text = c['telefono'] ?? '';
+      _indC.text = ind;
+      _tC.text = num;
       _deptoC.text = c['departamento'] ?? ''; 
       _ciuC.text = c['ciudad'] ?? '';
       _clientesFiltrados = [];
@@ -224,13 +252,17 @@ class _PantallaRegistrarPedidoState extends State<PantallaRegistrarPedido> {
           ? await _generarFirmaLinea() 
           : await _sigController.toPngBytes();
 
-      // 3. GESTIONAR CLIENTE (LOCAL)
+      // 3. GESTIONAR CLIENTE (LOCAL) - Uniendo indicativo y número limpio
+      String indClean = _indC.text.trim().replaceAll(RegExp(r'\D'), '');
+      String numClean = _tC.text.trim().replaceAll(RegExp(r'\D'), '');
+      String telefonoCompleto = "$indClean$numClean";
+
       int clienteId;
       Map<String, dynamic> clienteData = {
         'nombre_completo': _nC.text.trim(), 
         'nombre_negocio': _negC.text.trim(), 
         'direccion': _dC.text.trim(), 
-        'telefono': _tC.text.trim(), 
+        'telefono': telefonoCompleto, 
         'departamento': _deptoC.text.trim(), 
         'ciudad': _ciuC.text.trim()
       };
@@ -607,6 +639,7 @@ class _PantallaRegistrarPedidoState extends State<PantallaRegistrarPedido> {
   }
 
   Widget _buildColumnaIzquierda(bool esHorizontal) {
+    final bool isOscuro = Theme.of(context).brightness == Brightness.dark; // 🔥 Variable declarada
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children:[
@@ -622,7 +655,62 @@ class _PantallaRegistrarPedidoState extends State<PantallaRegistrarPedido> {
         const SizedBox(height: 12),
         _in(_dC, 'Dirección (Opcional)', Icons.location_on), 
         const SizedBox(height: 12),
-        _in(_tC, 'Teléfono Celular', Icons.phone, keyboard: TextInputType.number),
+        Padding(
+          padding: const EdgeInsets.only(bottom: 6, left: 4),
+          child: Row(
+            children: [
+              Expanded(
+                flex: 2,
+                child: Text("Indicativo *", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey.shade700)),
+              ),
+              const SizedBox(width: 15),
+              Expanded(
+                flex: 5,
+                child: Text("Teléfono Celular *", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey.shade700)),
+              ),
+            ],
+          ),
+        ),
+        Row(
+          children: [
+            Expanded(
+              flex: 2,
+              child: TextField(
+                controller: _indC,
+                keyboardType: TextInputType.number,
+                style: TextStyle(color: isOscuro ? Colors.white : Colors.black, fontSize: 13, fontWeight: FontWeight.bold),
+                decoration: InputDecoration(
+                  prefixText: "+",
+                  hintText: "57",
+                  hintStyle: TextStyle(color: isOscuro ? Colors.white38 : Colors.grey.shade400),
+                  prefixIcon: Padding(
+                    padding: const EdgeInsets.only(left: 6, right: 2),
+                    child: Icon(Icons.public, color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1), size: 16),
+                  ),
+                  prefixIconConstraints: const BoxConstraints(minWidth: 24, minHeight: 20),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 12),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                  isDense: true,
+                ),
+              ),
+            ),
+            const SizedBox(width: 15),
+            Expanded(
+              flex: 5,
+              child: TextField(
+                controller: _tC,
+                keyboardType: TextInputType.phone,
+                style: TextStyle(color: isOscuro ? Colors.white : Colors.black),
+                decoration: InputDecoration(
+                  hintText: "ej: 3123456789",
+                  prefixIcon: Icon(Icons.phone_android_rounded, color: isOscuro ? Colors.cyanAccent : Colors.blueGrey),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                  isDense: true,
+                ),
+              ),
+            ),
+          ],
+        ),
         if (esHorizontal) ...[
           const SizedBox(height: 20),
           _buildFirma(esHorizontal),
