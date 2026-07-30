@@ -9,6 +9,7 @@ import 'package:in_app_update/in_app_update.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:local_auth/local_auth.dart';
 import '../database/db_helper.dart';
+import 'servicio_fidelidad.dart';
 import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'dart:ui';
@@ -391,6 +392,7 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
           await ServicioNube.rescatarDatosPerdidosFirestore(user.uid);
         }
         
+        await ServicioFidelidad.sincronizarTarjetasCompleto(user.uid);
         await ServicioNube.migrarTodoACloudinary();
       }
       if (mounted) setState(() {});

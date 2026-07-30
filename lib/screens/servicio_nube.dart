@@ -133,11 +133,18 @@ class ServicioNube {
       for (final op in pendientes) {
         final String tabla = op['tabla'] as String;
         final String docId = op['doc_id'] as String;
-        final ref = _db
-            .collection('usuarios')
-            .doc(_uid)
-            .collection(tabla)
-            .doc(docId);
+        
+        final DocumentReference ref;
+        if (tabla.startsWith('ruta_custom:')) {
+          String pathLimpio = tabla.replaceFirst('ruta_custom:', '');
+          ref = _db.collection(pathLimpio).doc(docId);
+        } else {
+          ref = _db
+              .collection('usuarios')
+              .doc(_uid)
+              .collection(tabla)
+              .doc(docId);
+        }
 
         if (op['operacion'] == 'delete') {
           batch.delete(ref);
@@ -146,7 +153,7 @@ class ServicioNube {
           final Map<String, dynamic> datos =
               Map<String, dynamic>.from(jsonDecode(jsonString));
               
-          // 🔥 INTERCEPTOR DE CLOUDINARY PARA SUBIDAS PENDIENTES OFFLINE
+          // INTERCEPTOR DE CLOUDINARY PARA SUBIDAS PENDIENTES OFFLINE
           if (esPremium && tabla == 'productos') {
             String foto = datos['foto_path']?.toString() ?? "";
             if (foto.isNotEmpty && !foto.startsWith('http')) {
@@ -181,7 +188,11 @@ class ServicioNube {
             }
           }
 
-          datos['ultima_modificacion'] = FieldValue.serverTimestamp();
+          if (tabla.startsWith('ruta_custom:')) {
+            datos['ultimaModificacion'] = FieldValue.serverTimestamp();
+          } else {
+            datos['ultima_modificacion'] = FieldValue.serverTimestamp();
+          }
           datos.remove('eliminado');
           batch.set(ref, datos, SetOptions(merge: true));
         }
@@ -223,7 +234,6 @@ class ServicioNube {
       }
       debugPrint('✅ Cola procesada y Firebase sincronizado.');
       
-      // 🔥 RECOMPILAMOS EL CATÁLOGO PARA QUE LA WEB SE ACTUALICE CON LAS NUEVAS RUTAS
       if (esPremium && (cambioProductos || cambioCategorias)) {
         await compilarYSubirCatalogoRTDB();
       }
@@ -1926,6 +1936,7 @@ class ServicioNube {
   }
 
   // 🔥 2. DESCARGAR SOLO DATOS PRIVADOS DESDE RTDB
+  // 🔥 2. DESCARGAR SOLO DATOS PRIVADOS DESDE RTDB
   static Future<void> descargarDatosPrivadosRTDB() async {
     if (_uid == null || !await tieneInternet()) return;
     try {
@@ -1942,6 +1953,15 @@ class ServicioNube {
       }
 
       final dbLocal = await DBHelper.instance.database;
+
+      // 🔥 Asegurar columna client_uid en la tabla local SQLite antes de insertar
+      try {
+        final cols = await dbLocal.rawQuery("PRAGMA table_info(puntos_clientes);");
+        if (!cols.any((c) => c['name'] == 'client_uid')) {
+          await dbLocal.execute("ALTER TABLE puntos_clientes ADD COLUMN client_uid TEXT;");
+        }
+      } catch (_) {}
+
       final Batch batch = dbLocal.batch();
       const tablasPrivadas = [
         'vendedores', 
@@ -1950,8 +1970,8 @@ class ServicioNube {
         'detalle_pedidos', 
         'reportes_guardados', 
         'ajustes_capital',
-        'tarjetas_fidelidad', // 👈 Agregado
-        'puntos_clientes'      // 👈 Agregado
+        'tarjetas_fidelidad',
+        'puntos_clientes'
       ];
       
       for (String t in tablasPrivadas) {

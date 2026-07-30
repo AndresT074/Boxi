@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'servicio_nube.dart';
 import 'servicio_anuncios.dart';
 import 'dart:async';
+import 'package:flutter/services.dart';
 import 'pantalla_premium.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -451,7 +452,7 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     return detallesEditables;
   }
 
-  void _mostrarPantallaExito(String nuevoEstado) {
+  Future<void> _mostrarPantallaExito(String nuevoEstado) async {
     if (!mounted) return;
     final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
     
@@ -473,16 +474,23 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
       titulo = "Pedido Cancelado";
     }
 
-    showDialog(
+    await showDialog(
       context: context,
-      barrierDismissible: false, // Evita que el usuario lo cierre tocando afuera
+      barrierDismissible: false,
       builder: (ctx) {
+        // Temporizador seguro que solo cierra SU PROPIO modal
+        Future.delayed(const Duration(milliseconds: 1300), () {
+          if (ctx.mounted && Navigator.canPop(ctx)) {
+            Navigator.of(ctx).pop();
+          }
+        });
+
         return Dialog(
           backgroundColor: Colors.transparent,
           elevation: 0,
           child: TweenAnimationBuilder(
             duration: const Duration(milliseconds: 400),
-            curve: Curves.elasticOut, // Animación de "rebote"
+            curve: Curves.elasticOut,
             tween: Tween<double>(begin: 0.5, end: 1.0),
             builder: (context, double scale, child) {
               return Transform.scale(
@@ -535,13 +543,6 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
         );
       }
     );
-
-    // 🔥 Temporizador para cerrar la pantalla de éxito automáticamente
-    Future.delayed(const Duration(milliseconds: 1600), () {
-      if (mounted && Navigator.canPop(context)) {
-        Navigator.pop(context);
-      }
-    });
   }
 
   // Consulta de SQLite rápida y estática para las imágenes
@@ -699,7 +700,6 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     Future<void> ejecutar() async {
       String? fechaPagoVal;
       
-      // 🔥 Si el pedido pasa a Completado, registramos la fecha y hora de hoy
       if (nuevoEstado == 'Completado') {
         final DateTime ahora = DateTime.now();
         final String periodo = ahora.hour >= 12 ? 'PM' : 'AM';
@@ -707,6 +707,7 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
         fechaPagoVal = "${ahora.year}-${ahora.month.toString().padLeft(2, '0')}-${ahora.day.toString().padLeft(2, '0')} $hora12:${ahora.minute.toString().padLeft(2, '0')} $periodo";
       }
 
+      // 1. Actualizar Base de Datos
       await db.update(
           'pedidos',
           {
@@ -717,32 +718,35 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
           where: 'id = ?',
           whereArgs: [pedidoId]);
 
-      // 🔥 Otorgar punto de fidelidad automático si pasa a Completado
+      // 2. Refrescar listado en pantalla
+      await _cargar();
+
+      // 3. Mostrar pantalla de éxito y ESPERAR a que termine de cerrarse
+      await _mostrarPantallaExito(nuevoEstado);
+
+      // 4. LUEGO de que la pantalla de éxito se cierra, otorgar punto y abrir la invitación de WhatsApp
       if (nuevoEstado == 'Completado') {
-        final pedDoc = await db.query('pedidos', columns: ['cliente_id'], where: 'id = ?', whereArgs: [pedidoId]);
-        if (pedDoc.isNotEmpty && pedDoc.first['cliente_id'] != null) {
-          int clienteIdPedido = pedDoc.first['cliente_id'] as int;
-          await _otorgarPuntoFidelidadAutomatico(clienteIdPedido);
+        final pedDoc = await db.query('pedidos', columns: ['cliente_id', 'total_venta', 'cliente_nombre_snapshot'], where: 'id = ?', whereArgs: [pedidoId]);
+        if (pedDoc.isNotEmpty) {
+          int clienteIdPedido = (pedDoc.first['cliente_id'] as num?)?.toInt() ?? 0;
+          double totalVenta = (pedDoc.first['total_venta'] as num?)?.toDouble() ?? 0.0;
+          String nombreSnap = pedDoc.first['cliente_nombre_snapshot']?.toString() ?? 'Cliente';
+
+          await _otorgarPuntoFidelidadAutomatico(clienteIdPedido, totalVenta, nombreSnap);
         }
       }
 
       if (nuevoEstado == 'Cancelado') {
-        final detalles =
-            await db.query('detalle_pedidos', where: 'pedido_id = ?', whereArgs: [pedidoId]);
+        final detalles = await db.query('detalle_pedidos', where: 'pedido_id = ?', whereArgs: [pedidoId]);
         for (var item in detalles) {
           if (item['producto_id'] != null) {
-            await _modificarStockBD(item['producto_id'] as int,
-                -(item['cantidad'] as int), item['nombre_snapshot']?.toString());
+            await _modificarStockBD(item['producto_id'] as int, -(item['cantidad'] as int), item['nombre_snapshot']?.toString());
           }
         }
       }
 
-      _cargar();
-      _mostrarPantallaExito(nuevoEstado);
-
       if (_esPremium) {
         try {
-          // Enviamos la fecha de pago calculada a la nube
           await ServicioNube.actualizarEstadoPedidoNube(pedidoId, nuevoEstado, fechaPago: fechaPagoVal);
         } catch (e) {
           debugPrint("Error al sincronizar estado offline: $e");
@@ -757,144 +761,416 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     }
   }
 
-  Future<void> _otorgarPuntoFidelidadAutomatico(int clienteId) async {
+  Future<void> _otorgarPuntoFidelidadAutomatico(int clienteId, double totalVentaPedido, String clienteNombreSnap) async {
     try {
       final db = await DBHelper.instance.database;
       final prefs = await SharedPreferences.getInstance();
-      
-      final tarjetas = await db.query('tarjetas_fidelidad', where: 'activa = 1', limit: 1);
+      final user = FirebaseAuth.instance.currentUser;
+
+      // Asegurar columna client_uid en puntos_clientes
+      try {
+        final cols = await db.rawQuery("PRAGMA table_info(puntos_clientes);");
+        if (!cols.any((c) => c['name'] == 'client_uid')) {
+          await db.execute("ALTER TABLE puntos_clientes ADD COLUMN client_uid TEXT;");
+        }
+      } catch (_) {}
+
+      // 1. Obtener tarjetas activas del vendedor
+      final tarjetas = await db.query('tarjetas_fidelidad', where: 'activa = 1');
       if (tarjetas.isEmpty) return;
-      
-      int tarjetaId = tarjetas.first['id'] as int;
-      String tituloTarjeta = tarjetas.first['titulo'].toString();
-      String premioDesc = tarjetas.first['premio_descripcion']?.toString() ?? "Premio especial";
-      int meta = tarjetas.first['meta_compras'] as int;
+
+      String nombreLimpio = clienteNombreSnap.trim();
+
+      // Auto-recuperar o crear cliente local si el ID viene en 0
+      if (clienteId <= 0 && nombreLimpio.isNotEmpty) {
+        final cMatch = await db.query('clientes', columns: ['id'], where: 'LOWER(TRIM(nombre_completo)) = ?', whereArgs: [nombreLimpio.toLowerCase()]);
+        if (cMatch.isNotEmpty) {
+          clienteId = cMatch.first['id'] as int;
+        } else {
+          clienteId = await db.insert('clientes', {'nombre_completo': nombreLimpio});
+        }
+      }
+
+      final clienteRes = await db.query('clientes', where: 'id = ?', whereArgs: [clienteId]);
+      String tel = clienteRes.isNotEmpty ? (clienteRes.first['telefono']?.toString() ?? "") : "";
+      String emailCliente = clienteRes.isNotEmpty ? (clienteRes.first['email']?.toString() ?? "") : "";
+
       String nomNegocio = prefs.getString('nombre_negocio') ?? 'Nuestro Negocio';
       String logoPath = prefs.getString('logo_path') ?? '';
+      bool hayInternet = user != null && await ServicioNube.tieneInternet();
+      String vendorUid = user?.uid ?? '';
 
-      final user = FirebaseAuth.instance.currentUser;
-      bool clienteEncontradoEnNube = false;
+      for (var tarjeta in tarjetas) {
+        int tarjetaId = tarjeta['id'] as int;
+        String tarjetaIdStr = tarjetaId.toString();
+        String tituloTarjeta = tarjeta['titulo'].toString();
+        String premioDesc = tarjeta['premio_descripcion']?.toString() ?? "Premio especial";
+        int meta = tarjeta['meta_compras'] as int;
+        double montoMinimo = (tarjeta['monto_minimo'] as num?)?.toDouble() ?? 0.0;
 
-      // 1. VERIFICAR SI EL CLIENTE YA TIENE TARJETA VINCULADA EN LA NUBE
-      if (user != null) {
-        try {
-          final clientSnap = await FirebaseFirestore.instance
-              .collection('usuarios')
-              .doc(user.uid)
-              .collection('mis_tarjetas_creadas')
-              .doc(tarjetaId.toString())
-              .collection('clientes')
-              .get();
+        // Validar monto mínimo por compra
+        if (montoMinimo > 0 && totalVentaPedido < montoMinimo) {
+          continue;
+        }
 
-          for (var doc in clientSnap.docs) {
-            var cData = doc.data();
-            String locId = cData['clienteLocalId']?.toString() ?? '';
-            
-            if (locId == clienteId.toString()) {
-              clienteEncontradoEnNube = true;
-              String clientUid = doc.id;
-              int ptsAntiguos = ((cData['puntosActuales'] ?? 0) as num).toInt();
-              int newComp = ((cData['completadasTotales'] ?? 0) as num).toInt();
-              int newPts;
+        // 1️⃣ CONSULTAR EN SQLITE LOCAL PRIMERO POR ID O POR NOMBRE
+        var pLocalRes = await db.query(
+          'puntos_clientes', 
+          where: 'cliente_id = ? AND tarjeta_id = ?', 
+          whereArgs: [clienteId, tarjetaId],
+          orderBy: 'id DESC',
+          limit: 1,
+        );
 
-              if (ptsAntiguos >= meta) {
-                // Si la tarjeta anterior ya estaba llena, esta venta inicia la siguiente tarjeta en 1
-                newPts = 1;
-              } else {
-                newPts = ptsAntiguos + 1;
-                if (newPts >= meta) {
-                  newComp++; // Completa la tarjeta actual
+        // Si no se encuentra por cliente_id, buscar si existe guardado bajo el mismo nombre
+        if (pLocalRes.isEmpty && nombreLimpio.isNotEmpty) {
+          final similarClients = await db.rawQuery(
+            "SELECT p.* FROM puntos_clientes p JOIN clientes c ON p.cliente_id = c.id WHERE LOWER(TRIM(c.nombre_completo)) = ? AND p.tarjeta_id = ? ORDER BY p.id DESC LIMIT 1",
+            [nombreLimpio.toLowerCase(), tarjetaId]
+          );
+          if (similarClients.isNotEmpty) {
+            pLocalRes = similarClients;
+            clienteId = similarClients.first['cliente_id'] as int;
+          }
+        }
+
+        bool existeEnLocal = pLocalRes.isNotEmpty;
+
+        String? realClientUid;
+        if (existeEnLocal && pLocalRes.first['client_uid'] != null && pLocalRes.first['client_uid'].toString().isNotEmpty) {
+          realClientUid = pLocalRes.first['client_uid']?.toString();
+        }
+
+        int ptsAntiguos = 0;
+        int newComp = 0;
+
+        if (existeEnLocal) {
+          ptsAntiguos = ((pLocalRes.first['puntos_actuales'] ?? 0) as num).toInt();
+          newComp = ((pLocalRes.first['completadasTotales'] ?? pLocalRes.first['completadas_totales'] ?? 0) as num).toInt();
+        }
+
+        bool esMismoUsuarioVendedor = (realClientUid == vendorUid);
+        String targetDocId = (esMismoUsuarioVendedor || realClientUid == null || realClientUid.isEmpty)
+            ? (clienteId > 0 ? clienteId.toString() : 'general')
+            : realClientUid;
+
+        int ptsCloud = 0;
+        int compCloud = 0;
+        String? docAEliminarDuplicado;
+
+        // 2️⃣ SI HAY INTERNET, CONSULTAR FIRESTORE
+        if (hayInternet) {
+          try {
+            final clientSnap = await FirebaseFirestore.instance
+                .collection('usuarios')
+                .doc(user.uid)
+                .collection('mis_tarjetas_creadas')
+                .doc(tarjetaIdStr)
+                .collection('clientes')
+                .get()
+                .timeout(const Duration(seconds: 2));
+
+            for (var doc in clientSnap.docs) {
+              var cData = doc.data();
+              String locId = cData['clienteLocalId']?.toString() ?? '';
+              String cNombre = cData['clienteNombre']?.toString() ?? '';
+              String cEmail = cData['clienteEmail']?.toString() ?? '';
+              String cUid = cData['clientUid']?.toString() ?? '';
+
+              bool coincideLocalId = (locId.isNotEmpty && locId == clienteId.toString()) || doc.id == clienteId.toString();
+              bool coincideNombre = nombreLimpio.isNotEmpty && cNombre.isNotEmpty && cNombre.toLowerCase() == nombreLimpio.toLowerCase();
+              bool coincideEmail = nombreLimpio.isNotEmpty && cEmail.isNotEmpty && cEmail.toLowerCase() == nombreLimpio.toLowerCase();
+              bool coincideUid = (realClientUid != null && realClientUid.isNotEmpty && (cUid == realClientUid || doc.id == realClientUid));
+
+              if (coincideUid || coincideLocalId || coincideNombre || coincideEmail) {
+                bool esClienteExternoReal = cUid.isNotEmpty && cUid != user.uid;
+
+                if (esClienteExternoReal && doc.id == clienteId.toString()) {
+                  docAEliminarDuplicado = doc.id;
+                }
+
+                String idElegido = esClienteExternoReal ? cUid : (clienteId > 0 ? clienteId.toString() : doc.id);
+                if (esClienteExternoReal) realClientUid = cUid;
+                targetDocId = idElegido;
+
+                int ptsD = ((cData['puntosActuales'] ?? 0) as num).toInt();
+                int compD = ((cData['completadasTotales'] ?? 0) as num).toInt();
+
+                if (ptsD > ptsCloud || (ptsD == ptsCloud && compD > compCloud)) {
+                  ptsCloud = ptsD;
+                  compCloud = compD;
+                }
+
+                if (cData['clienteEmail'] != null && cData['clienteEmail'].toString().isNotEmpty && emailCliente.isEmpty) {
+                  emailCliente = cData['clienteEmail'].toString();
+                }
+
+                if (cUid.isNotEmpty) break;
+              }
+            }
+
+            if (docAEliminarDuplicado != null && docAEliminarDuplicado != targetDocId) {
+              FirebaseFirestore.instance
+                  .collection('usuarios')
+                  .doc(user.uid)
+                  .collection('mis_tarjetas_creadas')
+                  .doc(tarjetaIdStr)
+                  .collection('clientes')
+                  .doc(docAEliminarDuplicado)
+                  .delete()
+                  .catchError((_) {});
+            }
+          } catch (e) {
+            debugPrint("Error consultando cliente en Firestore: $e");
+          }
+        }
+
+        if (ptsCloud > ptsAntiguos) {
+          ptsAntiguos = ptsCloud;
+        }
+        if (compCloud > newComp) {
+          newComp = compCloud;
+        }
+
+        // 🛑 SI EL CLIENTE NO TIENE TARJETA AÚN Y NO ESTÁ VINCULADO
+        bool esClienteSinTarjeta = (!existeEnLocal && ptsAntiguos == 0 && (realClientUid == null || realClientUid.isEmpty));
+
+        if (esClienteSinTarjeta) {
+          String tokenInv = "boxi_fidelidad_${DateTime.now().millisecondsSinceEpoch}_local".trim();
+          try {
+            tokenInv = await ServicioFidelidad.crearTokenUnicoNube(
+              vendorUid: vendorUid,
+              tarjetaId: tarjetaIdStr,
+              clienteLocalId: clienteId,
+              clienteNombre: nombreLimpio,
+              nombreNegocio: nomNegocio,
+              logoPath: logoPath,
+              tarjetaTitulo: tituloTarjeta,
+              metaCompras: meta,
+              premioDesc: premioDesc,
+              montoMinimo: montoMinimo,
+              clienteTelefono: tel,
+            ).timeout(const Duration(seconds: 2));
+          } catch (e) {
+            debugPrint("Modo offline: se genera enlace local para invitación WhatsApp: $e");
+          }
+
+          if (mounted) {
+            _mostrarModalInvitacionWhatsApp(
+              nombreLimpio,
+              tel,
+              premioDesc,
+              tokenInv,
+              meta,
+              tituloTarjeta,
+              montoMinimo: montoMinimo,
+            );
+          }
+          continue; 
+        }
+
+        int newPts;
+        if (ptsAntiguos < meta) {
+          newPts = ptsAntiguos + 1;
+          if (newPts == meta) {
+            newComp++;
+          }
+        } else {
+          newPts = 1;
+        }
+
+        // 3️⃣ GUARDAR EN SQLITE LOCAL SIEMPRE (MODO OFFLINE Y ONLINE)
+        if (clienteId > 0) {
+          await db.delete('puntos_clientes', where: 'cliente_id = ? AND tarjeta_id = ?', whereArgs: [clienteId, tarjetaId]);
+          await db.insert('puntos_clientes', {
+            'cliente_id': clienteId,
+            'tarjeta_id': tarjetaId,
+            'puntos_actuales': newPts,
+            'completadas_totales': newComp,
+            if (realClientUid != null && realClientUid.isNotEmpty) 'client_uid': realClientUid,
+            'ultima_modificacion': DateTime.now().toIso8601String(),
+          });
+
+          // Actualizar caché local de Mis Premios Acumulados para refresco inmediato offline
+          try {
+            String keyUser = vendorUid.isNotEmpty ? vendorUid : (user?.uid ?? '');
+            if (keyUser.isNotEmpty) {
+              String? jsonCache = prefs.getString('cache_tarjetas_acumuladas_$keyUser');
+              List<dynamic> listCache = jsonCache != null && jsonCache.isNotEmpty ? jsonDecode(jsonCache) : [];
+              
+              bool encontrado = false;
+              for (var item in listCache) {
+                if (item['tarjetaId']?.toString() == tarjetaIdStr &&
+                    (item['clienteLocalId']?.toString() == clienteId.toString() || item['vendorUid'] == vendorUid)) {
+                  item['puntosActuales'] = newPts;
+                  item['completadasTotales'] = newComp;
+                  encontrado = true;
                 }
               }
 
-              // Actualizar en SQLite local
-              final puntosRes = await db.query('puntos_clientes', where: 'cliente_id = ? AND tarjeta_id = ?', whereArgs: [clienteId, tarjetaId]);
-              if (puntosRes.isNotEmpty) {
-                await db.update('puntos_clientes', {
-                  'puntos_actuales': newPts,
-                  'completadas_totales': newComp,
-                  'ultima_modificacion': DateTime.now().toIso8601String(),
-                }, where: 'cliente_id = ? AND tarjeta_id = ?', whereArgs: [clienteId, tarjetaId]);
-              } else {
-                await db.insert('puntos_clientes', {
-                  'cliente_id': clienteId,
-                  'tarjeta_id': tarjetaId,
-                  'puntos_actuales': newPts,
-                  'completadas_totales': newComp,
-                  'ultima_modificacion': DateTime.now().toIso8601String(),
+              if (!encontrado) {
+                listCache.add({
+                  'docId': "${keyUser}_${tarjetaIdStr}_$clienteId",
+                  'vendorUid': keyUser,
+                  'tarjetaId': tarjetaIdStr,
+                  'clienteLocalId': clienteId.toString(),
+                  'clienteNombre': nombreLimpio,
+                  'nombreNegocio': nomNegocio,
+                  'logoPath': logoPath,
+                  'tarjetaTitulo': tituloTarjeta,
+                  'metaCompras': meta,
+                  'premioDesc': premioDesc,
+                  'montoMinimo': montoMinimo,
+                  'puntosActuales': newPts,
+                  'completadasTotales': newComp,
                 });
               }
+              await prefs.setString('cache_tarjetas_acumuladas_$keyUser', jsonEncode(listCache));
+            }
+          } catch (e) {
+            debugPrint("Error actualizando caché local: $e");
+          }
+        }
 
-              // Actualizar en Firestore para el Vendedor
-              await doc.reference.update({
-                'puntosActuales': newPts,
-                'completadasTotales': newComp,
-                'ultimaModificacion': FieldValue.serverTimestamp(),
-              });
+        // 4️⃣ ESTRUCTURAR DATOS DE RESPALDO
+        Map<String, dynamic> datosVendedor = {
+          'clientUid': realClientUid ?? '',
+          if (emailCliente.isNotEmpty) 'clienteEmail': emailCliente,
+          'clienteLocalId': clienteId > 0 ? clienteId.toString() : '',
+          'clienteNombre': nombreLimpio,
+          'clienteTelefono': tel,
+          'completadasTotales': newComp,
+          'puntosActuales': newPts,
+        };
 
-              // 🔥 FIX CLAVE: Guardar la estructura COMPLETA en la cuenta del cliente para que su pantalla la renderice al instante
+        String targetUidCliente = (realClientUid != null && realClientUid.isNotEmpty) ? realClientUid : vendorUid;
+
+        String nombreNegocioParaCliente = (targetUidCliente == vendorUid && nombreLimpio.isNotEmpty && nombreLimpio != 'Cliente')
+            ? "$nomNegocio ($nombreLimpio)"
+            : nomNegocio;
+
+        Map<String, dynamic> datosCliente = {
+          'clienteLocalId': clienteId > 0 ? clienteId.toString() : '',
+          'clienteNombre': nombreLimpio,
+          'completadasTotales': newComp,
+          'logoPath': logoPath,
+          'metaCompras': meta,
+          'montoMinimo': montoMinimo,
+          'nombreNegocio': nombreNegocioParaCliente,
+          'premioDesc': premioDesc,
+          'puntosActuales': newPts,
+          'tarjetaId': tarjetaIdStr,
+          'tarjetaTitulo': tituloTarjeta,
+          'vendorUid': vendorUid,
+        };
+
+        // 5️⃣ ENCOLAR EN FIRESTORE O GUARDAR EN PENDIENTES OFFLINE
+        if (vendorUid.isNotEmpty && targetDocId.isNotEmpty) {
+          String rutaVendedor = "ruta_custom:usuarios/$vendorUid/mis_tarjetas_creadas/$tarjetaIdStr/clientes";
+          String targetUidCliente = (realClientUid != null && realClientUid.isNotEmpty) ? realClientUid : vendorUid;
+          String rutaCliente = "ruta_custom:usuarios/$targetUidCliente/tarjetas_acumuladas";
+          String docTargetCliente = (targetUidCliente == vendorUid && clienteId > 0)
+              ? "${vendorUid}_${tarjetaIdStr}_$clienteId"
+              : "${vendorUid}_$tarjetaIdStr";
+
+          if (hayInternet) {
+            try {
               await FirebaseFirestore.instance
                   .collection('usuarios')
-                  .doc(clientUid)
-                  .collection('tarjetas_acumuladas')
-                  .doc(user.uid)
+                  .doc(vendorUid)
+                  .collection('mis_tarjetas_creadas')
+                  .doc(tarjetaIdStr)
+                  .collection('clientes')
+                  .doc(targetDocId)
                   .set({
-                'vendorUid': user.uid,
-                'tarjetaId': tarjetaId.toString(),
-                'nombreNegocio': nomNegocio,
-                'logoPath': logoPath,
-                'tarjetaTitulo': tituloTarjeta,
-                'metaCompras': meta,
-                'premioDesc': premioDesc,
-                'puntosActuales': newPts,
-                'completadasTotales': newComp,
+                ...datosVendedor,
                 'ultimaModificacion': FieldValue.serverTimestamp(),
               }, SetOptions(merge: true));
 
-              // 🔥 NOTIFICAR AL CLIENTE POR NOTIFICACIÓN PUSH
+              await FirebaseFirestore.instance
+                  .collection('usuarios')
+                  .doc(targetUidCliente)
+                  .collection('tarjetas_acumuladas')
+                  .doc(docTargetCliente)
+                  .set({
+                ...datosCliente,
+                'ultimaModificacion': FieldValue.serverTimestamp(),
+              }, SetOptions(merge: true));
+
+              bool metaAlcanzada = newPts >= meta;
               ServicioFidelidad.notificarClientePuntoOtorgado(
-                clientUid: clientUid,
+                clientUid: targetUidCliente,
                 nombreNegocio: nomNegocio,
                 puntosActuales: newPts,
                 meta: meta,
+                premioDesc: premioDesc,
               );
+
+              // 🔥 Evitar enviar la notificación de vendedor si el cliente es la misma cuenta (pruebas "Yo")
+              if (vendorUid != targetUidCliente) {
+                ServicioFidelidad.notificarVendedorPuntoReclamado(
+                  vendorUid: vendorUid,
+                  nombreCliente: clienteNombreSnap,
+                  nombreNegocio: nomNegocio,
+                  metaAlcanzada: metaAlcanzada,
+                  premioDesc: premioDesc,
+                );
+              }
+            } catch (e) {
+              await db.insert('operaciones_pendientes', {
+                'tabla': rutaVendedor,
+                'operacion': 'set',
+                'doc_id': targetDocId,
+                'datos_json': jsonEncode(datosVendedor),
+                'fecha_creacion': DateTime.now().toIso8601String(),
+              }, conflictAlgorithm: ConflictAlgorithm.replace);
+
+              await db.insert('operaciones_pendientes', {
+                'tabla': rutaCliente,
+                'operacion': 'set',
+                'doc_id': docTargetCliente,
+                'datos_json': jsonEncode(datosCliente),
+                'fecha_creacion': DateTime.now().toIso8601String(),
+              }, conflictAlgorithm: ConflictAlgorithm.replace);
             }
+          } else {
+            // 🚫 MODO OFFLINE
+            await db.insert('operaciones_pendientes', {
+              'tabla': rutaVendedor,
+              'operacion': 'set',
+              'doc_id': targetDocId,
+              'datos_json': jsonEncode(datosVendedor),
+              'fecha_creacion': DateTime.now().toIso8601String(),
+            }, conflictAlgorithm: ConflictAlgorithm.replace);
+
+            await db.insert('operaciones_pendientes', {
+              'tabla': rutaCliente,
+              'operacion': 'set',
+              'doc_id': docTargetCliente,
+              'datos_json': jsonEncode(datosCliente),
+              'fecha_creacion': DateTime.now().toIso8601String(),
+            }, conflictAlgorithm: ConflictAlgorithm.replace);
           }
-        } catch (e) {
-          debugPrint("Error sumando punto en Firestore: $e");
         }
-      }
 
-      // 2. SI EL CLIENTE NO HA VINCULADO LA TARJETA, ENVIAR INVITACIÓN
-      if (!clienteEncontradoEnNube && user != null) {
-        final clienteRes = await db.query('clientes', columns: ['telefono', 'nombre_completo'], where: 'id = ?', whereArgs: [clienteId]);
-        if (clienteRes.isNotEmpty) {
-          String tel = clienteRes.first['telefono']?.toString() ?? "";
-          String nombreCli = clienteRes.first['nombre_completo']?.toString() ?? "Cliente";
-
-          String token = await ServicioFidelidad.crearTokenUnicoNube(
-            vendorUid: user.uid,
-            tarjetaId: tarjetaId.toString(),
-            clienteLocalId: clienteId,
-            nombreNegocio: nomNegocio,
-            logoPath: logoPath,
-            tarjetaTitulo: tituloTarjeta,
-            metaCompras: meta,
-            premioDesc: premioDesc,
-            clienteTelefono: tel,
+        // 🔥 MENSAJE VERDE GARANTIZADO DE RETROALIMENTACIÓN
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text("🎉 Punto sumado a $nombreLimpio en $tituloTarjeta ($newPts/$meta)"),
+              backgroundColor: Colors.green.shade800,
+              duration: const Duration(seconds: 3),
+              behavior: SnackBarBehavior.floating,
+            ),
           );
-
-          if (mounted) {
-            _mostrarModalInvitacionWhatsApp(nombreCli, tel, premioDesc, token, meta, tituloTarjeta);
-          }
         }
       }
     } catch (e) {
-      debugPrint("Error en _otorgarPuntoFidelidadAutomatico: $e");
+      debugPrint("Error general en _otorgarPuntoFidelidadAutomatico: $e");
     }
   }
 
-  void _mostrarModalInvitacionWhatsApp(String clienteNombre, String telefono, String premioDesc, String token, int meta, String tituloTarjeta) {
+  void _mostrarModalInvitacionWhatsApp(String clienteNombre, String telefono, String premioDesc, String token, int meta, String tituloTarjeta, {double montoMinimo = 0.0}) {
     String numLimpio = telefono.replaceAll(RegExp(r'\D'), '');
     String ind = "57";
     String telSolo = numLimpio;
@@ -906,6 +1182,7 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
 
     TextEditingController indCtrl = TextEditingController(text: ind == "57" ? "" : ind);
     TextEditingController numCtrl = TextEditingController(text: telSolo);
+    String enlaceUnico = "https://boxi-catalogo.web.app/reclamar?token=$token";
 
     showDialog(
       context: context,
@@ -947,6 +1224,22 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                 ),
               ],
             ),
+            const SizedBox(height: 15),
+            // 🔥 BOTÓN PARA COPIAR ENLACE ÚNICO
+            OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(
+                minimumSize: const Size(double.infinity, 42),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+              icon: const Icon(Icons.copy, size: 16),
+              label: const Text("Copiar Enlace Único", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: enlaceUnico));
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text("Enlace copiado al portapapeles 📋"), duration: Duration(seconds: 2))
+                );
+              },
+            ),
           ],
         ),
         actions: [
@@ -963,9 +1256,16 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
               if (indClean.isEmpty) indClean = "57";
               String telClean = numCtrl.text.trim().replaceAll(RegExp(r'\D'), '');
               String fullNum = "$indClean$telClean";
-              String enlaceUnico = "https://boxi-catalogo.web.app/reclamar?token=$token";
 
-              String mensaje = "¡Hola *$clienteNombre*! 🎁 Felicidades, *$nomNegocio* te obsequió tu primer punto.\n\nPor *$meta* compras obtienes *$premioDesc*.\n\nDescarga la app Boxi y empieza a sumar puntos aquí:\n$enlaceUnico";
+              String textoMonto = "";
+              if (montoMinimo > 0) {
+                String mFormateado = montoMinimo == montoMinimo.roundToDouble() 
+                    ? montoMinimo.toInt().toString() 
+                    : montoMinimo.toStringAsFixed(0);
+                textoMonto = " de *\$$mFormateado* o más";
+              }
+
+              String mensaje = "¡Hola *$clienteNombre*! 🎁 Felicidades, *$nomNegocio* te obsequió tu primer punto.\n\nPor *$meta* compras$textoMonto obtienes *$premioDesc*.\n\nDescarga la app Boxi y empieza a sumar puntos aquí:\n$enlaceUnico";
               String urlWa = "https://wa.me/$fullNum?text=${Uri.encodeComponent(mensaje)}";
               if (await canLaunchUrl(Uri.parse(urlWa))) {
                 await launchUrl(Uri.parse(urlWa), mode: LaunchMode.externalApplication);

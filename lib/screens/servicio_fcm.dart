@@ -41,9 +41,10 @@ class ServicioFCM {
         String cuerpo = message.notification?.body ?? 'Tu negocio te espera 🚀';
         await ServicioNotificaciones.mostrarNotificacionInactividad(titulo, cuerpo);
       } else if (tipo == 'punto_fidelidad' || tipo == 'fidelidad_vendedor') {
-        String titulo = message.notification?.title ?? message.data['titulo'] ?? '🎁 Punto de Fidelidad';
-        String cuerpo = message.notification?.body ?? message.data['cuerpo'] ?? 'Tienes una actualización de puntos.';
-        await ServicioNotificaciones.mostrarNotificacionInactividad(titulo, cuerpo);
+        String titulo = message.notification?.title ?? message.data['titulo'] ?? '🎁 ¡Punto de Fidelidad!';
+        String cuerpo = message.notification?.body ?? message.data['cuerpo'] ?? 'Tienes una nueva actualización en tus puntos.';
+        String token = message.data['token'] ?? '';
+        await ServicioNotificaciones.mostrarNotificacionFidelidad(titulo, cuerpo, token: token);
       }
 
       // 🔥 Captura el toque en la notificación cuando la app estaba en segundo plano o cerrada

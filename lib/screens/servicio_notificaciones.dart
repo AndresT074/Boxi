@@ -101,27 +101,27 @@ class ServicioNotificaciones {
     );
   }
 
-  // 🔥 Notificación de Fidelidad vinculada al Token
+  // 🔥 Notificación de Fidelidad flotante de alta prioridad
   static Future<void> mostrarNotificacionFidelidad(
-      String nombreNegocio, String nombreCliente, String token) async {
+      String titulo, String cuerpo, {String? token}) async {
     int notificationId = DateTime.now().millisecondsSinceEpoch % 100000;
     await _plugin.show(
       id: notificationId,
-      title: '🎁 ¡Punto de Fidelidad!',
-      body: 'Hola $nombreCliente, $nombreNegocio te ha dado un punto de fidelidad.',
+      title: titulo,
+      body: cuerpo,
       notificationDetails: const NotificationDetails(
         android: AndroidNotificationDetails(
-          _canalPedidosId,
+          _canalPedidosId, // 👈 Usa el canal de máxima importancia igual a pedidos web
           _canalPedidosNombre,
           channelDescription: 'Notificaciones de puntos de fidelidad',
-          importance: Importance.max,
+          importance: Importance.max, // 👈 Fuerza el aviso flotante en pantalla
           priority: Priority.high,
           icon: '@mipmap/ic_launcher',
           playSound: true,
           enableVibration: true,
         ),
       ),
-      payload: token, // 🔥 Pasa el token para abrir la ficha de inmediato al tocar
+      payload: token ?? '',
     );
   }
 }

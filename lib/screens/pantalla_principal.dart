@@ -137,8 +137,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
     final prefs = await SharedPreferences.getInstance();
-
-    // 1. Sincronización de Nombre de Negocio y Logo Inicial
+    await ServicioNube.procesarColaOffline();
     bool nombreYaSincronizado = prefs.getBool('nombre_sincronizado_nube_${user.uid}') ?? false;
     if (!nombreYaSincronizado && await ServicioNube.tieneInternet()) {
       try {
@@ -199,8 +198,11 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      ServicioNube.procesarColaOffline();
-      debugPrint("▶️ App en primer plano, verificando cambios en nube...");
+      ServicioNube.procesarColaOffline().then((_) {
+        _sincronizarSoloSiHayCambios();
+      });
+      if (mounted) setState(() {});
+      debugPrint("▶️ App en primer plano, procesando cola offline y sincronizando...");
     }
   }
   
@@ -447,7 +449,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     if (token != null && token.isNotEmpty) {
       token = token.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_]'), '');
 
-      final user = FirebaseAuth.instance.currentUser;
       final prefs = await SharedPreferences.getInstance();
 
       // 🔥 PERMITIR QUE EL VENDEDOR TAMBIÉN PUEDA RECLAMAR (Para clientes de iPhone)
