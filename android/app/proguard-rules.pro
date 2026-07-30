@@ -20,3 +20,13 @@
 
 # Google Mobile Ads
 -keep class com.google.android.gms.ads.** { *; }
+
+# ML Kit & CameraX (Mobile Scanner / QR)
+-keep class com.google.mlkit.** { *; }
+-dontwarn com.google.mlkit.**
+-keep class androidx.camera.** { *; }
+-dontwarn androidx.camera.**
+
+# Optimización de Bitmaps e Imágenes Nativa
+-keep class android.graphics.Bitmap** { *; }
+-dontwarn android.graphics.BitmapFactory**
