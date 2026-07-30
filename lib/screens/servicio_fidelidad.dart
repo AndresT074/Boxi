@@ -316,7 +316,7 @@ class ServicioFidelidad {
   }) async {
     String titulo = metaAlcanzada 
         ? '🏆 ¡CLIENTE COMPLETÓ TARJETA!' 
-        : '🎁 ¡Punto de Fidelidad Otorgado!';
+        : '🎁 ¡Punto de Fidelidad entregado!';
 
     String premioTxt = premioDesc != null && premioDesc.isNotEmpty ? premioDesc : "el premio";
 

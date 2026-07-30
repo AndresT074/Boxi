@@ -1965,7 +1965,7 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
       },
       {
         'q': '💳 ¿Cómo crear una nueva Tarjeta de Fidelidad?',
-        'a': '\n\n1.SI ERES PREMIUM Toca el botón "+ Nueva" en la sección de Fidelización. Ingresa el premio o premio a otorgar (ej: Audífonos Gratis), define la cantidad de sellos requeridos (ej: 5 compras) y opcionalmente un monto mínimo por compra. \n\n2. Si no eres premium debes adquirir la membresia premium'
+        'a': '\n\n1.SI ERES PREMIUM Toca el botón "+ Nueva" en la sección de Fidelización. Ingresa el premio a otorgar (ej: Audífonos Gratis), define la cantidad de sellos requeridos (ej: 5 compras) y opcionalmente un monto mínimo por compra. \n\n2. Si no eres PREMIUM debes adquirir la membresia PREMIUM'
       },
       {
         'q': '⚡ ¿Cómo funcionan los Puntos Automáticos?',
@@ -2116,7 +2116,7 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
                 }
 
                 String premioTxt = premioDesc.isNotEmpty ? premioDesc : tarjetaTitulo;
-                String mensaje = "¡Hola *$nombreCliente*! 🎁 *$_nombreNegocio* te otorgó *1 punto* para tu tarjeta de fidelidad *$tarjetaTitulo*.\n\nPor *$metaCompras* compras$textoMonto obtienes *$premioTxt*.\n\n*Reclama tu punto ingresando a este enlace:*\n$enlaceUnico";
+                String mensaje = "¡Hola *$nombreCliente*! 🎁 *$_nombreNegocio* te obsequió *1 punto* para tu tarjeta de fidelidad *$tarjetaTitulo*.\n\nPor *$metaCompras* compras$textoMonto obtienes *$premioTxt*.\n\n*Al completar 5 puntos llevas el premio, reclama tu punto ingresando a este enlace:*\n$enlaceUnico";
                 String numClean = telefono.replaceAll(RegExp(r'\D'), '');
                 String urlWa;
 

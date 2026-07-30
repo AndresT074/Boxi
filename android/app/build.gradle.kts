@@ -42,7 +42,6 @@ android {
         }
     }
 
-
     defaultConfig {
         applicationId = "com.andres074.boxi"
         minSdk = flutter.minSdkVersion
@@ -67,6 +66,16 @@ android {
 
 flutter {
     source = "../.."
+}
+
+// ⬇️ REGLA PARA SUSTITUIR ML KIT PESADO POR LA VERSIÓN LIVIANA DE PLAY SERVICES ⬇️
+configurations.all {
+    resolutionStrategy {
+        dependencySubstitution {
+            substitute(module("com.google.mlkit:barcode-scanning"))
+                .using(module("com.google.android.gms:play-services-mlkit-barcode-scanning:18.3.1"))
+        }
+    }
 }
 
 dependencies {

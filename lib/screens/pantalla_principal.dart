@@ -136,27 +136,12 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   Future<void> _intentarSincronizacionNube() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
-    final prefs = await SharedPreferences.getInstance();
+    
+    // 🔥 Descarga primero el perfil real desde Firestore (evita sobrescribir con "MI NEGOCIO")
+    await ServicioNube.descargarPerfilNube(user.uid);
+    await _cargarConfig(); // Refresca la pantalla principal con la foto y nombre descargados
+
     await ServicioNube.procesarColaOffline();
-    bool nombreYaSincronizado = prefs.getBool('nombre_sincronizado_nube_${user.uid}') ?? false;
-    if (!nombreYaSincronizado && await ServicioNube.tieneInternet()) {
-      try {
-        String nombreLocal = prefs.getString('nombre_negocio') ?? "MI NEGOCIO";
-        String logoLocal = prefs.getString('logo_path') ?? "";
-        
-        await FirebaseFirestore.instance
-            .collection('usuarios')
-            .doc(user.uid)
-            .set({
-              'nombre_negocio': nombreLocal,
-              'logo_path': logoLocal.startsWith('http') ? logoLocal : "",
-            }, SetOptions(merge: true));
-            
-        await prefs.setBool('nombre_sincronizado_nube_${user.uid}', true);
-      } catch (e) {
-        debugPrint("Error sincronizando nombre inicial: $e");
-      }
-    }
 
     // 2. Actualizar Token FCM para Notificaciones Push
     try {

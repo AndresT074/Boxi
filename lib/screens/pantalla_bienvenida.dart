@@ -322,7 +322,7 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
         debugPrint("Sin conexión a internet. Saltando sincronización silenciosa.");
         return; 
       }
-
+      await ServicioNube.migrarYRecuperarDesdeFirestore(user.uid);
       final SharedPreferences prefs = await SharedPreferences.getInstance();
       String hoy = DateTime.now().toIso8601String().substring(0, 10);
       String nombreActual =
@@ -497,11 +497,11 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
       String? versionGuardada = prefs.getString('version_app_registrada');
       PackageInfo packageInfo = await PackageInfo.fromPlatform();
       String versionActual = '${packageInfo.version}+${packageInfo.buildNumber}';
-      bool nombreYaSincronizado = prefs.getBool('nombre_sincronizado_nube_${user.uid}') ?? false;
+      
       bool necesitaActualizarDia = (ultimoRegistro != hoy);
       bool necesitaActualizarVersion = (versionGuardada != versionActual);
       
-      if (necesitaActualizarDia || necesitaActualizarVersion || !nombreYaSincronizado) {
+      if (necesitaActualizarDia || necesitaActualizarVersion) {
         Map<String, dynamic> datosAEnviar = {};
         
         if (necesitaActualizarDia) {
@@ -509,13 +509,6 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
         }
         if (necesitaActualizarVersion) {
           datosAEnviar['version_app'] = versionActual;
-        }
-        if (!nombreYaSincronizado) {
-          String nombreLocal = prefs.getString('nombre_negocio') ?? "MI NEGOCIO";
-          String logoLocal = prefs.getString('logo_path') ?? "";
-          
-          datosAEnviar['nombre_negocio'] = nombreLocal;
-          datosAEnviar['logo_path'] = logoLocal.startsWith('http') ? logoLocal : "";
         }
         
         await FirebaseFirestore.instance
@@ -530,7 +523,6 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
         if (necesitaActualizarVersion) {
           await prefs.setString('version_app_registrada', versionActual);
         }
-        await prefs.setBool('nombre_sincronizado_nube_${user.uid}', true);
       }
       AppUpdateInfo info = await InAppUpdate.checkForUpdate().timeout(const Duration(seconds: 2));
       if (info.updateAvailability == UpdateAvailability.updateAvailable) { 

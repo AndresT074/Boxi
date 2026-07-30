@@ -937,17 +937,19 @@ class ServicioNube {
       if (!doc.exists) return;
       final data = doc.data()!;
       final prefs = await SharedPreferences.getInstance();
+
+      // Cargar Nombre de Negocio si no es el por defecto
       if (data.containsKey('nombre_negocio')) {
-        await prefs.setString('nombre_negocio', data['nombre_negocio']);
+        String nom = data['nombre_negocio'].toString();
+        if (nom.isNotEmpty && nom != "MI NEGOCIO" && nom != "NOMBREDETUNEGOCIOAQUI") {
+          await prefs.setString('nombre_negocio', nom);
+        }
       }
-      if (data.containsKey('logo_base64')) {
-        await prefs.setString('logo_path', data['logo_base64']);
-      }
-      if (data.containsKey('nombre_negocio')) {
-        await prefs.setString('nombre_negocio', data['nombre_negocio']);
-      }
-      if (data.containsKey('logo_base64')) {
-        await prefs.setString('logo_path', data['logo_base64']);
+
+      // Cargar Logo (Prioriza logo_base64 que tiene tu URL de Cloudinary)
+      String logoFromCloud = (data['logo_base64'] ?? data['logo_path'] ?? '').toString();
+      if (logoFromCloud.isNotEmpty) {
+        await prefs.setString('logo_path', logoFromCloud);
       }
 
       if (data.containsKey('whatsapp_admin')) {
@@ -968,7 +970,6 @@ class ServicioNube {
           numeroLocal = wa.substring(2);
         }
 
-        // Guardamos los datos desglosados listos para los campos del perfil
         await prefs.setString('whatsapp_admin_indicativo', indicativo);
         await prefs.setString('whatsapp_admin_numero', numeroLocal);
       }
@@ -1178,6 +1179,15 @@ class ServicioNube {
       if (user == null) return;
 
       final db = await DBHelper.instance.database;
+      final prodCheck = await db.query('productos', limit: 1);
+      if (prodCheck.isEmpty) {
+        final fsCheck = await _db.collection('usuarios').doc(user.uid).collection('productos').limit(1).get();
+        if (fsCheck.docs.isNotEmpty) {
+          debugPrint("🛡️ Catálogo local vacío pero Firestore tiene productos. Migrando primero...");
+          await migrarYRecuperarDesdeFirestore(user.uid);
+          return;
+        }
+      }
       final prefs = await SharedPreferences.getInstance();
       
       bool esPremium = prefs.getBool('es_premium') ?? false;
@@ -1900,6 +1910,17 @@ class ServicioNube {
     if (_uid == null || !await tieneInternet()) return;
     try {
       final dbLocal = await DBHelper.instance.database;
+      final pedCheck = await dbLocal.query('pedidos', limit: 1);
+      final cliCheck = await dbLocal.query('clientes', limit: 1);
+      if (pedCheck.isEmpty && cliCheck.isEmpty) {
+        final fsCheck = await _db.collection('usuarios').doc(_uid).collection('pedidos').limit(1).get();
+        if (fsCheck.docs.isNotEmpty) {
+          debugPrint("🛡️ SQLite local vacía pero Firestore tiene datos. Recuperando antes de respaldar...");
+          await migrarYRecuperarDesdeFirestore(_uid!);
+          return;
+        }
+      }
+
       Map<String, dynamic> jsonPrivado = {
         'timestamp_privado': DateTime.now().millisecondsSinceEpoch
       };
@@ -1935,14 +1956,15 @@ class ServicioNube {
     }
   }
 
-  // 🔥 2. DESCARGAR SOLO DATOS PRIVADOS DESDE RTDB
-  // 🔥 2. DESCARGAR SOLO DATOS PRIVADOS DESDE RTDB
   static Future<void> descargarDatosPrivadosRTDB() async {
     if (_uid == null || !await tieneInternet()) return;
     try {
       final ref = FirebaseDatabase.instance.ref("datos_privados/$_uid");
       final snap = await ref.get();
-      if (!snap.exists) return;
+      if (!snap.exists) {
+        await migrarYRecuperarDesdeFirestore(_uid!, force: true);
+        return;
+      }
 
       final rawValue = snap.value;
       Map<String, dynamic> datos = {};
@@ -1954,7 +1976,6 @@ class ServicioNube {
 
       final dbLocal = await DBHelper.instance.database;
 
-      // 🔥 Asegurar columna client_uid en la tabla local SQLite antes de insertar
       try {
         final cols = await dbLocal.rawQuery("PRAGMA table_info(puntos_clientes);");
         if (!cols.any((c) => c['name'] == 'client_uid')) {
@@ -1973,10 +1994,9 @@ class ServicioNube {
         'tarjetas_fidelidad',
         'puntos_clientes'
       ];
-      
+
       for (String t in tablasPrivadas) {
         if (datos[t] != null) {
-          await dbLocal.delete(t); // Vaciamos local
           final lista = List<dynamic>.from(datos[t]);
           for (var item in lista) {
              Map<String, dynamic> mapLocal = Map<String, dynamic>.from(item);
@@ -1988,7 +2008,7 @@ class ServicioNube {
         }
       }
       await batch.commit(noResult: true);
-      
+
       final prefs = await SharedPreferences.getInstance();
       if (datos['timestamp_privado'] != null) {
         await prefs.setInt('rt_timestamp_privado_$_uid', datos['timestamp_privado']);
@@ -2034,6 +2054,92 @@ class ServicioNube {
       }
     } catch (e) {
       debugPrint("Error eliminando archivos locales de disco: $e");
+    }
+  }
+  // 🔥 RECUPERAR E IMPORTAR HISTORIAL COMPLETO DESDE FIRESTORE A REALTIME Y SQLITE
+  static Future<void> migrarYRecuperarDesdeFirestore(String uid, {bool force = true}) async {
+    if (!await tieneInternet()) return;
+    try {
+      final dbLocal = await DBHelper.instance.database;
+      debugPrint("🚀 RECUPERANDO Y FUSIONANDO HISTORIAL COMPLETO FIRESTORE ➔ SQLITE ➔ REALTIME");
+
+      const List<String> tablas = [
+        'categorias',
+        'productos',
+        'vendedores',
+        'clientes',
+        'pedidos',
+        'detalle_pedidos',
+        'reportes_guardados',
+        'ajustes_capital',
+        'tarjetas_fidelidad',
+        'puntos_clientes',
+      ];
+
+      for (String tabla in tablas) {
+        final snap = await _db.collection('usuarios').doc(uid).collection(tabla).get();
+        if (snap.docs.isEmpty) continue;
+
+        final List<Map<String, dynamic>> columnasSQLite = await dbLocal.rawQuery('PRAGMA table_info($tabla)');
+        final Set<String> columnasValidas = columnasSQLite.map((c) => c['name'] as String).toSet();
+
+        int chunkSize = 25;
+        for (int i = 0; i < snap.docs.length; i += chunkSize) {
+          int fin = (i + chunkSize < snap.docs.length) ? i + chunkSize : snap.docs.length;
+          List<QueryDocumentSnapshot> chunk = snap.docs.sublist(i, fin);
+
+          final Batch batch = dbLocal.batch();
+          for (var doc in chunk) {
+            final Map<String, dynamic> raw = Map<String, dynamic>.from(doc.data() as Map<String, dynamic>);
+            final Map<String, dynamic> mapLocal = {};
+
+            raw.forEach((key, value) {
+              if (!columnasValidas.contains(key)) return;
+              if (value is Timestamp) {
+                mapLocal[key] = value.toDate().toIso8601String();
+              } else if (value is Blob) {
+                mapLocal[key] = value.bytes;
+              } else if (value is List || value is Map) {
+                mapLocal[key] = jsonEncode(value);
+              } else {
+                mapLocal[key] = value;
+              }
+            });
+
+            // Asignar o reparar ID
+            if (!mapLocal.containsKey('id') || mapLocal['id'] == null) {
+              int? parsedId = int.tryParse(doc.id);
+              if (parsedId != null) {
+                mapLocal['id'] = parsedId;
+              } else {
+                mapLocal['id'] = doc.id.hashCode.abs();
+              }
+            }
+
+            if (tabla == 'pedidos') {
+              mapLocal['fecha_hora'] ??= DateTime.now().toIso8601String();
+              mapLocal['cliente_id'] ??= 0;
+              mapLocal['vendedor_id'] ??= 0;
+              mapLocal['total_venta'] ??= 0.0;
+              mapLocal['ganancia_total'] ??= 0.0;
+              mapLocal['estado'] ??= 'Pendiente';
+            }
+
+            batch.insert(tabla, mapLocal, conflictAlgorithm: ConflictAlgorithm.replace);
+          }
+          await batch.commit(noResult: true);
+        }
+      }
+
+      debugPrint("✅ 100% de datos recuperados e insertados en SQLite.");
+
+      // RECONSTRUIR REALTIME DATABASE CON EL 100% DE LOS DATOS
+      await compilarYSubirCatalogoRTDB();
+      await respaldarDatosPrivadosRTDB();
+      debugPrint("🚀 Realtime Database actualizado con la totalidad del historial.");
+
+    } catch (e) {
+      debugPrint("Error en migración/recuperación desde Firestore: $e");
     }
   }
 }

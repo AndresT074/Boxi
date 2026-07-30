@@ -276,13 +276,9 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
         }
         return;
       }
-      await ServicioNube.sincronizarBorradosFisicos(uid, 'pedidos', force: true);
-      await ServicioNube.sincronizarBorradosFisicos(uid, 'detalle_pedidos', force: true);
-      await ServicioNube.descargarSoloModificados(
-          uid, 'pedidos', 'ultima_modificacion');
-      await ServicioNube.descargarSoloModificados(
-          uid, 'detalle_pedidos', 'ultima_modificacion');
-      await ServicioNube.limpiarFantasmasNubeYLocal(uid);
+
+      // 🔥 RECUPERA EL 100% DE PEDIDOS Y PRODUCTOS DESDE FIRESTORE
+      await ServicioNube.migrarYRecuperarDesdeFirestore(uid, force: true);
       _detallesCache.clear();
       await _cargar();
 
@@ -293,7 +289,7 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
             content: Row(children: [
               const Icon(Icons.cloud_done_rounded, color: Colors.white, size: 18),
               const SizedBox(width: 10),
-              Text('$count pedidos sincronizados',
+              Text('$count pedidos sincronizados exitosamente',
                   style: const TextStyle(fontWeight: FontWeight.bold)),
             ]),
             backgroundColor: const Color(0xFF00C853),
@@ -306,17 +302,6 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
       }
     } catch (e) {
       debugPrint('Error en _refrescarDesdeNube: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error al sincronizar: $e'),
-            backgroundColor: Colors.red,
-            behavior: SnackBarBehavior.floating,
-            margin: const EdgeInsets.all(12),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          ),
-        );
-      }
     } finally {
       _refreshAnim.stop();
       _refreshAnim.reset();
@@ -1265,7 +1250,8 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                 textoMonto = " de *\$$mFormateado* o más";
               }
 
-              String mensaje = "¡Hola *$clienteNombre*! 🎁 Felicidades, *$nomNegocio* te obsequió tu primer punto.\n\nPor *$meta* compras$textoMonto obtienes *$premioDesc*.\n\nDescarga la app Boxi y empieza a sumar puntos aquí:\n$enlaceUnico";
+              String premioTxt = premioDesc.isNotEmpty ? premioDesc : tituloTarjeta;
+              String mensaje = "¡Hola *$clienteNombre*! 🎁 *$nomNegocio* te obsequió *1 punto* para tu tarjeta de fidelidad *$tituloTarjeta*.\n\nPor *$meta* compras$textoMonto obtienes *$premioTxt*.\n\n*Al completar $meta puntos llevas el premio, descarga la app BOXI para empezar a acumular puntos:*\n$enlaceUnico";
               String urlWa = "https://wa.me/$fullNum?text=${Uri.encodeComponent(mensaje)}";
               if (await canLaunchUrl(Uri.parse(urlWa))) {
                 await launchUrl(Uri.parse(urlWa), mode: LaunchMode.externalApplication);
