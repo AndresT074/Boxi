@@ -756,7 +756,6 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
       }
     }
   }
-  // 🎬 ANIMACIÓN DE ESTAMPADO DE LA "X" MEJORADA (Más lenta, grande y vistosa)
   void _mostrarAnimacionEstampadoX(Map<String, dynamic> tarjeta, int puntoNuevo) {
     int meta = ((tarjeta['metaCompras'] ?? 10) as num).toInt();
     String nomNegocio = tarjeta['nombreNegocio'] ?? 'Negocio';
@@ -766,76 +765,99 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (ctx) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          backgroundColor: Theme.of(context).cardColor,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(25)),
-          title: Text("¡Punto Reclamado en $nomNegocio!", textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Builder(
-                builder: (context) {
-                  double mMin = ((tarjeta['montoMinimo'] ?? 0) as num).toDouble();
-                  String textoMonto = mMin > 0 ? " de \$${mMin.toInt()} o más" : "";
-                  return Text("Por $meta compras$textoMonto obtienes $premio", style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)), textAlign: TextAlign.center);
-                }
-              ),
-              const SizedBox(height: 20),
-
-              GridView.builder(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 5,
-                  crossAxisSpacing: 8,
-                  mainAxisSpacing: 8,
+      builder: (ctx) => Dialog(
+        backgroundColor: Theme.of(context).cardColor,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(25)),
+        child: Container(
+          width: 440,
+          padding: const EdgeInsets.all(22),
+          child: SingleChildScrollView(
+            physics: const BouncingScrollPhysics(),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  "¡Punto Reclamado en $nomNegocio!",
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16),
                 ),
-                itemCount: meta,
-                itemBuilder: (context, index) {
-                  bool tieneSello = (index + 1) <= puntoNuevo;
-                  bool esElNuevoSello = (index + 1) == puntoNuevo;
+                const SizedBox(height: 10),
+                Builder(
+                  builder: (context) {
+                    double mMin = ((tarjeta['montoMinimo'] ?? 0) as num).toDouble();
+                    String textoMonto = mMin > 0 ? " de \$${mMin.toInt()} o más" : "";
+                    return Text(
+                      "Por $meta compras$textoMonto obtienes $premio",
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                        color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1),
+                      ),
+                      textAlign: TextAlign.center,
+                    );
+                  }
+                ),
+                const SizedBox(height: 20),
 
-                  return AnimatedContainer(
-                    duration: const Duration(milliseconds: 800),
-                    curve: Curves.elasticOut,
-                    decoration: BoxDecoration(
-                      color: tieneSello ? Colors.green.withOpacity(0.15) : (isOscuro ? Colors.white10 : Colors.grey.shade100),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: tieneSello ? Colors.green : Colors.grey.shade300, width: tieneSello ? 2 : 1),
-                    ),
-                    child: Center(
-                      child: tieneSello
-                          ? TweenAnimationBuilder<double>(
-                              duration: const Duration(milliseconds: 1200), // 👈 Animación de 1.2s muy vistosa
-                              tween: Tween(begin: 0.0, end: 1.0),
-                              curve: Curves.elasticOut, // 👈 Efecto rebote de sello real
-                              builder: (context, scale, child) {
-                                return Transform.scale(
-                                  scale: esElNuevoSello ? (0.4 + scale * 0.8) : 1.0,
-                                  child: const Text("❌", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-                                );
-                              },
-                            )
-                          : Text("${index + 1}", style: TextStyle(color: Colors.grey.shade400, fontSize: 11)),
-                    ),
-                  );
-                },
-              ),
-              const SizedBox(height: 20),
-              const Text("🎉 ¡Punto reclamado con éxito!", style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold, fontSize: 14)),
-            ],
+                GridView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 5,
+                    crossAxisSpacing: 8,
+                    mainAxisSpacing: 8,
+                    childAspectRatio: 1.0,
+                  ),
+                  itemCount: meta,
+                  itemBuilder: (context, index) {
+                    bool tieneSello = (index + 1) <= puntoNuevo;
+                    bool esElNuevoSello = (index + 1) == puntoNuevo;
+
+                    return AnimatedContainer(
+                      duration: const Duration(milliseconds: 800),
+                      curve: Curves.elasticOut,
+                      decoration: BoxDecoration(
+                        color: tieneSello ? Colors.green.withOpacity(0.15) : (isOscuro ? Colors.white10 : Colors.grey.shade100),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: tieneSello ? Colors.green : Colors.grey.shade300, width: tieneSello ? 2 : 1),
+                      ),
+                      child: Center(
+                        child: tieneSello
+                            ? TweenAnimationBuilder<double>(
+                                duration: const Duration(milliseconds: 1200),
+                                tween: Tween(begin: 0.0, end: 1.0),
+                                curve: Curves.elasticOut,
+                                builder: (context, scale, child) {
+                                  return Transform.scale(
+                                    scale: esElNuevoSello ? (0.4 + scale * 0.8) : 1.0,
+                                    child: const Text("❌", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+                                  );
+                                },
+                              )
+                            : Text("${index + 1}", style: TextStyle(color: Colors.grey.shade400, fontSize: 11)),
+                      ),
+                    );
+                  },
+                ),
+                const SizedBox(height: 20),
+                const Text("🎉 ¡Punto reclamado con éxito!", style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold, fontSize: 14)),
+                const SizedBox(height: 20),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF0D47A1),
+                    foregroundColor: Colors.white,
+                    minimumSize: const Size(double.infinity, 45),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                  ),
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    if (!_esPremium) ServicioAnuncios.mostrarAnuncioIntersticial(() {});
+                  },
+                  child: const Text("ACEPTAR", style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+              ],
+            ),
           ),
-          actions: [
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0D47A1), foregroundColor: Colors.white, minimumSize: const Size(double.infinity, 45)),
-              onPressed: () {
-                Navigator.pop(ctx);
-                if (!_esPremium) ServicioAnuncios.mostrarAnuncioIntersticial(() {});
-              },
-              child: const Text("ACEPTAR", style: TextStyle(fontWeight: FontWeight.bold)),
-            )
-          ],
         ),
       ),
     );
@@ -848,7 +870,6 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        scrollable: true, // 👈 Evita el desbordamiento cuando se abre el teclado
         backgroundColor: Theme.of(context).cardColor,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
         titlePadding: const EdgeInsets.fromLTRB(20, 20, 20, 10),
@@ -1882,70 +1903,79 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
 
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
+      builder: (ctx) => Dialog(
         backgroundColor: Theme.of(context).cardColor,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(25)),
-        title: Column(
-          children: [
-            Text("Tarjeta de $nombreCliente", textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
-            if (email.isNotEmpty) ...[
-              const SizedBox(height: 4),
-              Text("✉️ $email", style: const TextStyle(fontSize: 11, color: Colors.grey)),
-            ],
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Builder(
-              builder: (context) {
-                double mMin = ((tarjetaData['monto_minimo'] ?? 0) as num).toDouble();
-                String textoMonto = mMin > 0 ? " de \$${mMin.toInt()} o más" : "";
-                return Text("Por $meta compras$textoMonto obtienes $premio", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)), textAlign: TextAlign.center);
-              }
-            ),
-            const SizedBox(height: 18),
+        child: Container(
+          width: 440,
+          padding: const EdgeInsets.all(22),
+          child: SingleChildScrollView(
+            physics: const BouncingScrollPhysics(),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text("Tarjeta de $nombreCliente", textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
+                if (email.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text("✉️ $email", style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                ],
+                const SizedBox(height: 12),
+                Builder(
+                  builder: (context) {
+                    double mMin = ((tarjetaData['monto_minimo'] ?? 0) as num).toDouble();
+                    String textoMonto = mMin > 0 ? " de \$${mMin.toInt()} o más" : "";
+                    return Text("Por $meta compras$textoMonto obtienes $premio", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)), textAlign: TextAlign.center);
+                  }
+                ),
+                const SizedBox(height: 18),
 
-            GridView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 5,
-                crossAxisSpacing: 8,
-                mainAxisSpacing: 8,
-              ),
-              itemCount: meta,
-              itemBuilder: (context, index) {
-                bool tieneSello = (index + 1) <= pts;
+                GridView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 5,
+                    crossAxisSpacing: 8,
+                    mainAxisSpacing: 8,
+                    childAspectRatio: 1.0,
+                  ),
+                  itemCount: meta,
+                  itemBuilder: (context, index) {
+                    bool tieneSello = (index + 1) <= pts;
 
-                return Container(
-                  decoration: BoxDecoration(
-                    color: tieneSello ? Colors.green.withOpacity(0.15) : (isOscuro ? Colors.white10 : Colors.grey.shade100),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: tieneSello ? Colors.green : Colors.grey.shade300, width: tieneSello ? 2 : 1),
+                    return Container(
+                      decoration: BoxDecoration(
+                        color: tieneSello ? Colors.green.withOpacity(0.15) : (isOscuro ? Colors.white10 : Colors.grey.shade100),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: tieneSello ? Colors.green : Colors.grey.shade300, width: tieneSello ? 2 : 1),
+                      ),
+                      child: Center(
+                        child: tieneSello
+                            ? const Text("❌", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold))
+                            : Text("${index + 1}", style: TextStyle(color: Colors.grey.shade400, fontSize: 11)),
+                      ),
+                    );
+                  },
+                ),
+                const SizedBox(height: 18),
+                Text(
+                  metaAlcanzada ? "🎉 ¡Tarjeta Completada!" : "$pts de $meta sellos acumulados",
+                  style: TextStyle(color: metaAlcanzada ? Colors.green : (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)), fontWeight: FontWeight.bold, fontSize: 13),
+                ),
+                const SizedBox(height: 20),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF0D47A1),
+                    foregroundColor: Colors.white,
+                    minimumSize: const Size(double.infinity, 42),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                   ),
-                  child: Center(
-                    child: tieneSello
-                        ? const Text("❌", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold))
-                        : Text("${index + 1}", style: TextStyle(color: Colors.grey.shade400, fontSize: 11)),
-                  ),
-                );
-              },
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text("CERRAR", style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+              ],
             ),
-            const SizedBox(height: 18),
-            Text(
-              metaAlcanzada ? "🎉 ¡Tarjeta Completada!" : "$pts de $meta sellos acumulados",
-              style: TextStyle(color: metaAlcanzada ? Colors.green : (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)), fontWeight: FontWeight.bold, fontSize: 13),
-            ),
-          ],
+          ),
         ),
-        actions: [
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0D47A1), foregroundColor: Colors.white, minimumSize: const Size(double.infinity, 42)),
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text("CERRAR", style: TextStyle(fontWeight: FontWeight.bold)),
-          )
-        ],
       ),
     );
   }
@@ -1957,11 +1987,11 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
     final List<Map<String, String>> preguntas = [
       {
         'q': '🤔 ¿Qué es una Tarjeta de Fidelidad y para qué sirve?',
-        'a': 'Es un sistema digital de recompensas para premiar a tus clientes recurrentes. Cada vez que realicen una compra o alcancen tu meta establecida, recibirán sellos (puntos) hasta completar la tarjeta y ganar un premio.'
+        'a': 'Es un sistema digital de recompensas para premiarte o a tus clientes recurrentes. Cada vez que realices o que tus clientes realicen una compra o alcancen la meta establecida, recibirán sellos (puntos) hasta completar la tarjeta y ganar un premio.'
       },
       {
         'q': '📱 ¿Cómo crear y dar puntos a un cliente con iPhone?',
-        'a': 'Para tus clientes con iPhone puedes: \n\n1. Cuando les completes un pedido y te salga la invitación a reclamar puntos, copiar el link tu mismo y pegalo en el boton de "Ingresar QR", así tu manejaras la tarjeta del cliente desde tu cuenta. \n\n2. Tocas en Dar un punto manualmente, copias el link y lo pégalo en el boton de "Ingresar QR", así tu manejaras la tarjeta del cliente desde tu cuenta.'
+        'a': 'Para tus clientes con iPhone puedes: \n\n1. Cuando les completes un pedido y te salga la invitación a reclamar puntos, copiar el link tu mismo y pegalo en el boton de "Ingresar QR", así tu manejaras la tarjeta del cliente desde tu cuenta. \n\n2. Tocas en Dar un punto manualmente, copias el link y pégalo en el boton de "Ingresar QR", así tu manejaras la tarjeta del cliente desde tu cuenta.'
       },
       {
         'q': '💳 ¿Cómo crear una nueva Tarjeta de Fidelidad?',
@@ -2116,25 +2146,36 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
                 }
 
                 String premioTxt = premioDesc.isNotEmpty ? premioDesc : tarjetaTitulo;
-                String mensaje = "¡Hola *$nombreCliente*! 🎁 *$_nombreNegocio* te obsequió *1 punto* para tu tarjeta de fidelidad *$tarjetaTitulo*.\n\nPor *$metaCompras* compras$textoMonto obtienes *$premioTxt*.\n\n*Al completar 5 puntos llevas el premio, reclama tu punto ingresando a este enlace:*\n$enlaceUnico";
+                String mensaje = "¡Hola *$nombreCliente*! 🎁 *$_nombreNegocio* te obsequió *1 punto* para tu tarjeta de regalo *$tarjetaTitulo*.\n\nPor *$metaCompras* compras$textoMonto obtienes *$premioTxt*.\n\n*Al completar 5 puntos llevas el premio, reclama tu punto ingresando a este enlace:*\n$enlaceUnico";
                 String numClean = telefono.replaceAll(RegExp(r'\D'), '');
-                String urlWa;
 
-                if (numClean.length >= 10) {
-                  if (numClean.length == 10) numClean = "57$numClean"; // Indicativo por defecto si son 10 dígitos
-                  urlWa = "https://wa.me/$numClean?text=${Uri.encodeComponent(mensaje)}";
-                } else {
-                  // Si no hay número guardado, abre WhatsApp para elegir contacto
-                  urlWa = "https://api.whatsapp.com/send?text=${Uri.encodeComponent(mensaje)}";
-                }
+                if (numClean.length == 10) numClean = "57$numClean";
+                String textEncoded = Uri.encodeComponent(mensaje);
 
-                if (await canLaunchUrl(Uri.parse(urlWa))) {
-                  await launchUrl(Uri.parse(urlWa), mode: LaunchMode.externalApplication);
-                } else {
-                  if (ctx.mounted) {
-                    ScaffoldMessenger.of(ctx).showSnackBar(
-                      const SnackBar(content: Text("No se pudo abrir WhatsApp en este dispositivo."))
-                    );
+                // Usamos el esquema nativo whatsapp:// para forzar a Android/iOS a preguntar qué app usar (WhatsApp o Business)
+                Uri uriApp = numClean.length >= 10
+                    ? Uri.parse("whatsapp://send?phone=$numClean&text=$textEncoded")
+                    : Uri.parse("whatsapp://send?text=$textEncoded");
+
+                Uri uriWeb = numClean.length >= 10
+                    ? Uri.parse("https://wa.me/$numClean?text=$textEncoded")
+                    : Uri.parse("https://api.whatsapp.com/send?text=$textEncoded");
+
+                try {
+                  if (await canLaunchUrl(uriApp)) {
+                    await launchUrl(uriApp, mode: LaunchMode.externalApplication);
+                  } else if (await canLaunchUrl(uriWeb)) {
+                    await launchUrl(uriWeb, mode: LaunchMode.externalApplication);
+                  } else {
+                    if (ctx.mounted) {
+                      ScaffoldMessenger.of(ctx).showSnackBar(
+                        const SnackBar(content: Text("No se pudo abrir WhatsApp en este dispositivo."))
+                      );
+                    }
+                  }
+                } catch (e) {
+                  if (await canLaunchUrl(uriWeb)) {
+                    await launchUrl(uriWeb, mode: LaunchMode.externalApplication);
                   }
                 }
               },
@@ -2211,16 +2252,29 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
     }
 
     String numClean = telefonoVendedor.replaceAll(RegExp(r'\D'), '');
-    String mensaje = "¡Hola *$nomNegocio*! 👋 Completé los *$meta puntos* de mi tarjeta para el premio: *$premio* 🎁.\n\nMi cuenta en la app es: *$emailCliente*\n\n¿Cómo puedo reclamar mi recompensa? ¡Muchas gracias! 🙌";
+    String mensaje = "¡Hola *$nomNegocio*! 👋 Completé los *$meta puntos* de mi tarjeta de regalo para el premio: *$premio* 🎁.\n\nMi cuenta en la app es: *$emailCliente*\n\n¿Cómo puedo reclamar mi recompensa? ¡Muchas gracias! 🙌";
 
-    String urlWa = "https://wa.me/$numClean?text=${Uri.encodeComponent(mensaje)}";
-    if (await canLaunchUrl(Uri.parse(urlWa))) {
-      await launchUrl(Uri.parse(urlWa), mode: LaunchMode.externalApplication);
-    } else {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("No se pudo abrir WhatsApp en este dispositivo."))
-        );
+    if (numClean.length == 10) numClean = "57$numClean";
+    String textEncoded = Uri.encodeComponent(mensaje);
+
+    Uri uriApp = Uri.parse("whatsapp://send?phone=$numClean&text=$textEncoded");
+    Uri uriWeb = Uri.parse("https://wa.me/$numClean?text=$textEncoded");
+
+    try {
+      if (await canLaunchUrl(uriApp)) {
+        await launchUrl(uriApp, mode: LaunchMode.externalApplication);
+      } else if (await canLaunchUrl(uriWeb)) {
+        await launchUrl(uriWeb, mode: LaunchMode.externalApplication);
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("No se pudo abrir WhatsApp en este dispositivo."))
+          );
+        }
+      }
+    } catch (e) {
+      if (await canLaunchUrl(uriWeb)) {
+        await launchUrl(uriWeb, mode: LaunchMode.externalApplication);
       }
     }
   }
@@ -2422,7 +2476,21 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
                                           builder: (context) {
                                             double mMin = ((item['montoMinimo'] ?? 0) as num).toDouble();
                                             String textoMonto = mMin > 0 ? " de \$${mMin.toInt()} o más" : "";
-                                            return Text("Por $meta compras$textoMonto obtienes $premio", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)));
+                                            return Column(
+                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                              children: [
+                                                Text("Por $meta compras$textoMonto obtienes $premio", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1))),
+                                                const SizedBox(height: 6),
+                                                Text(
+                                                  "👉 Toca aquí para ver tu tabla de sellos",
+                                                  style: TextStyle(
+                                                    fontSize: 11,
+                                                    fontWeight: FontWeight.w800,
+                                                    color: isOscuro ? Colors.orangeAccent : Colors.orange.shade900,
+                                                  ),
+                                                ),
+                                              ],
+                                            );
                                           }
                                         ),
                                       ],

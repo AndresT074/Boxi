@@ -27,6 +27,8 @@ class ServicioFCM {
     if (token != null) await _guardarToken(token);
 
     FirebaseMessaging.instance.onTokenRefresh.listen(_guardarToken);
+
+    // 1️⃣ NOTIFICACIONES EN PRIMER PLANO (App Abierta)
     FirebaseMessaging.onMessage.listen((RemoteMessage message) async {
       await ServicioNotificaciones.inicializar();
       String tipo = message.data['tipo'] ?? 'nuevo_pedido';
@@ -35,7 +37,6 @@ class ServicioFCM {
         String negocio = message.data['negocio'] ?? 'Tu Negocio';
         String cliente = message.data['cliente'] ?? 'Un cliente';
         await ServicioNotificaciones.mostrarNotificacionPedido(negocio, cliente);
-        
       } else if (tipo == 'inactividad') {
         String titulo = message.notification?.title ?? '¡Te extrañamos!';
         String cuerpo = message.notification?.body ?? 'Tu negocio te espera 🚀';
@@ -46,8 +47,9 @@ class ServicioFCM {
         String token = message.data['token'] ?? '';
         await ServicioNotificaciones.mostrarNotificacionFidelidad(titulo, cuerpo, token: token);
       }
+    });
 
-      // 🔥 Captura el toque en la notificación cuando la app estaba en segundo plano o cerrada
+    // 2️⃣ NOTIFICACIÓN TOCADA EN SEGUNDO PLANO (App Minimizada)
     FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) async {
       if (message.data['tipo'] == 'punto_fidelidad' && message.data['token'] != null) {
         String token = message.data['token'];
@@ -57,13 +59,13 @@ class ServicioFCM {
       }
     });
 
+    // 3️⃣ NOTIFICACIÓN TOCADA CON APP COMPLETAMENTE CERRADA
     RemoteMessage? initialMessage = await FirebaseMessaging.instance.getInitialMessage();
     if (initialMessage != null && initialMessage.data['tipo'] == 'punto_fidelidad' && initialMessage.data['token'] != null) {
       String token = initialMessage.data['token'];
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('pending_fidelidad_token', token);
     }
-    });
   }
 
   static Future<void> _guardarToken(String token) async {
@@ -79,8 +81,7 @@ class ServicioFCM {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('fcm_token', token);
       
-      debugPrint("✅ Token FCM asegurado en Firestore");
-      print("MI TOKEN PARA PRUEBAS: $token");
+      debugPrint("✅ Token FCM asegurado en Firestore: $token");
     } catch (e) {
       debugPrint("❌ Error al guardar token en Firestore: $e");
     }

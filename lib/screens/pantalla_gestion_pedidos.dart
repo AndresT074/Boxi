@@ -778,6 +778,7 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
 
       final clienteRes = await db.query('clientes', where: 'id = ?', whereArgs: [clienteId]);
       String tel = clienteRes.isNotEmpty ? (clienteRes.first['telefono']?.toString() ?? "") : "";
+      String telLimpio = tel.replaceAll(RegExp(r'\D'), ''); // 🔥 Limpio para cruce
       String emailCliente = clienteRes.isNotEmpty ? (clienteRes.first['email']?.toString() ?? "") : "";
 
       String nomNegocio = prefs.getString('nombre_negocio') ?? 'Nuestro Negocio';
@@ -853,7 +854,7 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                 .doc(tarjetaIdStr)
                 .collection('clientes')
                 .get()
-                .timeout(const Duration(seconds: 2));
+                .timeout(const Duration(seconds: 6)); // 🔥 MEJORA: Aumentado a 6s para evitar timeout
 
             for (var doc in clientSnap.docs) {
               var cData = doc.data();
@@ -861,13 +862,15 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
               String cNombre = cData['clienteNombre']?.toString() ?? '';
               String cEmail = cData['clienteEmail']?.toString() ?? '';
               String cUid = cData['clientUid']?.toString() ?? '';
+              String cTel = (cData['clienteTelefono']?.toString() ?? '').replaceAll(RegExp(r'\D'), ''); // 🔥 Limpio para cruce
 
               bool coincideLocalId = (locId.isNotEmpty && locId == clienteId.toString()) || doc.id == clienteId.toString();
               bool coincideNombre = nombreLimpio.isNotEmpty && cNombre.isNotEmpty && cNombre.toLowerCase() == nombreLimpio.toLowerCase();
               bool coincideEmail = nombreLimpio.isNotEmpty && cEmail.isNotEmpty && cEmail.toLowerCase() == nombreLimpio.toLowerCase();
+              bool coincideTel = telLimpio.isNotEmpty && cTel.isNotEmpty && (cTel.endsWith(telLimpio) || telLimpio.endsWith(cTel)); // 🔥 MEJORA: Cruce por teléfono
               bool coincideUid = (realClientUid != null && realClientUid.isNotEmpty && (cUid == realClientUid || doc.id == realClientUid));
 
-              if (coincideUid || coincideLocalId || coincideNombre || coincideEmail) {
+              if (coincideUid || coincideLocalId || coincideNombre || coincideEmail || coincideTel) {
                 bool esClienteExternoReal = cUid.isNotEmpty && cUid != user.uid;
 
                 if (esClienteExternoReal && doc.id == clienteId.toString()) {
@@ -981,7 +984,7 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
             String keyUser = vendorUid.isNotEmpty ? vendorUid : (user?.uid ?? '');
             if (keyUser.isNotEmpty) {
               String? jsonCache = prefs.getString('cache_tarjetas_acumuladas_$keyUser');
-              List<dynamic> listCache = jsonCache != null && jsonCache.isNotEmpty ? jsonDecode(jsonCache) : [];
+              List<dynamic> listCache = (jsonCache != null && jsonCache.isNotEmpty) ? jsonDecode(jsonCache) : [];
               
               bool encontrado = false;
               for (var item in listCache) {
@@ -1251,7 +1254,7 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
               }
 
               String premioTxt = premioDesc.isNotEmpty ? premioDesc : tituloTarjeta;
-              String mensaje = "¡Hola *$clienteNombre*! 🎁 *$nomNegocio* te obsequió *1 punto* para tu tarjeta de fidelidad *$tituloTarjeta*.\n\nPor *$meta* compras$textoMonto obtienes *$premioTxt*.\n\n*Al completar $meta puntos llevas el premio, descarga la app BOXI para empezar a acumular puntos:*\n$enlaceUnico";
+              String mensaje = "¡Hola *$clienteNombre*! 🎁 *$nomNegocio* te obsequió *1 punto* para tu tarjeta de regalo *$tituloTarjeta*.\n\nPor *$meta* compras$textoMonto obtienes *$premioTxt*.\n\n*Al completar $meta puntos llevas el premio, descarga la app BOXI para empezar a acumular puntos:*\n$enlaceUnico";
               String urlWa = "https://wa.me/$fullNum?text=${Uri.encodeComponent(mensaje)}";
               if (await canLaunchUrl(Uri.parse(urlWa))) {
                 await launchUrl(Uri.parse(urlWa), mode: LaunchMode.externalApplication);

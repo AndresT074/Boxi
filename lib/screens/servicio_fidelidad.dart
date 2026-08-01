@@ -52,7 +52,7 @@ class ServicioFidelidad {
     return token;
   }
 
-  // 🔥 2. CLIENTE: Reclamar el punto con destrucción garantizada si es inválido
+  // 🔥 2. CLIENTE: Reclamar el punto (Pantalla instantánea + Notificaciones de fondo)
   static Future<void> reclamarPuntoToken({
     required String token,
     required BuildContext context,
@@ -60,7 +60,7 @@ class ServicioFidelidad {
   }) async {
     final prefs = await SharedPreferences.getInstance();
     
-    // 🧹 1. Limpieza preventiva inmediata del celular para no dejar rastro
+    // 🧹 1. Limpieza preventiva en el celular
     await prefs.remove('pending_fidelidad_token');
 
     final user = FirebaseAuth.instance.currentUser;
@@ -85,22 +85,22 @@ class ServicioFidelidad {
     try {
       final snap = await docRef.get();
 
-      // 🛑 SI EL TOKEN NO EXISTE EN FIRESTORE (Ya fue usado o nunca existió)
+      // 🛑 SI EL TOKEN NO EXISTE EN FIRESTORE (Ya fue usado/borrado)
       if (!snap.exists) {
-        await prefs.remove('pending_fidelidad_token'); // Borrado local
+        await prefs.remove('pending_fidelidad_token');
         if (context.mounted) {
-          _mostrarAlerta(context, "TOKEN INVÁLIDO", "El enlace o código QR no existe o ya fue utilizado.", esError: true);
+          _mostrarAlerta(context, "PUNTO YA USADO", "Este punto de fidelidad ya fue reclamado anteriormente.", esError: true);
         }
         return;
       }
 
       final data = snap.data() as Map<String, dynamic>;
 
-      // ⏰ 1. SI ESTÁ EXPIRADO (Más de 24 HORAS) -> BORRAR DE FIRESTORE Y CELULAR
+      // ⏰ 1. SI ESTÁ EXPIRADO -> DESTRUIR
       if (data.containsKey('expireAt') && data['expireAt'] != null) {
         Timestamp expireAt = data['expireAt'];
         if (expireAt.toDate().isBefore(DateTime.now())) {
-          await docRef.delete(); // 🔥 DESTRUIR DE FIRESTORE
+          await docRef.delete().catchError((_) {});
           await prefs.remove('pending_fidelidad_token');
           if (context.mounted) {
             _mostrarAlerta(context, "ENLACE EXPIRADO", "Este código QR o enlace ha caducado (duración máxima 24 horas).", esError: true);
@@ -109,9 +109,9 @@ class ServicioFidelidad {
         }
       }
 
-      // 🛑 2. SI YA FUE MARCADO COMO USADO -> BORRAR DE FIRESTORE Y CELULAR
+      // 🛑 2. SI YA FUE MARCADO COMO USADO -> DESTRUIR
       if (data['usado'] == true) {
-        await docRef.delete(); // 🔥 DESTRUIR DE FIRESTORE
+        await docRef.delete().catchError((_) {});
         await prefs.remove('pending_fidelidad_token');
         if (context.mounted) {
           _mostrarAlerta(context, "PUNTO YA USADO", "Este punto de fidelidad ya fue reclamado anteriormente.", esError: true);
@@ -122,9 +122,8 @@ class ServicioFidelidad {
       String vendorUid = data['vendorUid'] ?? '';
       String tarjetaId = data['tarjetaId'] ?? 'general';
 
-      // 🛑 3. SI VIENE CORRUPTO O SIN ID DE VENDEDOR -> BORRAR DE FIRESTORE Y CELULAR
       if (vendorUid.isEmpty) {
-        await docRef.delete(); // 🔥 DESTRUIR DE FIRESTORE
+        await docRef.delete().catchError((_) {});
         await prefs.remove('pending_fidelidad_token');
         if (context.mounted) {
           _mostrarAlerta(context, "TOKEN INVÁLIDO", "El código no contiene la información del negocio.", esError: true);
@@ -132,12 +131,14 @@ class ServicioFidelidad {
         return;
       }
 
-      int meta = ((data['metaCompras'] ?? 10) as num).toInt();
+      // 🔥 3. DESTRUIR EL TOKEN EN FIRESTORE DE INMEDIATO
+      await docRef.delete().catchError((_) {});
+      await prefs.remove('pending_fidelidad_token');
 
+      int meta = ((data['metaCompras'] ?? 10) as num).toInt();
       String clienteLocalId = data['clienteLocalId']?.toString() ?? '';
       String clienteNombre = data['clienteNombre']?.toString() ?? '';
 
-      // 🔥 UNIFICACIÓN DE ID: Usa la combinación exacta Vendor + Tarjeta + Cliente Local
       String docIdTarget = (user.uid == vendorUid && clienteLocalId.isNotEmpty)
           ? "${vendorUid}_${tarjetaId}_$clienteLocalId"
           : "${vendorUid}_$tarjetaId";
@@ -188,9 +189,10 @@ class ServicioFidelidad {
         'ultimaModificacion': FieldValue.serverTimestamp(),
       };
 
+      // 1. Guardar tarjeta acumulada en la cuenta del cliente
       await miTarjetaRef.set(datosTarjetaCliente, SetOptions(merge: true));
 
-      // Vincular en la cuenta del vendedor en Firestore
+      // 2. Vincular cliente en la lista del vendedor
       String clientDocId = user.uid;
       if (user.uid == vendorUid && clienteLocalId.isNotEmpty) {
         clientDocId = clienteLocalId;
@@ -214,6 +216,7 @@ class ServicioFidelidad {
         'ultimaModificacion': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
 
+      // 3. Actualizar SQLite local si aplica
       String clienteLocalIdStr = data['clienteLocalId']?.toString() ?? '';
       if (clienteLocalIdStr.isNotEmpty) {
         try {
@@ -232,24 +235,11 @@ class ServicioFidelidad {
             }, conflictAlgorithm: ConflictAlgorithm.replace);
           }
         } catch (e) {
-          debugPrint("Error actualizando SQLite local en autovinculacion: $e");
+          debugPrint("Error actualizando SQLite local: $e");
         }
       }
 
-      // 🔥 4. RECLAMO EXITOSO -> DESTRUIR TOKEN DE FIRESTORE Y CELULAR
-      await docRef.delete();
-      await prefs.remove('pending_fidelidad_token');
-
-      // Notificar al vendedor por FCM
-      notificarVendedorPuntoReclamado(
-        vendorUid: vendorUid,
-        nombreCliente: user.email ?? 'Un cliente',
-        nombreNegocio: data['nombreNegocio'] ?? 'Tu negocio',
-        metaAlcanzada: puntosActuales >= meta,
-        premioDesc: data['premioDesc'],
-      );
-
-      // ⚡ ACTUALIZAR MEMORIA CACHÉ LOCAL DEL CLIENTE INMEDIATAMENTE (0 ms de espera)
+      // 4. Actualizar Caché SharedPreferences del cliente
       try {
         String? jsonCache = prefs.getString('cache_tarjetas_acumuladas_${user.uid}');
         List<dynamic> listCache = (jsonCache != null && jsonCache.isNotEmpty) ? jsonDecode(jsonCache) : [];
@@ -283,10 +273,21 @@ class ServicioFidelidad {
 
         await prefs.setString('cache_tarjetas_acumuladas_${user.uid}', jsonEncode(listCache));
       } catch (e) {
-        debugPrint("Error guardando caché local de cliente: $e");
+        debugPrint("Error guardando caché local: $e");
       }
 
-      // 🔔 Notificar también al cliente que reclamó el punto
+      // ⚡ MOSTRAR PANTALLA DE ÉXITO AL INSTANTE (0 ms de retraso)
+      onSuccess(datosTarjetaCliente, puntosActuales);
+
+      // 🔔 DISPARAR NOTIFICACIONES DE FONDO (Sin bloquear la interfaz)
+      notificarVendedorPuntoReclamado(
+        vendorUid: vendorUid,
+        nombreCliente: user.email ?? 'Un cliente',
+        nombreNegocio: data['nombreNegocio'] ?? 'Tu negocio',
+        metaAlcanzada: puntosActuales >= meta,
+        premioDesc: data['premioDesc'],
+      );
+
       notificarClientePuntoOtorgado(
         clientUid: user.uid,
         nombreNegocio: data['nombreNegocio'] ?? 'Tu negocio',
@@ -294,8 +295,6 @@ class ServicioFidelidad {
         meta: meta,
         premioDesc: data['premioDesc'],
       );
-
-      onSuccess(datosTarjetaCliente, puntosActuales);
 
     } catch (e) {
       try { await docRef.delete(); } catch (_) {}
@@ -316,7 +315,7 @@ class ServicioFidelidad {
   }) async {
     String titulo = metaAlcanzada 
         ? '🏆 ¡CLIENTE COMPLETÓ TARJETA!' 
-        : '🎁 ¡Punto de Fidelidad entregado!';
+        : '🎁 ¡Punto de Fidelidad Entregado!';
 
     String premioTxt = premioDesc != null && premioDesc.isNotEmpty ? premioDesc : "el premio";
 
@@ -325,7 +324,7 @@ class ServicioFidelidad {
         : '$nombreCliente ha recibido un punto en $nombreNegocio.';
 
     try {
-      await http.post(
+      http.post(
         Uri.parse('https://boxi-api.vercel.app/api/notificar-fidelidad'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
@@ -334,7 +333,10 @@ class ServicioFidelidad {
           'cuerpo': cuerpo,
           'tipo': 'fidelidad_vendedor',
         }),
-      );
+      ).timeout(const Duration(seconds: 4)).catchError((e) {
+        debugPrint("Timeout o error enviando notificación al vendedor: $e");
+        return http.Response('', 408);
+      });
     } catch (e) {
       debugPrint("Error enviando notificación al vendedor: $e");
     }
@@ -360,7 +362,7 @@ class ServicioFidelidad {
         : '¡$nombreNegocio te ha sumado un punto! Tienes $puntosActuales de $meta puntos.';
 
     try {
-      await http.post(
+      http.post(
         Uri.parse('https://boxi-api.vercel.app/api/notificar-fidelidad'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
@@ -369,7 +371,10 @@ class ServicioFidelidad {
           'cuerpo': cuerpo,
           'tipo': 'punto_fidelidad',
         }),
-      );
+      ).timeout(const Duration(seconds: 4)).catchError((e) {
+        debugPrint("Timeout o error enviando notificación al cliente: $e");
+        return http.Response('', 408);
+      });
     } catch (e) {
       debugPrint("Error enviando notificación al cliente: $e");
     }
@@ -393,17 +398,17 @@ class ServicioFidelidad {
     );
   }
 
-  // 🔥 Carga completa de tarjetas y puntos al iniciar sesión
+  // 🔥 Carga completa de tarjetas y puntos al iniciar sesión (0 escrituras innecesarias)
   static Future<void> sincronizarTarjetasCompleto(String uid) async {
     if (!await ServicioNube.tieneInternet()) return;
+    limpiarTokensExpiradosNube();
     try {
       final db = await DBHelper.instance.database;
       try { await db.execute("ALTER TABLE puntos_clientes ADD COLUMN client_uid TEXT;"); } catch (_) {}
 
       final prefs = await SharedPreferences.getInstance();
-      String nomNegocio = prefs.getString('nombre_negocio') ?? "Mi Negocio";
 
-      // 1. Sincronizar Tarjetas Creadas como Vendedor
+      // 1. Sincronizar Tarjetas Creadas como Vendedor (Solo lectura a SQLite)
       final creadasSnap = await FirebaseFirestore.instance
           .collection('usuarios')
           .doc(uid)
@@ -440,7 +445,6 @@ class ServicioFidelidad {
             String clientUid = clientData['clientUid']?.toString() ?? cDoc.id;
             int ptsCloud = ((clientData['puntosActuales'] ?? 0) as num).toInt();
             int compCloud = ((clientData['completadasTotales'] ?? 0) as num).toInt();
-            String cNombre = clientData['clienteNombre']?.toString() ?? 'Cliente';
 
             int cIdInt = int.tryParse(cLocId) ?? 0;
             if (cIdInt > 0) {
@@ -452,36 +456,6 @@ class ServicioFidelidad {
                 if (clientUid.isNotEmpty) 'client_uid': clientUid,
                 'ultima_modificacion': DateTime.now().toIso8601String(),
               }, conflictAlgorithm: ConflictAlgorithm.replace);
-
-              // 🔥 Asegurar tarjeta acumulada en Firestore
-              String targetUid = clientUid.isNotEmpty ? clientUid : uid;
-              String docTarget = (targetUid == uid && cLocId.isNotEmpty)
-                  ? "${uid}_${tId}_$cLocId"
-                  : "${uid}_$tId";
-
-              String nombreNegocioFinal = (targetUid == uid && cNombre.isNotEmpty && cNombre != 'Cliente')
-                  ? "$nomNegocio ($cNombre)"
-                  : nomNegocio;
-
-              await FirebaseFirestore.instance
-                  .collection('usuarios')
-                  .doc(targetUid)
-                  .collection('tarjetas_acumuladas')
-                  .doc(docTarget)
-                  .set({
-                'vendorUid': uid,
-                'tarjetaId': tId.toString(),
-                'clienteLocalId': cLocId,
-                'clienteNombre': cNombre,
-                'nombreNegocio': nombreNegocioFinal,
-                'tarjetaTitulo': cData['titulo'] ?? 'Tarjeta',
-                'metaCompras': ((cData['metaCompras'] ?? 10) as num).toInt(),
-                'premioDesc': cData['premioDesc'] ?? cData['titulo'] ?? '',
-                'montoMinimo': ((cData['montoMinimo'] ?? 0) as num).toDouble(),
-                'puntosActuales': ptsCloud,
-                'completadasTotales': compCloud,
-                'ultimaModificacion': FieldValue.serverTimestamp(),
-              }, SetOptions(merge: true));
             }
           }
         }
@@ -505,29 +479,9 @@ class ServicioFidelidad {
         String claveUnica = (uid == vUid && cLocId.isNotEmpty)
             ? "${vUid}_${tId}_$cLocId"
             : "${vUid}_$tId";
-        int ptsActuales = ((data['puntosActuales'] ?? 0) as num).toInt();
 
         if (!tarjetasSinClones.containsKey(claveUnica)) {
           tarjetasSinClones[claveUnica] = data;
-        } else {
-          var existente = tarjetasSinClones[claveUnica]!;
-          int ptsExistentes = ((existente['puntosActuales'] ?? 0) as num).toInt();
-          int meta = ((data['metaCompras'] ?? 10) as num).toInt();
-          int compN = ((data['completadasTotales'] ?? 0) as num).toInt();
-          int compE = ((existente['completadasTotales'] ?? 0) as num).toInt();
-
-          bool esMasNueva = false;
-          if (compN != compE) {
-            esMasNueva = compN > compE;
-          } else if (ptsExistentes >= meta && ptsActuales < meta) {
-            esMasNueva = true; // Tarjeta reiniciada a 1/5
-          } else {
-            esMasNueva = ptsActuales > ptsExistentes;
-          }
-
-          if (esMasNueva) {
-            tarjetasSinClones[claveUnica] = data;
-          }
         }
       }
 
@@ -561,30 +515,32 @@ class ServicioFidelidad {
       final dbLocal = await DBHelper.instance.database;
       final prefs = await SharedPreferences.getInstance();
 
-      var clientesColl = FirebaseFirestore.instance
-          .collection('usuarios')
-          .doc(vendorUid)
-          .collection('mis_tarjetas_creadas')
-          .doc(tarjetaId)
-          .collection('clientes');
-
-      String realClientUid = clientUid ?? '';
+      String vUidEfectivo = vendorUid.isNotEmpty ? vendorUid : user.uid;
+      String targetClientUid = (clientUid != null && clientUid.isNotEmpty) ? clientUid : user.uid;
 
       // 🔍 1. Escanear y eliminar de la subcolección 'clientes' del vendedor en Firestore
       try {
+        var clientesColl = FirebaseFirestore.instance
+            .collection('usuarios')
+            .doc(vUidEfectivo)
+            .collection('mis_tarjetas_creadas')
+            .doc(tarjetaId)
+            .collection('clientes');
+
         final snap = await clientesColl.get();
         for (var doc in snap.docs) {
           var data = doc.data();
           String docLocId = data['clienteLocalId']?.toString() ?? '';
           String docClientUid = data['clientUid']?.toString() ?? '';
 
-          bool coincide = false;
-          if (doc.id == clientUid || doc.id == clienteLocalId) coincide = true;
-          if (clientUid != null && clientUid.isNotEmpty && docClientUid == clientUid) coincide = true;
-          if (clienteLocalId != null && clienteLocalId.isNotEmpty && docLocId == clienteLocalId) coincide = true;
+          bool coincide = (doc.id == user.uid) ||
+              (doc.id == targetClientUid) ||
+              (doc.id == clienteLocalId) ||
+              (docClientUid == user.uid) ||
+              (docClientUid == targetClientUid) ||
+              (clienteLocalId != null && clienteLocalId.isNotEmpty && docLocId == clienteLocalId);
 
           if (coincide) {
-            if (docClientUid.isNotEmpty) realClientUid = docClientUid;
             await doc.reference.delete().catchError((_) {});
           }
         }
@@ -601,49 +557,53 @@ class ServicioFidelidad {
             if (cId > 0) {
               await dbLocal.delete('puntos_clientes', where: 'cliente_id = ? AND tarjeta_id = ?', whereArgs: [cId, tId]);
             }
-          } else {
-            await dbLocal.delete('puntos_clientes', where: 'tarjeta_id = ?', whereArgs: [tId]);
           }
+          await dbLocal.delete('puntos_clientes', where: 'tarjeta_id = ?', whereArgs: [tId]);
         }
       } catch (e) {
         debugPrint("Error limpiando SQLite local: $e");
       }
 
-      // 🧹 3. Borrar de 'tarjetas_acumuladas' en Firestore para todos los UIDs involucrados
-      Set<String> uidsAELiminar = {vendorUid, user.uid};
-      if (realClientUid.isNotEmpty) uidsAELiminar.add(realClientUid);
+      // 🧹 3. Borrar de 'tarjetas_acumuladas' en Firestore
+      Set<String> uidsAELiminar = {vUidEfectivo, user.uid, targetClientUid};
 
       for (String uId in uidsAELiminar) {
+        if (uId.trim().isEmpty) continue;
+
         var acumuladasColl = FirebaseFirestore.instance
             .collection('usuarios')
             .doc(uId)
             .collection('tarjetas_acumuladas');
 
-        await acumuladasColl.doc("${vendorUid}_$tarjetaId").delete().catchError((_) {});
-        if (clienteLocalId != null && clienteLocalId.isNotEmpty) {
-          await acumuladasColl.doc("${vendorUid}_${tarjetaId}_$clienteLocalId").delete().catchError((_) {});
-        }
         if (docId != null && docId.isNotEmpty) {
           await acumuladasColl.doc(docId).delete().catchError((_) {});
         }
+        await acumuladasColl.doc("${vUidEfectivo}_$tarjetaId").delete().catchError((_) {});
+        if (clienteLocalId != null && clienteLocalId.isNotEmpty) {
+          await acumuladasColl.doc("${vUidEfectivo}_${tarjetaId}_$clienteLocalId").delete().catchError((_) {});
+        }
+
+        try {
+          final snapAcum = await acumuladasColl.get();
+          for (var d in snapAcum.docs) {
+            var dData = d.data();
+            String tIdData = dData['tarjetaId']?.toString() ?? '';
+            if (tIdData == tarjetaId) {
+              await d.reference.delete().catchError((_) {});
+            }
+          }
+        } catch (_) {}
       }
 
-      // 🧹 4. Borrar de la Memoria Caché de SharedPreferences para que no vuelva a reaparecer
+      // 🧹 4. Borrar de la Memoria Caché de SharedPreferences
       try {
         String? jsonCache = prefs.getString('cache_tarjetas_acumuladas_${user.uid}');
         if (jsonCache != null && jsonCache.isNotEmpty) {
           List<dynamic> listCache = jsonDecode(jsonCache);
           listCache.removeWhere((item) {
             String tId = item['tarjetaId']?.toString() ?? '';
-            String vUid = item['vendorUid']?.toString() ?? '';
-            String cLoc = item['clienteLocalId']?.toString() ?? '';
             String itemDocId = item['docId']?.toString() ?? '';
-
-            bool esMismaTarjeta = (vUid == vendorUid && tId == tarjetaId);
-            bool esMismoDoc = (docId != null && docId.isNotEmpty && itemDocId == docId);
-            bool esMismoCliente = (clienteLocalId != null && clienteLocalId.isNotEmpty && cLoc == clienteLocalId && tId == tarjetaId);
-
-            return esMismaTarjeta || esMismoDoc || esMismoCliente;
+            return tId == tarjetaId || (docId != null && docId.isNotEmpty && itemDocId == docId);
           });
           await prefs.setString('cache_tarjetas_acumuladas_${user.uid}', jsonEncode(listCache));
         }
@@ -653,6 +613,28 @@ class ServicioFidelidad {
 
     } catch (e) {
       debugPrint("Error eliminando tarjeta acumulada: $e");
+    }
+  }
+  
+  // 🔥 Limpia automáticamente todos los tokens vencidos en Firestore (100% Gratis)
+  static Future<void> limpiarTokensExpiradosNube() async {
+    if (!await ServicioNube.tieneInternet()) return;
+    try {
+      final snap = await _db
+          .collection('tokens_fidelidad')
+          .where('expireAt', isLessThan: Timestamp.now())
+          .get();
+
+      if (snap.docs.isEmpty) return;
+
+      final batch = _db.batch();
+      for (var doc in snap.docs) {
+        batch.delete(doc.reference);
+      }
+      await batch.commit();
+      debugPrint("🧹 ${snap.docs.length} tokens vencidos borrados automáticamente de Firestore.");
+    } catch (e) {
+      debugPrint("Error limpiando tokens vencidos: $e");
     }
   }
 }

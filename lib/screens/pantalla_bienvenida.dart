@@ -296,10 +296,14 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
       final prefs = await SharedPreferences.getInstance();
       bool yaDescargoTodo = prefs.getBool("descarga_completa_${user.uid}") ?? false;
 
-      // 🔥 SI ES PRIMER INGRESO O CAMBIO DE CUENTA, ESPERA EL 100% DE LA DESCARGA SIN TIMEOUT
+      // 🔥 SALVAVIDAS: Se añade un timeout de 10s incluso para la descarga inicial
+      // para evitar congelamientos infinitos si Firebase falla o se agotan las cuotas.
       if (!yaDescargoTodo) {
         debugPrint("☁️ Descargando negocio completo antes de entrar...");
-        await _sincronizacionSilenciosa(user); 
+        await _sincronizacionSilenciosa(user).timeout(
+          const Duration(seconds: 5),
+          onTimeout: () => debugPrint("⏰ Timeout en descarga inicial silenciosa."),
+        ); 
       } else {
         // Modo Offline-First: Chequeo rápido de 2.5s si ya tiene los datos locales
         await _sincronizacionSilenciosa(user).timeout(
@@ -311,7 +315,7 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
     } catch (e) {
       debugPrint("Error en inicio: $e");
     } finally {
-      if (mounted) setState(() => _cargandoDatos = false); // 🔥 Desbloquea el acceso solo cuando SQLite está 100% lista
+      if (mounted) setState(() => _cargandoDatos = false); // 🔥 Desbloquea la interfaz obligatoriamente
     }
     _registrarIngresoYVerificarActualizacion();
   }
@@ -338,12 +342,14 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
       }
       _esPremium = prefs.getBool('es_premium') ?? false;
       
-      // Eliminar campos antiguos obsoletos
-      await FirebaseFirestore.instance.collection('usuarios').doc(user.uid).update({
-        'plan': FieldValue.delete(),
-        'fecha_ultimo_ingreso': FieldValue.delete(),
-        'ultima_modificacion': FieldValue.delete(),
-      });
+      // Protegemos la limpieza de campos antiguos con try/catch y timeout
+      try {
+        await FirebaseFirestore.instance.collection('usuarios').doc(user.uid).update({
+          'plan': FieldValue.delete(),
+          'fecha_ultimo_ingreso': FieldValue.delete(),
+          'ultima_modificacion': FieldValue.delete(),
+        }).timeout(const Duration(seconds: 3));
+      } catch (_) {}
 
       if (_esPremium) {
         String llaveDescarga = "descarga_completa_${user.uid}";
@@ -362,12 +368,8 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
           final pedidosLocales = await dbLocal.query('pedidos', limit: 1);
 
           if (clientesLocales.isEmpty && pedidosLocales.isEmpty) {
-            // 4. Si RTDB estaba vacío, significa que es la primera migración.
-            // Descargamos todo tu historial desde Firestore (solo ocurre 1 vez).
             debugPrint("☁️ Primer inicio: Migrando historial desde Firestore a Realtime...");
             await ServicioNube.descargarTodoDesdeNube();
-            
-            // 5. Lo subimos de inmediato a RTDB para que las próximas veces consuma 0 lecturas.
             await ServicioNube.respaldarDatosPrivadosRTDB();
           }
           
@@ -376,18 +378,21 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
           
           await prefs.setBool(llaveDescarga, true);
           await prefs.setBool('primera_carga_completada_${user.uid}', true);
-          final userDoc = await FirebaseFirestore.instance
-              .collection('usuarios')
-              .doc(user.uid)
-              .get()
-              .timeout(const Duration(seconds: 3)); // 🔥 Timeout para evitar congelamientos offline
-          if (userDoc.exists) {
-            final data = userDoc.data() as Map<String, dynamic>;
-            final modProd = (data['ultima_mod_productos'] as Timestamp?)?.toDate().toIso8601String();
-            final modPed = (data['ultima_mod_pedidos'] as Timestamp?)?.toDate().toIso8601String();
-            if (modProd != null) await prefs.setString('ultima_mod_productos_local_${user.uid}', modProd);
-            if (modPed != null) await prefs.setString('ultima_mod_pedidos_local_${user.uid}', modPed);
-          }
+          
+          try {
+            final userDoc = await FirebaseFirestore.instance
+                .collection('usuarios')
+                .doc(user.uid)
+                .get()
+                .timeout(const Duration(seconds: 3));
+            if (userDoc.exists) {
+              final data = userDoc.data() as Map<String, dynamic>;
+              final modProd = (data['ultima_mod_productos'] as Timestamp?)?.toDate().toIso8601String();
+              final modPed = (data['ultima_mod_pedidos'] as Timestamp?)?.toDate().toIso8601String();
+              if (modProd != null) await prefs.setString('ultima_mod_productos_local_${user.uid}', modProd);
+              if (modPed != null) await prefs.setString('ultima_mod_pedidos_local_${user.uid}', modPed);
+            }
+          } catch (_) {}
         } else {
           await ServicioNube.rescatarDatosPerdidosFirestore(user.uid);
         }
