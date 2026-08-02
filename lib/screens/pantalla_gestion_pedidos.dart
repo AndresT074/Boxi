@@ -277,8 +277,9 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
         return;
       }
 
-      // 🔥 RECUPERA EL 100% DE PEDIDOS Y PRODUCTOS DESDE FIRESTORE
-      await ServicioNube.migrarYRecuperarDesdeFirestore(uid, force: true);
+      // 🔥 Sincroniza desde Realtime Database (0 Lecturas Firestore)
+      await ServicioNube.descargarDatosPrivadosRTDB();
+      await ServicioNube.importarCatalogoDesdeRTDB(uid);
       _detallesCache.clear();
       await _cargar();
 
@@ -2660,15 +2661,25 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
 
   Widget _buildDetalleItems(int id, String estado, double domi, bool isOscuro) {
     if (!_detallesCache.containsKey(id)) {
-      _obtenerDetalles(id)
-          .then((det) {if (mounted) setState(() => _detallesCache[id] = det);});
-      return const Padding(
-        padding: EdgeInsets.all(16),
-        child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+      return FutureBuilder<List<Map<String, dynamic>>>(
+        future: _obtenerDetalles(id),
+        builder: (context, snapshot) {
+          if (!snapshot.hasData) {
+            return const Padding(
+              padding: EdgeInsets.all(16),
+              child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+            );
+          }
+          _detallesCache[id] = snapshot.data!;
+          return _construirListaDetallesWidget(snapshot.data!, id, estado, domi, isOscuro);
+        },
       );
     }
-    final detalles = _detallesCache[id]!;
+    return _construirListaDetallesWidget(_detallesCache[id]!, id, estado, domi, isOscuro);
+  }
 
+  Widget _construirListaDetallesWidget(
+      List<Map<String, dynamic>> detalles, int id, String estado, double domi, bool isOscuro) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 10, 14, 4),
       child: Column(

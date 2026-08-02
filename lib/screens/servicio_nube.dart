@@ -118,9 +118,6 @@ class ServicioNube {
     }
   }
 
-  // ─────────────────────────────────────────────────────────────
-  //  PROCESADOR DE COLA OFFLINE (RESILIENTE A CUOTAS EXCEDIDAS)
-  // ─────────────────────────────────────────────────────────────
   static Future<void> procesarColaOffline() async {
     if (_uid == null) return;
     if (!await tieneInternet()) return;
@@ -135,40 +132,18 @@ class ServicioNube {
 
       debugPrint('🔄 Procesando ${pendientes.length} operaciones pendientes...');
 
-      final WriteBatch batch = _db.batch();
-      final List<int> idsAEliminar = [];
-      bool cambioProductos = false;
-      bool cambioPedidos = false;
-      bool cambioCategorias = false;
-      
       final prefs = await SharedPreferences.getInstance();
       bool esPremium = prefs.getBool('es_premium') ?? false;
 
-      for (final op in pendientes) {
-        final String tabla = op['tabla'] as String;
-        final String docId = op['doc_id'] as String;
-        
-        final DocumentReference ref;
-        if (tabla.startsWith('ruta_custom:')) {
-          String pathLimpio = tabla.replaceFirst('ruta_custom:', '');
-          ref = _db.collection(pathLimpio).doc(docId);
-        } else {
-          ref = _db
-              .collection('usuarios')
-              .doc(_uid)
-              .collection(tabla)
-              .doc(docId);
-        }
+      // 📸 INTERCEPTOR DE CLOUDINARY PARA FOTOS CREADAS OFFLINE
+      if (esPremium) {
+        for (final op in pendientes) {
+          final String tabla = op['tabla'] as String;
+          if (op['operacion'] != 'delete' && tabla == 'productos') {
+            final String jsonString = op['datos_json'] as String;
+            final Map<String, dynamic> datos = Map<String, dynamic>.from(jsonDecode(jsonString));
 
-        if (op['operacion'] == 'delete') {
-          batch.delete(ref);
-        } else {
-          final String jsonString = op['datos_json'] as String;
-          final Map<String, dynamic> datos =
-              Map<String, dynamic>.from(jsonDecode(jsonString));
-              
-          // INTERCEPTOR DE CLOUDINARY PARA SUBIDAS PENDIENTES OFFLINE
-          if (esPremium && tabla == 'productos') {
+            // 1. Subir foto principal de producto a Cloudinary
             String foto = datos['foto_path']?.toString() ?? "";
             if (foto.isNotEmpty && !foto.startsWith('http')) {
                String url = await subirImagenACloudinary(foto);
@@ -178,6 +153,7 @@ class ServicioNube {
                }
             }
             
+            // 2. Subir fotos de variantes a Cloudinary
             String varStr = datos['variantes']?.toString() ?? "";
             if (varStr.length > 5) {
                bool varCambiada = false;
@@ -196,71 +172,27 @@ class ServicioNube {
                  }
                }
                if (varCambiada) {
-                 datos['variantes'] = jsonEncode(dec);
-                 await dbLocal.update('productos', {'variantes': datos['variantes']}, where: 'id = ?', whereArgs: [datos['id']]);
+                 await dbLocal.update('productos', {'variantes': jsonEncode(dec)}, where: 'id = ?', whereArgs: [datos['id']]);
                }
             }
           }
-
-          if (tabla.startsWith('ruta_custom:')) {
-            datos['ultimaModificacion'] = FieldValue.serverTimestamp();
-          } else {
-            datos['ultima_modificacion'] = FieldValue.serverTimestamp();
-          }
-          datos.remove('eliminado');
-          batch.set(ref, datos, SetOptions(merge: true));
         }
-
-        if (tabla == 'productos' || tabla == 'fotos_variantes') {
-          cambioProductos = true;
-        }
-        if (tabla == 'pedidos') cambioPedidos = true;
-        if (tabla == 'categorias') cambioCategorias = true; 
-        idsAEliminar.add(op['id'] as int);
       }
 
-      if (cambioProductos) {
-        batch.update(_db.collection('usuarios').doc(_uid!), {
-          'ultima_mod_productos': FieldValue.serverTimestamp(),
-        });
-      }
-      if (cambioPedidos) {
-        batch.update(_db.collection('usuarios').doc(_uid!), {
-          'ultima_mod_pedidos': FieldValue.serverTimestamp(),
-        });
-      }
-
-      if (cambioCategorias) { 
-        batch.update(_db.collection('usuarios').doc(_uid!), {
-          'ultima_mod_categorias': FieldValue.serverTimestamp(),
-        });
-      }
-
-      await batch.commit();
+      // 🚀 Sincronizar datos privados y catálogo compilado a Realtime DB
       await respaldarDatosPrivadosRTDB();
+      await compilarYSubirCatalogoRTDB();
 
-      for (final id in idsAEliminar) {
-        await dbLocal.delete(
-          'operaciones_pendientes',
-          where: 'id = ?',
-          whereArgs: [id],
-        );
-      }
-      debugPrint('✅ Cola procesada y Firebase sincronizado.');
-      
-      if (esPremium && (cambioProductos || cambioCategorias)) {
-        await compilarYSubirCatalogoRTDB();
-      }
+      await dbLocal.delete('operaciones_pendientes');
 
+      try {
+        DatabaseReference ref = FirebaseDatabase.instance.ref("sync_triggers/$_uid");
+        await ref.update({'sync': ServerValue.timestamp});
+      } catch (_) {}
+
+      debugPrint('✅ Cola offline procesada: fotos subidas a Cloudinary y sincronizado a Realtime DB.');
     } catch (e) {
-      if (_esErrorCuota(e)) {
-        debugPrint('🚨 CUOTA EXCEDIDA EN FIRESTORE durante cola offline. Transmitiendo por Realtime Database...');
-        // Respaldamos los datos privados y el catálogo directo a Realtime Database
-        await respaldarDatosPrivadosRTDB();
-        await compilarYSubirCatalogoRTDB();
-      } else {
-        debugPrint('Error en procesarColaOffline: $e');
-      }
+      debugPrint('Error en procesarColaOffline: $e');
     }
   }
 
@@ -512,11 +444,11 @@ class ServicioNube {
           batch.insert(tabla, mapLocal,
               conflictAlgorithm: ConflictAlgorithm.replace);
 
-          // 🔥 ENCOLAR DESCARGAS EN SEGUNDO PLANO PARA NUEVOS PRODUCTOS RECIBIDOS EN FIRESTORE
+          // 🔥 DESCARGAS EN ORDEN SECUENCIAL PARA NUEVOS PRODUCTOS
           if (tabla == 'productos') {
             String mainFoto = mapLocal['foto_path']?.toString() ?? "";
             if (mainFoto.isNotEmpty && mainFoto.startsWith('http')) {
-              descargarFotoIndividualEnSegundoPlano(mainFoto, pathBoxi);
+              await descargarFotoIndividualEnSegundoPlano(mainFoto, pathBoxi);
             }
 
             String varStr = mapLocal['variantes']?.toString() ?? "";
@@ -528,7 +460,7 @@ class ServicioNube {
                   for (var o in g['opciones']) {
                     String varFoto = o['foto_path']?.toString() ?? "";
                     if (varFoto.isNotEmpty && varFoto.startsWith('http')) {
-                      descargarFotoIndividualEnSegundoPlano(varFoto, "$pathBoxi/Variantes");
+                      await descargarFotoIndividualEnSegundoPlano(varFoto, "$pathBoxi/Variantes");
                     }
                   }
                 }
@@ -555,38 +487,142 @@ class ServicioNube {
     }
   }
 
+  static Future<void> descargarDatosPrivadosRTDB() async {
+    if (_uid == null || !await tieneInternet()) return;
+    try {
+      final ref = FirebaseDatabase.instance.ref("datos_privados/$_uid");
+      final snap = await ref.get();
+      if (!snap.exists) return;
+
+      final rawValue = snap.value;
+      Map<String, dynamic> datos = {};
+
+      if (rawValue != null) {
+        if (rawValue is Map) {
+          datos = Map<String, dynamic>.from(rawValue);
+        } else if (rawValue is String) {
+          try {
+            final decoded = jsonDecode(rawValue);
+            if (decoded is Map) {
+              datos = Map<String, dynamic>.from(decoded);
+            }
+          } catch (_) {}
+        }
+      }
+
+      if (datos.isEmpty) return;
+
+      final dbLocal = await DBHelper.instance.database;
+
+      try {
+        final cols = await dbLocal.rawQuery("PRAGMA table_info(puntos_clientes);");
+        if (!cols.any((c) => c['name'] == 'client_uid')) {
+          await dbLocal.execute("ALTER TABLE puntos_clientes ADD COLUMN client_uid TEXT;");
+        }
+      } catch (_) {}
+
+      final Batch batch = dbLocal.batch();
+      final WriteBatch batchFirestore = _db.batch();
+      bool huboBorradosFirestore = false;
+
+      const tablasPrivadas = [
+        'vendedores', 
+        'clientes', 
+        'pedidos', 
+        'detalle_pedidos', 
+        'reportes_guardados', 
+        'ajustes_capital',
+      ];
+
+      for (String t in tablasPrivadas) {
+        if (datos[t] != null) {
+          final lista = List<dynamic>.from(datos[t]);
+          Set<int> idsNube = {};
+
+          for (var item in lista) {
+             if (item == null) continue;
+             Map<String, dynamic> mapLocal = Map<String, dynamic>.from(item);
+             
+             if (mapLocal['id'] != null) {
+               idsNube.add((mapLocal['id'] as num).toInt());
+             }
+
+             if (t == 'pedidos') {
+                if (mapLocal['estado'] == null || mapLocal['estado'].toString().trim().isEmpty) {
+                  mapLocal['estado'] = 'Pendiente';
+                }
+             }
+
+             if (t == 'pedidos' && mapLocal['firma'] != null) {
+                if (mapLocal['firma'] is String) {
+                  try {
+                    mapLocal['firma'] = base64Decode(mapLocal['firma']);
+                  } catch (_) {}
+                } else if (mapLocal['firma'] is List) {
+                  mapLocal['firma'] = Uint8List.fromList(List<int>.from(mapLocal['firma']));
+                }
+             }
+             batch.insert(t, mapLocal, conflictAlgorithm: ConflictAlgorithm.replace);
+          }
+
+          // 🧹 BORRADO SINCRO: Si borraste en Realtime DB, se elimina en SQLite Y TAMBIÉN en Firestore
+          if (idsNube.isNotEmpty) {
+            final regLocales = await dbLocal.query(t, columns: ['id']);
+            for (var row in regLocales) {
+              int idLoc = row['id'] as int;
+              if (!idsNube.contains(idLoc) && idLoc != -1) {
+                batch.delete(t, where: 'id = ?', whereArgs: [idLoc]);
+                
+                // Borrado en Firestore
+                DocumentReference docRef = _db
+                    .collection('usuarios')
+                    .doc(_uid)
+                    .collection(t)
+                    .doc(idLoc.toString());
+                batchFirestore.delete(docRef);
+                huboBorradosFirestore = true;
+              }
+            }
+          }
+        }
+      }
+
+      await batch.commit(noResult: true);
+      
+      if (huboBorradosFirestore) {
+        try { await batchFirestore.commit(); } catch (_) {}
+      }
+
+      final prefs = await SharedPreferences.getInstance();
+      if (datos['timestamp_privado'] != null) {
+        await prefs.setInt('rt_timestamp_privado_$_uid', datos['timestamp_privado']);
+      }
+      debugPrint("✅ Datos sincronizados entre SQLite, Realtime DB y Firestore.");
+    } catch(e) {
+       debugPrint("Error bajando datos privados de RTDB: $e");
+    }
+  }
+
   static Future<void> sincronizarBorradosFisicos(
       String uid, String tabla, {bool force = false}) async {
     if (!await tieneInternet()) return;
     try {
       final prefs = await SharedPreferences.getInstance();
-      
-      // 🛡️ ESCUDO DE SEGURIDAD 1 (Para no Premium):
       if (!(prefs.getBool('es_premium') ?? false)) return;
-
-      String hoy = DateTime.now().toIso8601String().substring(0, 10);
-      String key = 'ultimo_borrado_fisico_${tabla}_$uid';
-
-      if (!force && prefs.getString(key) == hoy) {
-        debugPrint('🧹 Salteando comprobación de borrados físicos para $tabla (Ya se ejecutó hoy).');
-        return;
-      }
 
       final dbLocal = await DBHelper.instance.database;
       List<int> idsNube = [];
       bool consultaExitosa = false;
 
-      // ☁️ Sincronización del catálogo por Realtime Database (0 Lecturas Firestore)
       if (tabla == 'productos' || tabla == 'categorias') {
         final ref = FirebaseDatabase.instance.ref("catalogos_web/$uid");
         final snap = await ref.get();
-        
-        if (snap.exists) {
+        if (snap.exists && snap.value != null) {
           consultaExitosa = true;
           Map<String, dynamic> datos = {};
           final rawValue = snap.value;
           if (rawValue is String) {
-            datos = jsonDecode(rawValue);
+            try { datos = jsonDecode(rawValue); } catch (_) {}
           } else if (rawValue is Map) {
             datos = Map<String, dynamic>.from(rawValue);
           }
@@ -595,64 +631,67 @@ class ServicioNube {
             final activos = datos['productos'] != null ? List<dynamic>.from(datos['productos']) : [];
             final inactivos = datos['productos_inactivos'] != null ? List<dynamic>.from(datos['productos_inactivos']) : [];
             for (var p in [...activos, ...inactivos]) {
-              if (p != null && p['id'] != null) idsNube.add(p['id'] as int);
+              if (p != null && p['id'] != null) idsNube.add((p['id'] as num).toInt());
             }
           } else if (tabla == 'categorias') {
             final activos = datos['categorias'] != null ? List<dynamic>.from(datos['categorias']) : [];
             final inactivos = datos['categorias_inactivas'] != null ? List<dynamic>.from(datos['categorias_inactivas']) : [];
             for (var c in [...activos, ...inactivos]) {
-              if (c != null && c['id'] != null) idsNube.add(c['id'] as int);
+              if (c != null && c['id'] != null) idsNube.add((c['id'] as num).toInt());
             }
           }
         }
-      } 
-      // 🔒 Sincronización de datos privados por Firestore (pedidos, etc.)
-      else {
-        try {
-          final snapshot = await _db
-              .collection('usuarios')
-              .doc(uid)
-              .collection(tabla)
-              .get();
-          idsNube = snapshot.docs
-              .map((doc) => int.tryParse(doc.id) ?? -1)
-              .toList();
+      } else {
+        // 🔒 Sincronización de borrados desde Realtime DB
+        final ref = FirebaseDatabase.instance.ref("datos_privados/$uid/$tabla");
+        final snap = await ref.get();
+        if (snap.exists && snap.value != null) {
           consultaExitosa = true;
-        } catch (e) {
-          if (_esErrorCuota(e)) {
-            debugPrint('🚨 CUOTA EXCEDIDA EN BORRADOS FÍSICOS. Reintentando por RTDB...');
-            await descargarDatosPrivadosRTDB();
-            return;
+          final raw = snap.value;
+          if (raw is List) {
+            for (var item in raw) {
+              if (item != null && item['id'] != null) idsNube.add((item['id'] as num).toInt());
+            }
+          } else if (raw is Map) {
+            for (var item in raw.values) {
+              if (item != null && item['id'] != null) idsNube.add((item['id'] as num).toInt());
+            }
           }
         }
       }
 
-      if (!consultaExitosa) {
-        debugPrint('⚠️ Sincronización de borrados omitida: No se pudo verificar el origen en la nube.');
-        return;
-      }
+      if (!consultaExitosa) return;
 
       final registrosLocales = await dbLocal.query(tabla, columns: ['id']);
-      final List<int> idsLocales =
-          registrosLocales.map((row) => row['id'] as int).toList();
+      final List<int> idsLocales = registrosLocales.map((row) => row['id'] as int).toList();
 
-      final Batch batch = dbLocal.batch();
+      final Batch batchLocal = dbLocal.batch();
+      final WriteBatch batchFirestore = _db.batch();
       bool huboBorrados = false;
 
       for (int idLocal in idsLocales) {
         if (!idsNube.contains(idLocal) && idLocal != -1) {
-          batch.delete(tabla, where: 'id = ?', whereArgs: [idLocal]);
+          batchLocal.delete(tabla, where: 'id = ?', whereArgs: [idLocal]);
           if (tabla == 'productos') {
-            batch.delete('fotos_variantes',
-                where: 'producto_id = ?', whereArgs: [idLocal]);
+            batchLocal.delete('fotos_variantes', where: 'producto_id = ?', whereArgs: [idLocal]);
           }
+
+          // 🔥 TAMBIÉN SE ELIMINA EL DOCUMENTO EN FIRESTORE
+          DocumentReference docRef = _db
+              .collection('usuarios')
+              .doc(uid)
+              .collection(tabla)
+              .doc(idLocal.toString());
+          batchFirestore.delete(docRef);
+
           huboBorrados = true;
         }
       }
 
-      if (huboBorrados) await batch.commit(noResult: true);
-      
-      await prefs.setString(key, hoy);
+      if (huboBorrados) {
+        await batchLocal.commit(noResult: true);
+        try { await batchFirestore.commit(); } catch (_) {}
+      }
     } catch (e) {
       debugPrint('Error sincronizarBorradosFisicos ($tabla): $e');
     }
@@ -832,10 +871,9 @@ class ServicioNube {
         if (neg['whatsapp_admin'] != null) await prefs.setString('whatsapp_admin', neg['whatsapp_admin']);
       }
 
-      // 🔥 UN SOLO BATCH EVITA EL ANR (0 bloqueos de base de datos)
       final Batch batch = dbLocal.batch();
 
-      // 2. Encolar Categorías Activas
+      // 2. Encolar Categorías Activas e Inactivas
       if (datos['categorias'] != null) {
         final cats = List<dynamic>.from(datos['categorias']);
         for (var c in cats) {
@@ -845,7 +883,6 @@ class ServicioNube {
         }
       }
 
-      // 2b. Encolar Categorías Inactivas
       if (datos['categorias_inactivas'] != null) {
         final catsInactivas = List<dynamic>.from(datos['categorias_inactivas']);
         for (var c in catsInactivas) {
@@ -855,7 +892,7 @@ class ServicioNube {
         }
       }
 
-      // 3. Encolar Productos Activos
+      // 3. Encolar y Descargar Productos Activos (ORDEN SEQUENCIAL RIGUROSO)
       if (datos['productos'] != null) {
         final prods = List<dynamic>.from(datos['productos']);
         for (var p in prods) {
@@ -866,11 +903,13 @@ class ServicioNube {
             }
             batch.insert('productos', map, conflictAlgorithm: ConflictAlgorithm.replace);
 
+            // A. Primero descarga la foto principal del producto
             String mainFoto = map['foto_path']?.toString() ?? "";
             if (mainFoto.isNotEmpty && mainFoto.startsWith('http')) {
-              descargarFotoIndividualEnSegundoPlano(mainFoto, pathBoxi);
+              await descargarFotoIndividualEnSegundoPlano(mainFoto, pathBoxi);
             }
 
+            // B. Inmediatamente después descarga las fotos de sus variantes en orden
             if (map['variantes'] != null) {
               try {
                 List<dynamic> dec = map['variantes'] is String 
@@ -881,7 +920,7 @@ class ServicioNube {
                   for (var o in g['opciones']) {
                     String varFoto = o['foto_path']?.toString() ?? "";
                     if (varFoto.isNotEmpty && varFoto.startsWith('http')) {
-                      descargarFotoIndividualEnSegundoPlano(varFoto, "$pathBoxi/Variantes");
+                      await descargarFotoIndividualEnSegundoPlano(varFoto, "$pathBoxi/Variantes");
                     }
                   }
                 }
@@ -891,7 +930,7 @@ class ServicioNube {
         }
       }
 
-      // 3b. Encolar Productos Inactivos
+      // 3b. Encolar y Descargar Productos Inactivos (ORDEN SECUENCIAL RIGUROSO)
       if (datos['productos_inactivos'] != null) {
         final prodsInactivos = List<dynamic>.from(datos['productos_inactivos']);
         for (var p in prodsInactivos) {
@@ -902,11 +941,13 @@ class ServicioNube {
             }
             batch.insert('productos', map, conflictAlgorithm: ConflictAlgorithm.replace);
 
+            // A. Primero descarga la foto principal del producto inactivo
             String mainFoto = map['foto_path']?.toString() ?? "";
             if (mainFoto.isNotEmpty && mainFoto.startsWith('http')) {
-              descargarFotoIndividualEnSegundoPlano(mainFoto, pathBoxi);
+              await descargarFotoIndividualEnSegundoPlano(mainFoto, pathBoxi);
             }
 
+            // B. Inmediatamente después descarga las fotos de sus variantes en orden
             if (map['variantes'] != null) {
               try {
                 List<dynamic> dec = map['variantes'] is String 
@@ -917,7 +958,7 @@ class ServicioNube {
                   for (var o in g['opciones']) {
                     String varFoto = o['foto_path']?.toString() ?? "";
                     if (varFoto.isNotEmpty && varFoto.startsWith('http')) {
-                      descargarFotoIndividualEnSegundoPlano(varFoto, "$pathBoxi/Variantes");
+                      await descargarFotoIndividualEnSegundoPlano(varFoto, "$pathBoxi/Variantes");
                     }
                   }
                 }
@@ -946,7 +987,7 @@ class ServicioNube {
 
       await batch.commit(noResult: true);
       
-      debugPrint("✅ Catálogo completo importado desde Realtime DB (0 lecturas Firestore).");
+      debugPrint("✅ Catálogo e imágenes descargadas en orden secuencial estricto.");
     } catch (e) {
       debugPrint("Error importando desde RTDB con Batch: $e");
     }
@@ -1485,9 +1526,9 @@ class ServicioNube {
       };
 
       DatabaseReference ref = FirebaseDatabase.instance.ref("catalogos_web/${user.uid}");
-      await ref.set(jsonEncode(superJson));
+      await ref.set(superJson); // 🔥 Guarda como Estructura Nativa Map limpia en RTDB
       
-      debugPrint("✅ Catálogo compilado exitosamente en RTDB.");
+      debugPrint("✅ Catálogo compilado exitosamente en RTDB como Map Nativo.");
     } catch (e) {
       debugPrint("❌ Error subiendo catálogo a RTDB: $e");
     }
@@ -2026,26 +2067,13 @@ class ServicioNube {
   // ─────────────────────────────────────────────────────────────
   // RESPALDO EN RTDB (SISTEMA DE EMERGENCIA ANTI-CUOTAS FIRESTORE)
   // ─────────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────
+  // RESPALDO EN RTDB (NATIVO EN MAPS SIN BLOQUEAR EL HILO DE DART)
+  // ─────────────────────────────────────────────────────────────
   static Future<void> respaldarDatosPrivadosRTDB() async {
     if (_uid == null || !await tieneInternet()) return;
     try {
       final dbLocal = await DBHelper.instance.database;
-      final pedCheck = await dbLocal.query('pedidos', limit: 1);
-      final cliCheck = await dbLocal.query('clientes', limit: 1);
-      if (pedCheck.isEmpty && cliCheck.isEmpty) {
-        try {
-          final fsCheck = await _db.collection('usuarios').doc(_uid).collection('pedidos').limit(1).get();
-          if (fsCheck.docs.isNotEmpty) {
-            debugPrint("🛡️ SQLite local vacía pero Firestore tiene datos. Recuperando antes de respaldar...");
-            await migrarYRecuperarDesdeFirestore(_uid!);
-            return;
-          }
-        } catch (e) {
-          if (_esErrorCuota(e)) {
-            debugPrint("🚨 CUOTA FIRESTORE EXCEDIDA en verificación. Usando RTDB...");
-          }
-        }
-      }
 
       Map<String, dynamic> jsonPrivado = {
         'timestamp_privado': DateTime.now().millisecondsSinceEpoch
@@ -2058,8 +2086,6 @@ class ServicioNube {
         'detalle_pedidos', 
         'reportes_guardados', 
         'ajustes_capital',
-        'tarjetas_fidelidad',
-        'puntos_clientes'
       ];
       
       for (String t in tablasPrivadas) {
@@ -2076,91 +2102,20 @@ class ServicioNube {
       }
       
       final ref = FirebaseDatabase.instance.ref("datos_privados/$_uid");
-      await ref.set(jsonEncode(jsonPrivado));
+      // 🔥 Guardar como Map directamente (Nativo de Firebase, 0 lag en Dart)
+      await ref.set(jsonPrivado);
     } catch (e) {
       debugPrint("Error respaldando datos privados en RTDB: $e");
     }
   }
 
-  static Future<void> descargarDatosPrivadosRTDB() async {
-    if (_uid == null || !await tieneInternet()) return;
-    try {
-      final ref = FirebaseDatabase.instance.ref("datos_privados/$_uid");
-      final snap = await ref.get();
-      if (!snap.exists) {
-        await migrarYRecuperarDesdeFirestore(_uid!, force: true);
-        return;
-      }
-
-      final rawValue = snap.value;
-      Map<String, dynamic> datos = {};
-
-      if (rawValue != null) {
-        if (rawValue is Map) {
-          datos = Map<String, dynamic>.from(rawValue);
-        } else if (rawValue is String) {
-          try {
-            final decoded = jsonDecode(rawValue);
-            if (decoded is Map) {
-              datos = Map<String, dynamic>.from(decoded);
-            }
-          } catch (e) {
-            debugPrint("Error parseando JSON de datos privados: $e");
-          }
-        }
-      }
-
-      if (datos.isEmpty) return;
-
-      final dbLocal = await DBHelper.instance.database;
-
-      try {
-        final cols = await dbLocal.rawQuery("PRAGMA table_info(puntos_clientes);");
-        if (!cols.any((c) => c['name'] == 'client_uid')) {
-          await dbLocal.execute("ALTER TABLE puntos_clientes ADD COLUMN client_uid TEXT;");
-        }
-      } catch (_) {}
-
-      final Batch batch = dbLocal.batch();
-      const tablasPrivadas = [
-        'vendedores', 
-        'clientes', 
-        'pedidos', 
-        'detalle_pedidos', 
-        'reportes_guardados', 
-        'ajustes_capital',
-        'tarjetas_fidelidad',
-        'puntos_clientes'
-      ];
-
-      for (String t in tablasPrivadas) {
-        if (datos[t] != null) {
-          final lista = List<dynamic>.from(datos[t]);
-          for (var item in lista) {
-             Map<String, dynamic> mapLocal = Map<String, dynamic>.from(item);
-             
-             if (t == 'pedidos' && mapLocal['firma'] != null) {
-                if (mapLocal['firma'] is String) {
-                  try {
-                    mapLocal['firma'] = base64Decode(mapLocal['firma']);
-                  } catch (_) {}
-                } else if (mapLocal['firma'] is List) {
-                  mapLocal['firma'] = Uint8List.fromList(List<int>.from(mapLocal['firma']));
-                }
-             }
-             batch.insert(t, mapLocal, conflictAlgorithm: ConflictAlgorithm.replace);
-          }
-        }
-      }
-      await batch.commit(noResult: true);
-
-      final prefs = await SharedPreferences.getInstance();
-      if (datos['timestamp_privado'] != null) {
-        await prefs.setInt('rt_timestamp_privado_$_uid', datos['timestamp_privado']);
-      }
-    } catch(e) {
-       debugPrint("Error bajando datos privados de RTDB: $e");
-    }
+  // ─────────────────────────────────────────────────────────────
+  // FIRESTORE SYNC DESACTIVADO (PROTECCIÓN TOTAL DE CUOTA)
+  // ─────────────────────────────────────────────────────────────
+  static Future<void> migrarYRecuperarDesdeFirestore(String uid, {bool force = false}) async {
+    debugPrint("🛡️ Petición desviada a Realtime Database para proteger la cuota de Firestore.");
+    await descargarDatosPrivadosRTDB();
+    await importarCatalogoDesdeRTDB(uid);
   }
 
   static StreamSubscription? escucharCambiosNubeRTDB(Function() onUpdate) {
@@ -2196,108 +2151,6 @@ class ServicioNube {
       }
     } catch (e) {
       debugPrint("Error eliminando archivos locales de disco: $e");
-    }
-  }
-
-  // ─────────────────────────────────────────────────────────────
-  //  RECUPERAR/MIGRAR FIRESTORE (CON BARRERA Y CONTROL DE CUOTA)
-  // ─────────────────────────────────────────────────────────────
-  static Future<void> migrarYRecuperarDesdeFirestore(String uid, {bool force = false}) async {
-    if (!await tieneInternet()) return;
-
-    final prefs = await SharedPreferences.getInstance();
-    bool yaMigrado = prefs.getBool('migracion_firestore_a_realtime_completa_$uid') ?? false;
-
-    if (yaMigrado && !force) {
-      debugPrint("🛑 Migración Firestore➔Realtime ya realizada previamente. 0 Lecturas consumidas.");
-      return;
-    }
-
-    try {
-      final dbLocal = await DBHelper.instance.database;
-      debugPrint("🚀 RECUPERANDO HISTORIAL DESDE FIRESTORE...");
-
-      const List<String> tablas = [
-        'categorias',
-        'productos',
-        'vendedores',
-        'clientes',
-        'pedidos',
-        'detalle_pedidos',
-        'reportes_guardados',
-        'ajustes_capital',
-        'tarjetas_fidelidad',
-        'puntos_clientes',
-      ];
-
-      for (String tabla in tablas) {
-        final snap = await _db.collection('usuarios').doc(uid).collection(tabla).get();
-        if (snap.docs.isEmpty) continue;
-
-        final List<Map<String, dynamic>> columnasSQLite = await dbLocal.rawQuery('PRAGMA table_info($tabla)');
-        final Set<String> columnasValidas = columnasSQLite.map((c) => c['name'] as String).toSet();
-
-        int chunkSize = 25;
-        for (int i = 0; i < snap.docs.length; i += chunkSize) {
-          int fin = (i + chunkSize < snap.docs.length) ? i + chunkSize : snap.docs.length;
-          List<QueryDocumentSnapshot> chunk = snap.docs.sublist(i, fin);
-
-          final Batch batch = dbLocal.batch();
-          for (var doc in chunk) {
-            final Map<String, dynamic> raw = Map<String, dynamic>.from(doc.data() as Map<String, dynamic>);
-            final Map<String, dynamic> mapLocal = {};
-
-            raw.forEach((key, value) {
-              if (!columnasValidas.contains(key)) return;
-              if (value is Timestamp) {
-                mapLocal[key] = value.toDate().toIso8601String();
-              } else if (value is Blob) {
-                mapLocal[key] = value.bytes;
-              } else if (value is List || value is Map) {
-                mapLocal[key] = jsonEncode(value);
-              } else {
-                mapLocal[key] = value;
-              }
-            });
-
-            if (!mapLocal.containsKey('id') || mapLocal['id'] == null) {
-              int? parsedId = int.tryParse(doc.id);
-              if (parsedId != null) {
-                mapLocal['id'] = parsedId;
-              } else {
-                mapLocal['id'] = doc.id.hashCode.abs();
-              }
-            }
-
-            if (tabla == 'pedidos') {
-              mapLocal['fecha_hora'] ??= DateTime.now().toIso8601String();
-              mapLocal['cliente_id'] ??= 0;
-              mapLocal['vendedor_id'] ??= 0;
-              mapLocal['total_venta'] ??= 0.0;
-              mapLocal['ganancia_total'] ??= 0.0;
-              mapLocal['estado'] ??= 'Pendiente';
-            }
-
-            batch.insert(tabla, mapLocal, conflictAlgorithm: ConflictAlgorithm.replace);
-          }
-          await batch.commit(noResult: true);
-        }
-      }
-
-      await compilarYSubirCatalogoRTDB();
-      await respaldarDatosPrivadosRTDB();
-      
-      await prefs.setBool('migracion_firestore_a_realtime_completa_$uid', true);
-      debugPrint("✅ Migración finalizada y bloqueada para futuros inicios.");
-
-    } catch (e) {
-      if (_esErrorCuota(e)) {
-        debugPrint("🚨 CUOTA FIRESTORE EXCEDIDA en migración. Usando Realtime Database...");
-        await importarCatalogoDesdeRTDB(uid);
-        await descargarDatosPrivadosRTDB();
-      } else {
-        debugPrint("Error en migración desde Firestore: $e");
-      }
     }
   }
 }

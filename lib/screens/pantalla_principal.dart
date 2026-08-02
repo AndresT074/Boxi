@@ -164,7 +164,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     _timerReorden?.cancel();
     _autoScrollTimer?.cancel();
     _dragTimer?.cancel();
-    
     // 🔥 Limpiar variables
     _nombreController.dispose();
     _searchCtrl.dispose();
@@ -1888,9 +1887,10 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     await db.update('productos', {'categoria': nuevaCategoria}, where: 'id = ?', whereArgs: [productoId]);
 
     if (_esPremium && FirebaseAuth.instance.currentUser != null) {
-      FirebaseFirestore.instance.collection('usuarios').doc(FirebaseAuth.instance.currentUser!.uid)
+      await FirebaseFirestore.instance.collection('usuarios').doc(FirebaseAuth.instance.currentUser!.uid)
         .collection('productos').doc(productoId.toString())
         .set({'categoria': nuevaCategoria, 'ultima_modificacion': FieldValue.serverTimestamp()}, SetOptions(merge: true));
+      await ServicioNube.compilarYSubirCatalogoRTDB(); // 🔥 Sincroniza el cambio a Realtime DB
     }
     _cargar();
   }
@@ -1901,9 +1901,10 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     await db.update('categorias', {'activo': val, 'ultima_modificacion': DateTime.now().toIso8601String()}, where: 'id = ?', whereArgs: [idCat]);
 
     if (_esPremium && FirebaseAuth.instance.currentUser != null) {
-      FirebaseFirestore.instance.collection('usuarios').doc(FirebaseAuth.instance.currentUser!.uid)
+      await FirebaseFirestore.instance.collection('usuarios').doc(FirebaseAuth.instance.currentUser!.uid)
         .collection('categorias').doc(idCat.toString())
         .set({'activo': val, 'ultima_modificacion': FieldValue.serverTimestamp()}, SetOptions(merge: true));
+      await ServicioNube.compilarYSubirCatalogoRTDB(); // 🔥 Sincroniza el cambio a Realtime DB
     }
     _cargar();
   }
@@ -1917,12 +1918,12 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       String uid = FirebaseAuth.instance.currentUser!.uid;
       WriteBatch batch = FirebaseFirestore.instance.batch();
       batch.delete(FirebaseFirestore.instance.collection('usuarios').doc(uid).collection('categorias').doc(idCat.toString()));
-      // Limpiar nube sin leer (solo escribimos nulo en los productos afectados)
       for (var p in productos.where((p) => p['categoria'] == nombreCat)) {
          batch.set(FirebaseFirestore.instance.collection('usuarios').doc(uid).collection('productos').doc(p['id'].toString()),
           {'categoria': null, 'ultima_modificacion': FieldValue.serverTimestamp()}, SetOptions(merge: true));
       }
-      batch.commit();
+      await batch.commit();
+      await ServicioNube.compilarYSubirCatalogoRTDB(); // 🔥 Sincroniza el cambio a Realtime DB
     }
     _cargar();
   }
@@ -1943,7 +1944,8 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         batchNube.set(FirebaseFirestore.instance.collection('usuarios').doc(uid).collection('categorias').doc(c['id'].toString()), 
           {'orden': c['orden'], 'ultima_modificacion': FieldValue.serverTimestamp()}, SetOptions(merge: true));
       }
-      batchNube.commit();
+      await batchNube.commit();
+      await ServicioNube.compilarYSubirCatalogoRTDB(); // 🔥 Sincroniza el cambio a Realtime DB
     }
   }
 
@@ -3581,7 +3583,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                 _tile(Icons.inventory, 'Inventario', const PantallaInventario(), badgeCount: _badgeInventario, badgeColor: Colors.red),
                 _tile(Icons.people, 'Vendedores', const PantallaVendedores()),
                 _tile(Icons.person_search, 'Clientes', const PantallaClientes()),
-                _tile(Icons.card_giftcard_rounded, 'Premios Fidelidad', const PantallaFidelidad()),
+                //_tile(Icons.card_giftcard_rounded, 'Premios Fidelidad', const PantallaFidelidad()),
                 _tile(Icons.receipt_long, 'Gestión Pedidos', const PantallaGestionPedidos(), badgeCount: _badgePedidos, badgeColor: Colors.blue),
                 _tile(Icons.bar_chart, 'Finanzas y Estadisticas', const PantallaPresupuestos()),             
                 ValueListenableBuilder<ThemeMode>(

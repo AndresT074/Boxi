@@ -154,10 +154,17 @@ class _PantallaPremiumState extends State<PantallaPremium> {
         'order_id': idTransaccion,
         'motivo_degradacion': FieldValue.delete(), 
       }, SetOptions(merge: true));
-      await ServicioNube.sincronizarBaseDatosHaciaNube();
+
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('es_premium', true);
       await prefs.setString('order_id', idTransaccion);
+      await prefs.setBool("descarga_completa_${user.uid}", true);
+
+      // 🚀 MIGRACIÓN COMPLETA DE DATOS LOCALES A LA NUBE AL ACTIVAR PREMIUM
+      await ServicioNube.sincronizarBaseDatosHaciaNube(); // A Firestore
+      await ServicioNube.respaldarDatosPrivadosRTDB();      // A Realtime DB (Privado)
+      await ServicioNube.compilarYSubirCatalogoRTDB();     // A Realtime DB (Catálogo Web)
+      await ServicioNube.migrarTodoACloudinary();         // Fotos locales a Cloudinary
       if (mounted) {
         setState(() {
           _procesando = false;

@@ -111,14 +111,12 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
       });
     }
 
-    // 🔥 REEMPLAZAR TODAS LAS SUSCRIPCIONES POR ESTA:
+    // ⚡ Sincroniza desde Realtime Database (0 Lecturas Firestore)
     final subs = ServicioNube.escucharCambiosNubeRTDB(() async {
       final uid = FirebaseAuth.instance.currentUser?.uid;
       if (uid != null) {
-        await ServicioNube.descargarSoloModificados(uid, 'productos', 'ultima_modificacion');
-        await ServicioNube.descargarSoloModificados(uid, 'pedidos', 'ultima_modificacion');
-        await ServicioNube.descargarSoloModificados(uid, 'ajustes_capital', 'ultima_modificacion');
-        await ServicioNube.descargarSoloModificados(uid, 'reportes_guardados', 'ultima_modificacion');
+        await ServicioNube.descargarDatosPrivadosRTDB();
+        await ServicioNube.importarCatalogoDesdeRTDB(uid);
         recalcularConDebounce();
       }
     });

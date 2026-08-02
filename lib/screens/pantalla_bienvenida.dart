@@ -326,80 +326,51 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
         debugPrint("Sin conexión a internet. Saltando sincronización silenciosa.");
         return; 
       }
-      await ServicioNube.migrarYRecuperarDesdeFirestore(user.uid);
+
       final SharedPreferences prefs = await SharedPreferences.getInstance();
       String hoy = DateTime.now().toIso8601String().substring(0, 10);
-      String nombreActual =
-          prefs.getString('nombre_negocio') ?? "NOMBREDETUNEGOCIOAQUI";
+      String nombreActual = prefs.getString('nombre_negocio') ?? "NOMBREDETUNEGOCIOAQUI";
+      
       bool necesitaPerfil = prefs.getString('ultima_val_nube') != hoy ||
           nombreActual == "NOMBREDETUNEGOCIOAQUI" ||
           nombreActual == "nombredenegocioaqui";
+
       if (necesitaPerfil) {
         await ServicioNube.descargarPerfilNube(user.uid);
         await ServicioAuth.actualizarEstadoPremiumNube(user.uid);
         await prefs.setString('ultima_val_nube', hoy);
         await _cargarConfig();
       }
+
       _esPremium = prefs.getBool('es_premium') ?? false;
-      
-      // Protegemos la limpieza de campos antiguos con try/catch y timeout
-      try {
-        await FirebaseFirestore.instance.collection('usuarios').doc(user.uid).update({
-          'plan': FieldValue.delete(),
-          'fecha_ultimo_ingreso': FieldValue.delete(),
-          'ultima_modificacion': FieldValue.delete(),
-        }).timeout(const Duration(seconds: 3));
-      } catch (_) {}
 
       if (_esPremium) {
         String llaveDescarga = "descarga_completa_${user.uid}";
         bool yaDescargoTodo = prefs.getBool(llaveDescarga) ?? false;
-        if (!yaDescargoTodo) {
-          
-          // 1. Descargamos el catálogo web
+
+        final dbLocal = await DBHelper.instance.database;
+        final clientesLocales = await dbLocal.query('clientes', limit: 1);
+        final pedidosLocales = await dbLocal.query('pedidos', limit: 1);
+
+        // ⚡ SOLO IMPORTAR DESDE REALTIME DB SI NUNCA HA DESCARGADO O LA BD LOCAL ESTÁ VACÍA
+        if (!yaDescargoTodo || (clientesLocales.isEmpty && pedidosLocales.isEmpty)) {
+          debugPrint("☁️ Primer inicio o BD vacía: Descargando desde Realtime DB...");
           await ServicioNube.importarCatalogoDesdeRTDB(user.uid);
-
-          // 2. Intentamos descargar datos privados desde RTDB
           await ServicioNube.descargarDatosPrivadosRTDB();
-
-          // 3. Verificamos si realmente se descargó algo desde RTDB
-          final dbLocal = await DBHelper.instance.database;
-          final clientesLocales = await dbLocal.query('clientes', limit: 1);
-          final pedidosLocales = await dbLocal.query('pedidos', limit: 1);
-
-          if (clientesLocales.isEmpty && pedidosLocales.isEmpty) {
-            debugPrint("☁️ Primer inicio: Migrando historial desde Firestore a Realtime...");
-            await ServicioNube.descargarTodoDesdeNube();
-            await ServicioNube.respaldarDatosPrivadosRTDB();
-          }
           
           await prefs.setBool('migracion_definitiva_completa_v6', false); 
           await ServicioNube.migrarVariantesAlJSONyCarpetas(); 
-          
           await prefs.setBool(llaveDescarga, true);
-          await prefs.setBool('primera_carga_completada_${user.uid}', true);
-          
-          try {
-            final userDoc = await FirebaseFirestore.instance
-                .collection('usuarios')
-                .doc(user.uid)
-                .get()
-                .timeout(const Duration(seconds: 3));
-            if (userDoc.exists) {
-              final data = userDoc.data() as Map<String, dynamic>;
-              final modProd = (data['ultima_mod_productos'] as Timestamp?)?.toDate().toIso8601String();
-              final modPed = (data['ultima_mod_pedidos'] as Timestamp?)?.toDate().toIso8601String();
-              if (modProd != null) await prefs.setString('ultima_mod_productos_local_${user.uid}', modProd);
-              if (modPed != null) await prefs.setString('ultima_mod_pedidos_local_${user.uid}', modPed);
-            }
-          } catch (_) {}
-        } else {
-          await ServicioNube.rescatarDatosPerdidosFirestore(user.uid);
         }
+
+        // Sincronizar operaciones pendientes si estuvo offline
+        await ServicioNube.procesarColaOffline();
         
+        // Sincronizar tarjetas de fidelidad y fotos a Cloudinary
         await ServicioFidelidad.sincronizarTarjetasCompleto(user.uid);
         await ServicioNube.migrarTodoACloudinary();
       }
+
       if (mounted) setState(() {});
     } catch (e) {
       debugPrint("Error en sincronización silenciosa: $e");
@@ -492,21 +463,51 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
 
   Future<void> _registrarIngresoYVerificarActualizacion() async {
     final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    
+    // 1. OBTENER VERSIÓN ACTUAL DE LA APP
+    PackageInfo packageInfo = await PackageInfo.fromPlatform();
+    String versionActual = '${packageInfo.version}+${packageInfo.buildNumber}';
+    String? versionGuardada = prefs.getString('version_app_registrada');
+
+    // 🧹 2. LIMPIEZA AUTOMÁTICA DE CACHÉ AL CAMBIAR DE VERSIÓN
+    if (versionGuardada == null && versionGuardada != versionActual) {
+      try {
+        debugPrint("🚀 ¡Nueva versión detectada ($versionActual)! Limpiando caché automática...");
+        
+        // A. Limpiar caché de imágenes en memoria RAM
+        PaintingBinding.instance.imageCache.clear();
+        PaintingBinding.instance.imageCache.clearLiveImages();
+
+        // B. Limpiar carpeta de archivos temporales (PDFs generados viejos, imágenes temporales)
+        final tempDir = await getTemporaryDirectory();
+        if (await tempDir.exists()) {
+          final List<FileSystemEntity> entidades = tempDir.listSync();
+          for (FileSystemEntity entity in entidades) {
+            try {
+              await entity.delete(recursive: true);
+            } catch (_) {}
+          }
+        }
+        debugPrint("✅ Caché de versión anterior eliminada con éxito.");
+      } catch (e) {
+        debugPrint("Error al limpiar caché de versión: $e");
+      }
+    }
+
+    // Guardar versión actual en SharedPreferences
+    await prefs.setString('version_app_registrada', versionActual);
+
     if (!await ServicioNube.tieneInternet()) return;
 
     try {
-      final prefs = await SharedPreferences.getInstance();
       String hoy = DateTime.now().toIso8601String().substring(0, 10);
       String? ultimoRegistro = prefs.getString('ultimo_registro_firestore');
-      String? versionGuardada = prefs.getString('version_app_registrada');
-      PackageInfo packageInfo = await PackageInfo.fromPlatform();
-      String versionActual = '${packageInfo.version}+${packageInfo.buildNumber}';
       
       bool necesitaActualizarDia = (ultimoRegistro != hoy);
       bool necesitaActualizarVersion = (versionGuardada != versionActual);
       
-      if (necesitaActualizarDia || necesitaActualizarVersion) {
+      if (user != null && (necesitaActualizarDia || necesitaActualizarVersion)) {
         Map<String, dynamic> datosAEnviar = {};
         
         if (necesitaActualizarDia) {
@@ -525,10 +526,9 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
         if (necesitaActualizarDia) {
           await prefs.setString('ultimo_registro_firestore', hoy);
         }
-        if (necesitaActualizarVersion) {
-          await prefs.setString('version_app_registrada', versionActual);
-        }
       }
+
+      // Verificación de actualizaciones in-app desde Play Store
       AppUpdateInfo info = await InAppUpdate.checkForUpdate().timeout(const Duration(seconds: 2));
       if (info.updateAvailability == UpdateAvailability.updateAvailable) { 
         await InAppUpdate.performImmediateUpdate();

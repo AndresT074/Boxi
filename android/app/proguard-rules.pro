@@ -1,9 +1,8 @@
 # =========================================================
-# OPTIMIZACIÓN Y REEMPAQUETADO AVANZADO DE R8
+# REEMPAQUETADO Y OPTIMIZACIÓN DE R8
 # =========================================================
 -repackageclasses ''
 -allowaccessmodification
--optimize
 
 # Flutter Framework
 -keep class io.flutter.app.** { *; }
