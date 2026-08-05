@@ -37,6 +37,7 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
   double _ventasDelDia = 0;
   int _pedidosDelDia = 0;
   int _filtroDiasEstancados = 10;
+  int _limiteEstancados = 5; // 🔥 Muestra 5 productos inicialmente
   List<Map<String, dynamic>> _topProductos = [];
   List<Map<String, dynamic>> _topClientes = [];
   List<Map<String, dynamic>> _productosEstancados = [];
@@ -1776,7 +1777,7 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
           ),
           const SizedBox(height: 25),
 
-          // 7. INVENTARIO ESTANCADO
+          // 7. INVENTARIO ESTANCADO (Muestra 5 iniciales + Ver más)
           _tituloConFiltroDias(
             "Inventario Estancado (+$_filtroDiasEstancados días)", 
             Icons.warning_amber_rounded, 
@@ -1784,37 +1785,91 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
             isOscuro,
             (v) {
               if (v != null) {
-                setState(() { _filtroDiasEstancados = v; });
+                setState(() { 
+                  _filtroDiasEstancados = v; 
+                  _limiteEstancados = 5; // Reinicia a 5 al cambiar de días
+                });
                 _cargarDatosGraficos();
               }
             },
             colorIcon: Colors.redAccent,
           ),
-          Card(
-            color: isOscuro ? Theme.of(context).cardColor : Colors.white,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: BorderSide(color: Colors.redAccent.withOpacity(isOscuro ? 0.2 : 0.1))),
-            elevation: isOscuro ? 0 : 1,
-            child: _productosEstancados.isEmpty 
-              ? Padding(padding: const EdgeInsets.all(22), child: Center(child: Text("¡Excelente! Todo tu inventario tiene rotación activa.", style: TextStyle(color: isOscuro ? Colors.white60 : Colors.black54, fontSize: 13))))
-              : ListView.separated(
-                  shrinkWrap: true, 
-                  physics: const NeverScrollableScrollPhysics(),
-                  itemCount: _productosEstancados.length, 
-                  separatorBuilder: (_,__) => Divider(height: 1, color: isOscuro ? Colors.white10 : Colors.black12),
-                  itemBuilder: (ctx, i) {
-                    var p = _productosEstancados[i];
-                    return ListTile(
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                      leading: const Icon(Icons.inventory_2_outlined, color: Colors.redAccent, size: 20),
-                      title: Text(p['nombre'].toString(), style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: isOscuro ? Colors.white : Colors.black87)),
-                      trailing: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5), 
-                        decoration: BoxDecoration(color: Colors.red.withOpacity(0.08), borderRadius: BorderRadius.circular(8)), 
-                        child: Text("${p['stock']} u. en stock", style: const TextStyle(color: Colors.redAccent, fontSize: 11, fontWeight: FontWeight.w900))
-                      ),
-                    );
-                  }
-                ),
+          Builder(
+            builder: (context) {
+              final estancadosAMostrar = _productosEstancados.take(_limiteEstancados).toList();
+              final bool hayMasEstancados = _productosEstancados.length > 5;
+
+              return Card(
+                color: isOscuro ? Theme.of(context).cardColor : Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: BorderSide(color: Colors.redAccent.withOpacity(isOscuro ? 0.2 : 0.1))),
+                elevation: isOscuro ? 0 : 1,
+                child: _productosEstancados.isEmpty 
+                  ? Padding(padding: const EdgeInsets.all(22), child: Center(child: Text("¡Excelente! Todo tu inventario tiene rotación activa.", style: TextStyle(color: isOscuro ? Colors.white60 : Colors.black54, fontSize: 13))))
+                  : Column(
+                      children: [
+                        ListView.separated(
+                          shrinkWrap: true, 
+                          physics: const NeverScrollableScrollPhysics(),
+                          itemCount: estancadosAMostrar.length, 
+                          separatorBuilder: (_,__) => Divider(height: 1, color: isOscuro ? Colors.white10 : Colors.black12),
+                          itemBuilder: (ctx, i) {
+                            var p = estancadosAMostrar[i];
+                            return ListTile(
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                              leading: const Icon(Icons.inventory_2_outlined, color: Colors.redAccent, size: 20),
+                              title: Text(p['nombre'].toString(), style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: isOscuro ? Colors.white : Colors.black87)),
+                              trailing: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5), 
+                                decoration: BoxDecoration(color: Colors.red.withOpacity(0.08), borderRadius: BorderRadius.circular(8)), 
+                                child: Text("${p['stock']} u. en stock", style: const TextStyle(color: Colors.redAccent, fontSize: 11, fontWeight: FontWeight.w900))
+                              ),
+                            );
+                          }
+                        ),
+                        if (hayMasEstancados) ...[
+                          Divider(height: 1, color: isOscuro ? Colors.white10 : Colors.black12),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                if (_limiteEstancados < _productosEstancados.length)
+                                  TextButton.icon(
+                                    onPressed: () {
+                                      setState(() {
+                                        _limiteEstancados += 5;
+                                      });
+                                    },
+                                    icon: const Icon(Icons.keyboard_arrow_down, color: Colors.redAccent, size: 18),
+                                    label: Text(
+                                      "Ver más (${_productosEstancados.length - _limiteEstancados})",
+                                      style: const TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold, fontSize: 12),
+                                    ),
+                                  ),
+                                if (_limiteEstancados > 5) ...[
+                                  if (_limiteEstancados < _productosEstancados.length)
+                                    const SizedBox(width: 15),
+                                  TextButton.icon(
+                                    onPressed: () {
+                                      setState(() {
+                                        _limiteEstancados = 5;
+                                      });
+                                    },
+                                    icon: const Icon(Icons.keyboard_arrow_up, color: Colors.grey, size: 18),
+                                    label: const Text(
+                                      "Contraer",
+                                      style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold, fontSize: 12),
+                                    ),
+                                  ),
+                                ]
+                              ],
+                            ),
+                          ),
+                        ]
+                      ],
+                    ),
+              );
+            }
           ),
           const SizedBox(height: 50),
         ],
