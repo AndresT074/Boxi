@@ -1,7 +1,8 @@
 import 'dart:io';
 import 'dart:async';
 import 'dart:convert';
-import 'dart:ui' as ui; // 🔥 Añadido para compresión nativa
+import 'dart:ui' as ui; 
+import 'package:path_provider/path_provider.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:sqflite/sqflite.dart';
@@ -444,11 +445,10 @@ class ServicioNube {
           batch.insert(tabla, mapLocal,
               conflictAlgorithm: ConflictAlgorithm.replace);
 
-          // 🔥 DESCARGAS EN ORDEN SECUENCIAL PARA NUEVOS PRODUCTOS
           if (tabla == 'productos') {
             String mainFoto = mapLocal['foto_path']?.toString() ?? "";
             if (mainFoto.isNotEmpty && mainFoto.startsWith('http')) {
-              await descargarFotoIndividualEnSegundoPlano(mainFoto, pathBoxi);
+              descargarFotoIndividualEnSegundoPlano(mainFoto, pathBoxi);
             }
 
             String varStr = mapLocal['variantes']?.toString() ?? "";
@@ -460,7 +460,7 @@ class ServicioNube {
                   for (var o in g['opciones']) {
                     String varFoto = o['foto_path']?.toString() ?? "";
                     if (varFoto.isNotEmpty && varFoto.startsWith('http')) {
-                      await descargarFotoIndividualEnSegundoPlano(varFoto, "$pathBoxi/Variantes");
+                      descargarFotoIndividualEnSegundoPlano(varFoto, "$pathBoxi/Variantes");
                     }
                   }
                 }
@@ -516,7 +516,8 @@ class ServicioNube {
 
       try {
         final cols = await dbLocal.rawQuery("PRAGMA table_info(puntos_clientes);");
-        if (!cols.any((c) => c['name'] == 'client_uid')) {
+        bool existeColumna = cols.any((c) => c['name'].toString().toLowerCase() == 'client_uid');
+        if (!existeColumna) {
           await dbLocal.execute("ALTER TABLE puntos_clientes ADD COLUMN client_uid TEXT;");
         }
       } catch (_) {}
@@ -892,24 +893,32 @@ class ServicioNube {
         }
       }
 
-      // 3. Encolar y Descargar Productos Activos (ORDEN SEQUENCIAL RIGUROSO)
+      // 3. Obtener lista de eliminaciones pendientes para no resucitar productos borrados offline
+      final pendientesEliminar = await dbLocal.query(
+        'operaciones_pendientes',
+        columns: ['doc_id'],
+        where: "tabla = 'productos' AND operacion = 'delete'"
+      );
+      final Set<String> idsEliminadosOffline = pendientesEliminar.map((e) => e['doc_id'].toString()).toSet();
+
+      // 3b. Encolar y Descargar Productos Activos
       if (datos['productos'] != null) {
         final prods = List<dynamic>.from(datos['productos']);
         for (var p in prods) {
-          if (p != null) {
+          if (p != null && !idsEliminadosOffline.contains(p['id']?.toString())) {
             final Map<String, dynamic> map = Map<String, dynamic>.from(p);
             if (map['variantes'] != null && map['variantes'] is! String) {
               map['variantes'] = jsonEncode(map['variantes']);
             }
             batch.insert('productos', map, conflictAlgorithm: ConflictAlgorithm.replace);
 
-            // A. Primero descarga la foto principal del producto
+            // A. Encola la descarga controlada de 3 en 3
             String mainFoto = map['foto_path']?.toString() ?? "";
             if (mainFoto.isNotEmpty && mainFoto.startsWith('http')) {
-              await descargarFotoIndividualEnSegundoPlano(mainFoto, pathBoxi);
+              encolarDescargaFoto(mainFoto, pathBoxi);
             }
 
-            // B. Inmediatamente después descarga las fotos de sus variantes en orden
+            // B. Encola la descarga controlada de variantes
             if (map['variantes'] != null) {
               try {
                 List<dynamic> dec = map['variantes'] is String 
@@ -920,7 +929,7 @@ class ServicioNube {
                   for (var o in g['opciones']) {
                     String varFoto = o['foto_path']?.toString() ?? "";
                     if (varFoto.isNotEmpty && varFoto.startsWith('http')) {
-                      await descargarFotoIndividualEnSegundoPlano(varFoto, "$pathBoxi/Variantes");
+                      encolarDescargaFoto(varFoto, "$pathBoxi/Variantes");
                     }
                   }
                 }
@@ -944,7 +953,7 @@ class ServicioNube {
             // A. Primero descarga la foto principal del producto inactivo
             String mainFoto = map['foto_path']?.toString() ?? "";
             if (mainFoto.isNotEmpty && mainFoto.startsWith('http')) {
-              await descargarFotoIndividualEnSegundoPlano(mainFoto, pathBoxi);
+              descargarFotoIndividualEnSegundoPlano(mainFoto, pathBoxi);
             }
 
             // B. Inmediatamente después descarga las fotos de sus variantes en orden
@@ -958,7 +967,7 @@ class ServicioNube {
                   for (var o in g['opciones']) {
                     String varFoto = o['foto_path']?.toString() ?? "";
                     if (varFoto.isNotEmpty && varFoto.startsWith('http')) {
-                      await descargarFotoIndividualEnSegundoPlano(varFoto, "$pathBoxi/Variantes");
+                      descargarFotoIndividualEnSegundoPlano(varFoto, "$pathBoxi/Variantes");
                     }
                   }
                 }
@@ -1388,9 +1397,6 @@ class ServicioNube {
              if (urlFoto.isNotEmpty) {
                map['foto_path'] = urlFoto;
                await db.update('productos', {'foto_path': urlFoto}, where: 'id = ?', whereArgs: [map['id']]);
-               try {
-                 await FirebaseFirestore.instance.collection('usuarios').doc(user.uid).collection('productos').doc(map['id'].toString()).set({'foto_path': urlFoto}, SetOptions(merge: true));
-               } catch (_) {}
              } else {
                map['foto_path'] = ""; 
              }
@@ -1430,9 +1436,6 @@ class ServicioNube {
           if (varActualizada) {
              String nuevoJson = jsonEncode(dec);
              await db.update('productos', {'variantes': nuevoJson}, where: 'id = ?', whereArgs: [map['id']]);
-             try {
-               await FirebaseFirestore.instance.collection('usuarios').doc(user.uid).collection('productos').doc(map['id'].toString()).set({'variantes': nuevoJson}, SetOptions(merge: true));
-             } catch (_) {}
           }
           map['variantes'] = dec;
         }
@@ -1496,9 +1499,6 @@ class ServicioNube {
           if (varActualizada) {
              String nuevoJson = jsonEncode(dec);
              await db.update('productos', {'variantes': nuevoJson}, where: 'id = ?', whereArgs: [map['id']]);
-             try {
-               await FirebaseFirestore.instance.collection('usuarios').doc(user.uid).collection('productos').doc(map['id'].toString()).set({'variantes': nuevoJson}, SetOptions(merge: true));
-             } catch (_) {}
           }
           map['variantes'] = dec;
         }
@@ -1708,39 +1708,66 @@ class ServicioNube {
 
   static final Set<String> _descargasActivas = {};
 
+  static final List<Map<String, String>> _colaDescargas = [];
+  static int _descargasEnProgreso = 0;
+  static const int _maxDescargasSimultaneas = 3;
+
+  static void encolarDescargaFoto(String url, String localPath) {
+    if (url.isEmpty || !url.startsWith('http')) return;
+    _colaDescargas.add({'url': url, 'path': localPath});
+    _procesarColaDescargas();
+  }
+
+  static void _procesarColaDescargas() async {
+    if (_descargasEnProgreso >= _maxDescargasSimultaneas || _colaDescargas.isEmpty) {
+      return;
+    }
+
+    final item = _colaDescargas.removeAt(0);
+    _descargasEnProgreso++;
+
+    try {
+      await descargarFotoIndividualEnSegundoPlano(item['url']!, item['path']!);
+    } catch (_) {} finally {
+      _descargasEnProgreso--;
+      _procesarColaDescargas();
+    }
+  }
+
   static Future<String?> obtenerRutaLegibleSegura(String urlOPath) async {
     if (urlOPath.isEmpty) return null;
     if (!urlOPath.startsWith('http')) {
       try {
         final f = File(urlOPath);
-        if (await f.exists()) {
-          final access = await f.open(mode: FileMode.read);
-          await access.close();
-          return urlOPath;
-        }
+        if (f.existsSync() && f.lengthSync() > 0) return urlOPath;
       } catch (_) {}
       return null;
     }
 
-    String name = urlOPath.split('/').last;
-    String ext = name.contains('.') ? name.split('.').last : 'jpg';
-    String id = name.split('.').first;
+    String rawName = urlOPath.split('/').last.split('?').first;
+    String nameWithExt = rawName.contains('.') ? rawName : '$rawName.jpg';
+    String id = rawName.split('.').first;
 
     final prefs = await SharedPreferences.getInstance();
-    String pathBoxi = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
+    Directory? extDir;
+    if (Platform.isAndroid) {
+      try { extDir = await getExternalStorageDirectory(); } catch (_) {}
+    }
+    extDir ??= await getApplicationDocumentsDirectory();
+    String pathBoxi = prefs.getString('local_boxi_path') ?? "${extDir.path}/Boxi";
 
     final candidatos = [
-      File('$pathBoxi/$name'),
-      File('$pathBoxi/${id}_safe.$ext'),
-      File('$pathBoxi/Variantes/$name'),
-      File('$pathBoxi/Variantes/${id}_safe.$ext'),
+      File('$pathBoxi/$nameWithExt'),
+      File('$pathBoxi/$id.png'),
+      File('$pathBoxi/$id.jpg'),
+      File('$pathBoxi/Variantes/$nameWithExt'),
+      File('$pathBoxi/Variantes/$id.png'),
+      File('$pathBoxi/Variantes/$id.jpg'),
     ];
 
     for (var f in candidatos) {
       try {
-        if (await f.exists()) {
-          final access = await f.open(mode: FileMode.read);
-          await access.close();
+        if (f.existsSync() && f.lengthSync() > 0) {
           return f.path;
         }
       } catch (_) {}
@@ -1750,38 +1777,30 @@ class ServicioNube {
 
   static Future<void> descargarFotoIndividualEnSegundoPlano(String url, String localPath) async {
     if (!url.startsWith('http')) return;
-    
     if (_descargasActivas.contains(url)) return;
+
+    String? existente = await obtenerRutaLegibleSegura(url);
+    if (existente != null) return;
+
     _descargasActivas.add(url);
 
     try {
-      String name = url.split('/').last;
-      String ext = name.contains('.') ? name.split('.').last : 'jpg';
-      String id = name.split('.').first;
+      String name = url.split('/').last.split('?').first;
+      if (!name.contains('.')) name += '.jpg';
 
-      String? rutaLegible = await obtenerRutaLegibleSegura(url);
-      if (rutaLegible != null) return;
-
-      final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 15));
-      if (res.statusCode == 200) {
-        if (_uid == null) {
-          _descargasActivas.remove(url);
-          return;
-        }
+      final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 6));
+      if (res.statusCode == 200 && res.bodyBytes.isNotEmpty) {
+        Directory dir = Directory(localPath);
+        if (!await dir.exists()) await dir.create(recursive: true);
 
         File f = File('$localPath/$name');
-        try {
-          await f.writeAsBytes(res.bodyBytes);
-          debugPrint("✅ Imagen guardada de forma normal: ${f.path}");
-        } catch (e) {
-          if (_uid == null) return;
-          File fallback = File('$localPath/${id}_safe.$ext');
-          await fallback.writeAsBytes(res.bodyBytes);
-          debugPrint("🛡️ Imagen guardada en fallback estático seguro: ${fallback.path}");
-        }
+        await f.writeAsBytes(res.bodyBytes); // Eliminado flush: true para evitar congelamientos
+        debugPrint("✅ Imagen guardada correctamente: ${f.path}");
       }
-    } catch (_) {} finally {
-      _descargasActivas.remove(url); 
+    } catch (e) {
+      debugPrint("Error descargando foto en segundo plano: $e");
+    } finally {
+      _descargasActivas.remove(url);
     }
   }
   

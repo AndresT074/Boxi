@@ -524,13 +524,13 @@ class _PantallaInventarioState extends State<PantallaInventario> {
               }
 
               await db.delete('productos', where: 'id = ?', whereArgs: [id]);
-              if (_esPremium) {
-                ServicioNube.eliminarProductoNube(id); 
-                ServicioNube.compilarYSubirCatalogoRTDB(); 
-              }
-              
               _cargar();
               if (mounted) Navigator.pop(ctx);
+
+              if (_esPremium) {
+                await ServicioNube.eliminarProductoNube(id); 
+                await ServicioNube.compilarYSubirCatalogoRTDB(); 
+              }
             },
             child: const Text('ELIMINAR', style: TextStyle(color: Colors.white)),
           ),
@@ -773,6 +773,7 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
   }
 
   Future<String> _capturarImagenLocal(ImageSource source) async {
+    FocusManager.instance.primaryFocus?.unfocus(); // 🔥 Cierra el teclado antes de abrir cámara/galería
     try {
       await [Permission.camera, Permission.photos].request();
       
@@ -780,11 +781,11 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
         source: source,
         maxWidth: 800,
         maxHeight: 800,
-        imageQuality: 70, // Cloudinary optimizará esto aún más
+        imageQuality: 70,
       );
       
       if (x != null) {
-        return x.path; // 🔥 AHORA DEVOLVEMOS LA RUTA LOCAL DEL ARCHIVO
+        return x.path;
       }
     } catch (e) {
       debugPrint("Error al capturar imagen: $e");
@@ -1071,6 +1072,7 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
     }
 
     return Scaffold(
+      resizeToAvoidBottomInset: true,
       backgroundColor: isOscuro ? const Color(0xFF0A0A0F) : const Color(0xFFF2F4F7),
       appBar: AppBar(
         title: Text(widget.producto == null ? 'Nuevo Producto' : 'Editar Producto', style: const TextStyle(fontWeight: FontWeight.bold)), 
@@ -1078,31 +1080,40 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
         foregroundColor: Colors.white,
         elevation: 0,
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16), // Ligeramente reducido para pantallas estrechas
-        child: Column(
+      body: GestureDetector(
+        onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children:[
             
             // FOTO PRINCIPAL
             InkWell(
               borderRadius: BorderRadius.circular(20),
-              onTap: _estaGuardando ? null : () => showModalBottomSheet(context: context, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))), builder: (c) => SafeArea(
-                child: Column(mainAxisSize: MainAxisSize.min, children:[
-                  ListTile(leading: const Icon(Icons.camera_alt, color: Colors.blue), title: const Text("Tomar Foto"), onTap: () async {
-                    Navigator.pop(context);
-                    String res = await _capturarImagenLocal(ImageSource.camera);
-                    if(res.isNotEmpty && res != "error_size") setState(() { _imgData = res; _imgDataProcesada = res; });
-                  }),
-                  ListTile(leading: const Icon(Icons.photo_library, color: Colors.blue), title: const Text("Elegir de Galería"), onTap: () async {
-                    Navigator.pop(context);
-                    String res = await _capturarImagenLocal(ImageSource.gallery);
-                    if(res.isNotEmpty && res != "error_size") setState(() { _imgData = res; _imgDataProcesada = res; });
-                  }),
-                  if (_imgData.isNotEmpty)
-                    ListTile(leading: const Icon(Icons.delete_forever, color: Colors.red), title: const Text("Eliminar Foto", style: TextStyle(color: Colors.red)), onTap: () { setState(() { _imgData = ""; _imgDataProcesada = null; }); Navigator.pop(context); }),
-                ]),
-              )),
+              onTap: _estaGuardando ? null : () {
+                FocusScope.of(context).unfocus(); // 🔥 Cierra el teclado para evitar bloques blancos
+                showModalBottomSheet(
+                  context: context, 
+                  shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))), 
+                  builder: (c) => SafeArea(
+                    child: Column(mainAxisSize: MainAxisSize.min, children:[
+                      ListTile(leading: const Icon(Icons.camera_alt, color: Colors.blue), title: const Text("Tomar Foto"), onTap: () async {
+                        Navigator.pop(context);
+                        String res = await _capturarImagenLocal(ImageSource.camera);
+                        if(res.isNotEmpty && res != "error_size") setState(() { _imgData = res; _imgDataProcesada = res; });
+                      }),
+                      ListTile(leading: const Icon(Icons.photo_library, color: Colors.blue), title: const Text("Elegir de Galería"), onTap: () async {
+                        Navigator.pop(context);
+                        String res = await _capturarImagenLocal(ImageSource.gallery);
+                        if(res.isNotEmpty && res != "error_size") setState(() { _imgData = res; _imgDataProcesada = res; });
+                      }),
+                      if (_imgData.isNotEmpty)
+                        ListTile(leading: const Icon(Icons.delete_forever, color: Colors.red), title: const Text("Eliminar Foto", style: TextStyle(color: Colors.red)), onTap: () { setState(() { _imgData = ""; _imgDataProcesada = null; }); Navigator.pop(context); }),
+                    ]),
+                  ),
+                );
+              },
               child: Container(
                 height: 200, width: double.infinity, 
                 decoration: BoxDecoration(
@@ -1358,6 +1369,7 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
                                   children: [
                                     InkWell(
                                       onTap: () async {
+                                        FocusScope.of(context).unfocus(); // 🔥 Cierra el teclado para evitar bloques blancos
                                         showModalBottomSheet(
                                           context: context,
                                           builder: (c) => SafeArea(
@@ -1523,6 +1535,7 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
             const SizedBox(height: 40),
           ],
         ),
+      ),
       ),
     );
   }

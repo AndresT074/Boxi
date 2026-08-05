@@ -3,6 +3,15 @@
 # =========================================================
 -repackageclasses ''
 -allowaccessmodification
+-dontusemixedcaseclassnames
+-dontskipnonpubliclibraryclasses
+
+# 🧹 ELIMINAR LOGS DE DEPUSACIÓN EN VERSIÓN FINAL (Acelera ejecución de la App)
+-assumenosideeffects class android.util.Log {
+    public static *** d(...);
+    public static *** v(...);
+    public static *** i(...);
+}
 
 # Flutter Framework
 -keep class io.flutter.app.** { *; }

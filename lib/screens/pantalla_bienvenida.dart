@@ -223,24 +223,15 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
     if (!mounted) return;
 
     // 🔥 SOLUCIÓN ESTABLE: Una sola carpeta pública. Si falla, usa la privada.
-    final appDir = await getApplicationDocumentsDirectory();
-    String rutaFinal = '${appDir.path}/Boxi';
-    
-    try {
-      Directory pubDir = Directory('/storage/emulated/0/Pictures/Boxi');
-      if (!await pubDir.exists()) await pubDir.create(recursive: true);
-      
-      // 🔥 PRUEBA DE ESCRITURA MEJORADA: En Android 11+ los archivos sin extensión 
-      // de imagen son bloqueados en la carpeta Pictures. Usamos un .jpg para la prueba.
-      File testFile = File('${pubDir.path}/test_access.jpg');
-      await testFile.writeAsBytes([0]);
-      await testFile.delete();
-      rutaFinal = pubDir.path; 
-    } catch (e) {
-      debugPrint("Carpeta pública bloqueada, usando directorio seguro: $e");
-      Directory intDir = Directory(rutaFinal);
-      if (!await intDir.exists()) await intDir.create(recursive: true);
+    Directory? extDir;
+    if (Platform.isAndroid) {
+      try { extDir = await getExternalStorageDirectory(); } catch (_) {}
     }
+    extDir ??= await getApplicationDocumentsDirectory();
+    
+    String rutaFinal = '${extDir.path}/Boxi';
+    Directory boxiDir = Directory(rutaFinal);
+    if (!await boxiDir.exists()) await boxiDir.create(recursive: true);
     
     await prefs.setString('local_boxi_path', rutaFinal);
 
@@ -357,18 +348,15 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
           debugPrint("☁️ Primer inicio o BD vacía: Descargando desde Realtime DB...");
           await ServicioNube.importarCatalogoDesdeRTDB(user.uid);
           await ServicioNube.descargarDatosPrivadosRTDB();
-          
-          await prefs.setBool('migracion_definitiva_completa_v6', false); 
-          await ServicioNube.migrarVariantesAlJSONyCarpetas(); 
           await prefs.setBool(llaveDescarga, true);
         }
 
-        // Sincronizar operaciones pendientes si estuvo offline
-        await ServicioNube.procesarColaOffline();
-        
-        // Sincronizar tarjetas de fidelidad y fotos a Cloudinary
-        await ServicioFidelidad.sincronizarTarjetasCompleto(user.uid);
-        await ServicioNube.migrarTodoACloudinary();
+        // Tareas en segundo plano sin congelar el inicio de sesión
+        Future.microtask(() async {
+          await ServicioNube.procesarColaOffline();
+          await ServicioFidelidad.sincronizarTarjetasCompleto(user.uid);
+          await ServicioNube.migrarTodoACloudinary();
+        });
       }
 
       if (mounted) setState(() {});

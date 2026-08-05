@@ -436,11 +436,10 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
           debugPrint("Error guardando cache JSON: $e");
         }
 
-        if (mounted) {
-          setState(() {
-            _misTarjetasComoCliente = misTarjetasClienteNube;
-          });
-        }
+        if (!mounted) return;
+        setState(() {
+          _misTarjetasComoCliente = misTarjetasClienteNube;
+        });
       } catch (e) {
         debugPrint("Error leyendo tarjetas acumuladas: $e");
       }
@@ -1986,7 +1985,7 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
 
     final List<Map<String, String>> preguntas = [
       {
-        'q': '🤔 ¿Qué es una Tarjeta de Fidelidad y para qué sirve?',
+        'q': '🤔 ¿Qué es una Tarjeta de Regalo y para qué sirve?',
         'a': 'Es un sistema digital de recompensas para premiarte o a tus clientes recurrentes. Cada vez que realices o que tus clientes realicen una compra o alcancen la meta establecida, recibirán sellos (puntos) hasta completar la tarjeta y ganar un premio.'
       },
       {
@@ -1994,7 +1993,7 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
         'a': 'Para tus clientes con iPhone puedes: \n\n1. Cuando les completes un pedido y te salga la invitación a reclamar puntos, copiar el link tu mismo y pegalo en el boton de "Ingresar QR", así tu manejaras la tarjeta del cliente desde tu cuenta. \n\n2. Tocas en Dar un punto manualmente, copias el link y pégalo en el boton de "Ingresar QR", así tu manejaras la tarjeta del cliente desde tu cuenta.'
       },
       {
-        'q': '💳 ¿Cómo crear una nueva Tarjeta de Fidelidad?',
+        'q': '💳 ¿Cómo crear una nueva Tarjeta de Regalo?',
         'a': '\n\n1.SI ERES PREMIUM Toca el botón "+ Nueva" en la sección de Fidelización. Ingresa el premio a otorgar (ej: Audífonos Gratis), define la cantidad de sellos requeridos (ej: 5 compras) y opcionalmente un monto mínimo por compra. \n\n2. Si no eres PREMIUM debes adquirir la membresia PREMIUM'
       },
       {

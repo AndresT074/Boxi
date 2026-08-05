@@ -133,6 +133,15 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
   final Map<int, List<Map<String, dynamic>>> _detallesCache = {};
   bool _refrescando = false;
   late AnimationController _refreshAnim;
+  // 🔥 VARIABLES DE BÚSQUEDA, FILTRADO Y PAGINACIÓN
+  final TextEditingController _busquedaCtrl = TextEditingController();
+  String _queryBusqueda = "";
+  bool _mostrandoBusqueda = false;
+  int _limitePaginacion = 20;
+  String _tipoOrden = 'fecha_desc'; // 'fecha_desc', 'fecha_asc', 'valor_desc', 'valor_asc'
+  DateTimeRange? _rangoFechasFiltro;
+  String? _filtroCliente;
+  String? _filtroNegocio;
 
   void _invalidarCache(int pedidoId) => _detallesCache.remove(pedidoId);
 
@@ -181,8 +190,6 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
 
   Future<void> _cargar() async {
     final db = await DBHelper.instance.database;
-    await db.delete('pedidos', where: "fecha_hora = '2000-01-01 00:00:00' AND total_venta = 0");
-
     // 🔥 1. AUTO-SANEAMIENTO: Rellena los nombres vacíos buscando en la tabla clientes local
     int filasModificadas = await db.rawUpdate('''
       UPDATE pedidos 
@@ -252,6 +259,272 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
         _pedidosBloqueados = bloqueos;
       });
     }
+  }
+
+  List<Map<String, dynamic>> _obtenerPedidosFiltrados() {
+    return _pedidos.where((p) {
+      if (p['estado'] != _estadoActual) return false;
+
+      // 1. Filtro por búsqueda general (Cliente, Negocio, ID, Teléfono)
+      if (_queryBusqueda.isNotEmpty) {
+        final q = _queryBusqueda.toLowerCase();
+        final cNombre = (p['cliente_nombre'] ?? p['cliente_nombre_snapshot'] ?? '').toString().toLowerCase();
+        final nNombre = (p['negocio_nombre'] ?? '').toString().toLowerCase();
+        final pId = p['id'].toString();
+        final tel = (p['cliente_telefono'] ?? '').toString().toLowerCase();
+
+        bool coincideDetalles = false;
+        final detalles = _detallesCache[p['id'] as int];
+        if (detalles != null) {
+          coincideDetalles = detalles.any((d) => (d['nombre_prod'] ?? '').toString().toLowerCase().contains(q));
+        }
+
+        if (!cNombre.contains(q) && !nNombre.contains(q) && !pId.contains(q) && !tel.contains(q) && !coincideDetalles) {
+          return false;
+        }
+      }
+
+      // 2. Filtro por Rango de Fechas (Extracción limpia de YYYY-MM-DD)
+      if (_rangoFechasFiltro != null) {
+        String fechaRaw = p['fecha_hora']?.toString() ?? p['fecha']?.toString() ?? '';
+        String fechaLimpia = fechaRaw.length >= 10 ? fechaRaw.substring(0, 10) : '';
+        DateTime? dt = DateTime.tryParse(fechaLimpia);
+        if (dt != null) {
+          final inicio = DateTime(_rangoFechasFiltro!.start.year, _rangoFechasFiltro!.start.month, _rangoFechasFiltro!.start.day, 0, 0, 0);
+          final fin = DateTime(_rangoFechasFiltro!.end.year, _rangoFechasFiltro!.end.month, _rangoFechasFiltro!.end.day, 23, 59, 59);
+          if (dt.isBefore(inicio) || dt.isAfter(fin)) return false;
+        }
+      }
+
+      // 3. Filtro por Cliente específico
+      if (_filtroCliente != null && _filtroCliente!.isNotEmpty) {
+        final cNombre = (p['cliente_nombre'] ?? p['cliente_nombre_snapshot'] ?? '').toString();
+        if (cNombre != _filtroCliente) return false;
+      }
+
+      // 4. Filtro por Negocio
+      if (_filtroNegocio != null && _filtroNegocio!.isNotEmpty) {
+        final nNombre = (p['negocio_nombre'] ?? '').toString();
+        if (nNombre != _filtroNegocio) return false;
+      }
+
+      return true;
+    }).toList()
+      ..sort((a, b) {
+        if (_tipoOrden == 'fecha_asc') {
+          String fA = a['fecha_hora']?.toString() ?? '';
+          String fB = b['fecha_hora']?.toString() ?? '';
+          return fA.compareTo(fB);
+        } else if (_tipoOrden == 'fecha_desc') {
+          String fA = a['fecha_hora']?.toString() ?? '';
+          String fB = b['fecha_hora']?.toString() ?? '';
+          return fB.compareTo(fA);
+        } else if (_tipoOrden == 'valor_desc') {
+          double vA = (a['total_venta'] as num?)?.toDouble() ?? 0.0;
+          double vB = (b['total_venta'] as num?)?.toDouble() ?? 0.0;
+          return vB.compareTo(vA);
+        } else if (_tipoOrden == 'valor_asc') {
+          double vA = (a['total_venta'] as num?)?.toDouble() ?? 0.0;
+          double vB = (b['total_venta'] as num?)?.toDouble() ?? 0.0;
+          return vA.compareTo(vB);
+        }
+        return 0;
+      });
+  }
+
+  void _mostrarModalFiltrosAvanzados() {
+    final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
+
+    List<String> clientesUnicos = _pedidos
+        .map((p) => (p['cliente_nombre'] ?? p['cliente_nombre_snapshot'] ?? '').toString().trim())
+        .where((s) => s.isNotEmpty && s != "null")
+        .toSet()
+        .toList()
+      ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+
+    List<String> negociosUnicos = _pedidos
+        .map((p) => (p['negocio_nombre'] ?? '').toString().trim())
+        .where((s) => s.isNotEmpty && s != "null" && s != "N/A")
+        .toSet()
+        .toList()
+      ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Theme.of(context).cardColor,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(25))),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setStModal) => Padding(
+          padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom + 20, left: 20, right: 20, top: 20),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text("Filtros y Ordenamiento", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18)),
+                    TextButton(
+                      onPressed: () {
+                        setState(() {
+                          _rangoFechasFiltro = null;
+                          _filtroCliente = null;
+                          _filtroNegocio = null;
+                          _tipoOrden = 'fecha_desc';
+                          _limitePaginacion = 20;
+                        });
+                        Navigator.pop(ctx);
+                      },
+                      child: const Text("Limpiar Todo", style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold)),
+                    )
+                  ],
+                ),
+                const Divider(),
+                const SizedBox(height: 10),
+
+                // 1. Criterios de Ordenamiento
+                const Text("Ordenar por:", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.grey)),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    ChoiceChip(
+                      label: const Text("📅 Fecha: Recientes"),
+                      selected: _tipoOrden == 'fecha_desc',
+                      selectedColor: isOscuro ? Colors.cyanAccent.withOpacity(0.2) : Colors.blue.shade100,
+                      onSelected: (v) => setStModal(() => _tipoOrden = 'fecha_desc'),
+                    ),
+                    ChoiceChip(
+                      label: const Text("📅 Fecha: Antiguos"),
+                      selected: _tipoOrden == 'fecha_asc',
+                      selectedColor: isOscuro ? Colors.cyanAccent.withOpacity(0.2) : Colors.blue.shade100,
+                      onSelected: (v) => setStModal(() => _tipoOrden = 'fecha_asc'),
+                    ),
+                    ChoiceChip(
+                      label: const Text("💰 Valor: Mayor a Menor"),
+                      selected: _tipoOrden == 'valor_desc',
+                      selectedColor: isOscuro ? Colors.greenAccent.withOpacity(0.2) : Colors.green.shade100,
+                      onSelected: (v) => setStModal(() => _tipoOrden = 'valor_desc'),
+                    ),
+                    ChoiceChip(
+                      label: const Text("💰 Valor: Menor a Mayor"),
+                      selected: _tipoOrden == 'valor_asc',
+                      selectedColor: isOscuro ? Colors.greenAccent.withOpacity(0.2) : Colors.green.shade100,
+                      onSelected: (v) => setStModal(() => _tipoOrden = 'valor_asc'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 20),
+
+                // 2. Rango de Fechas
+                const Text("Filtrar por Rango de Fechas:", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.grey)),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size(double.infinity, 48),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  icon: const Icon(Icons.date_range_rounded, size: 20),
+                  label: Text(
+                    _rangoFechasFiltro == null
+                        ? "Seleccionar fecha exacta o rango"
+                        : "Del ${_rangoFechasFiltro!.start.day}/${_rangoFechasFiltro!.start.month}/${_rangoFechasFiltro!.start.year}  al  ${_rangoFechasFiltro!.end.day}/${_rangoFechasFiltro!.end.month}/${_rangoFechasFiltro!.end.year}",
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  onPressed: () async {
+                    final res = await showDateRangePicker(
+                      context: context,
+                      firstDate: DateTime(2020),
+                      lastDate: DateTime(2100),
+                      initialDateRange: _rangoFechasFiltro,
+                    );
+                    if (res != null) setStModal(() => _rangoFechasFiltro = res);
+                  },
+                ),
+                const SizedBox(height: 20),
+
+                // 3. Filtrar por Cliente
+                if (clientesUnicos.isNotEmpty) ...[
+                  const Text("Filtrar por Cliente:", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.grey)),
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    decoration: BoxDecoration(
+                      color: isOscuro ? Colors.white10 : Colors.grey.shade100,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: isOscuro ? Colors.white10 : Colors.black12),
+                    ),
+                    child: DropdownButtonHideUnderline(
+                      child: DropdownButton<String>(
+                        isExpanded: true,
+                        menuMaxHeight: 250, // 🔥 LIMITA LA ALTURA DE LA LISTA
+                        borderRadius: BorderRadius.circular(15),
+                        value: _filtroCliente,
+                        hint: const Text("Todos los clientes"),
+                        items: [
+                          const DropdownMenuItem(value: null, child: Text("Todos los clientes", style: TextStyle(fontWeight: FontWeight.bold))),
+                          ...clientesUnicos.map((c) => DropdownMenuItem(value: c, child: Text(c))),
+                        ],
+                        onChanged: (v) => setStModal(() => _filtroCliente = v),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                ],
+
+                // 4. Filtrar por Negocio
+                if (negociosUnicos.isNotEmpty) ...[
+                  const Text("Filtrar por Negocio:", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.grey)),
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    decoration: BoxDecoration(
+                      color: isOscuro ? Colors.white10 : Colors.grey.shade100,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: isOscuro ? Colors.white10 : Colors.black12),
+                    ),
+                    child: DropdownButtonHideUnderline(
+                      child: DropdownButton<String>(
+                        isExpanded: true,
+                        menuMaxHeight: 250, // 🔥 LIMITA LA ALTURA DE LA LISTA
+                        borderRadius: BorderRadius.circular(15),
+                        value: _filtroNegocio,
+                        hint: const Text("Todos los negocios"),
+                        items: [
+                          const DropdownMenuItem(value: null, child: Text("Todos los negocios", style: TextStyle(fontWeight: FontWeight.bold))),
+                          ...negociosUnicos.map((n) => DropdownMenuItem(value: n, child: Text(n))),
+                        ],
+                        onChanged: (v) => setStModal(() => _filtroNegocio = v),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                ],
+
+                // Botón Confirmar
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF00C853),
+                    minimumSize: const Size(double.infinity, 50),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+                  ),
+                  onPressed: () {
+                    setState(() {
+                      _limitePaginacion = 20;
+                    });
+                    Navigator.pop(ctx);
+                  },
+                  child: const Text("APLICAR FILTROS Y ORDEN", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15)),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _refrescarDesdeNube() async {
@@ -925,34 +1198,19 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
         bool esClienteSinTarjeta = (!existeEnLocal && ptsAntiguos == 0 && (realClientUid == null || realClientUid.isEmpty));
 
         if (esClienteSinTarjeta) {
-          String tokenInv = "boxi_fidelidad_${DateTime.now().millisecondsSinceEpoch}_local".trim();
-          try {
-            tokenInv = await ServicioFidelidad.crearTokenUnicoNube(
-              vendorUid: vendorUid,
-              tarjetaId: tarjetaIdStr,
-              clienteLocalId: clienteId,
-              clienteNombre: nombreLimpio,
-              nombreNegocio: nomNegocio,
-              logoPath: logoPath,
-              tarjetaTitulo: tituloTarjeta,
-              metaCompras: meta,
-              premioDesc: premioDesc,
-              montoMinimo: montoMinimo,
-              clienteTelefono: tel,
-            ).timeout(const Duration(seconds: 2));
-          } catch (e) {
-            debugPrint("Modo offline: se genera enlace local para invitación WhatsApp: $e");
-          }
-
           if (mounted) {
             _mostrarModalInvitacionWhatsApp(
-              nombreLimpio,
-              tel,
-              premioDesc,
-              tokenInv,
-              meta,
-              tituloTarjeta,
+              clienteNombre: nombreLimpio,
+              telefono: tel,
+              premioDesc: premioDesc,
+              meta: meta,
+              tituloTarjeta: tituloTarjeta,
               montoMinimo: montoMinimo,
+              vendorUid: vendorUid,
+              tarjetaIdStr: tarjetaIdStr,
+              clienteId: clienteId,
+              nomNegocio: nomNegocio,
+              logoPath: logoPath,
             );
           }
           continue; 
@@ -1159,7 +1417,19 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     }
   }
 
-  void _mostrarModalInvitacionWhatsApp(String clienteNombre, String telefono, String premioDesc, String token, int meta, String tituloTarjeta, {double montoMinimo = 0.0}) {
+  void _mostrarModalInvitacionWhatsApp({
+    required String clienteNombre,
+    required String telefono,
+    required String premioDesc,
+    required int meta,
+    required String tituloTarjeta,
+    double montoMinimo = 0.0,
+    required String vendorUid,
+    required String tarjetaIdStr,
+    required int clienteId,
+    required String nomNegocio,
+    required String logoPath,
+  }) {
     String numLimpio = telefono.replaceAll(RegExp(r'\D'), '');
     String ind = "57";
     String telSolo = numLimpio;
@@ -1171,7 +1441,26 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
 
     TextEditingController indCtrl = TextEditingController(text: ind == "57" ? "" : ind);
     TextEditingController numCtrl = TextEditingController(text: telSolo);
-    String enlaceUnico = "https://boxi-catalogo.web.app/reclamar?token=$token";
+
+    Future<String> obtenerToken() async {
+      String tokenInv = "boxi_fidelidad_${DateTime.now().millisecondsSinceEpoch}_local".trim();
+      try {
+        tokenInv = await ServicioFidelidad.crearTokenUnicoNube(
+          vendorUid: vendorUid,
+          tarjetaId: tarjetaIdStr,
+          clienteLocalId: clienteId,
+          clienteNombre: clienteNombre,
+          nombreNegocio: nomNegocio,
+          logoPath: logoPath,
+          tarjetaTitulo: tituloTarjeta,
+          metaCompras: meta,
+          premioDesc: premioDesc,
+          montoMinimo: montoMinimo,
+          clienteTelefono: telefono,
+        ).timeout(const Duration(seconds: 2));
+      } catch (_) {}
+      return tokenInv;
+    }
 
     showDialog(
       context: context,
@@ -1222,11 +1511,15 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
               ),
               icon: const Icon(Icons.copy, size: 16),
               label: const Text("Copiar Enlace Único", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-              onPressed: () {
+              onPressed: () async {
+                String tokenGenerado = await obtenerToken();
+                String enlaceUnico = "https://boxi-catalogo.web.app/reclamar?token=$tokenGenerado";
                 Clipboard.setData(ClipboardData(text: enlaceUnico));
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text("Enlace copiado al portapapeles 📋"), duration: Duration(seconds: 2))
-                );
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text("Enlace copiado al portapapeles 📋"), duration: Duration(seconds: 2))
+                  );
+                }
               },
             ),
           ],
@@ -1239,6 +1532,8 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
             label: const Text("ENVIAR WHATSAPP"),
             onPressed: () async {
               Navigator.pop(ctx);
+              String tokenGenerado = await obtenerToken();
+              String enlaceUnico = "https://boxi-catalogo.web.app/reclamar?token=$tokenGenerado";
               final prefs = await SharedPreferences.getInstance();
               String nomNegocio = prefs.getString('nombre_negocio') ?? "Nuestro Negocio";
               String indClean = indCtrl.text.trim().replaceAll(RegExp(r'\D'), '');
@@ -2329,24 +2624,63 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
         elevation: 0,
         backgroundColor:
             isOscuro ? const Color(0xFF0D1B2A) : const Color(0xFF0D47A1),
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('Gestión de Pedidos',
-                style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 17)),
-            Text(
-              '${_pedidos.where((p) => p['estado'] == _estadoActual).length} ${_estadoActual.toLowerCase()}',
-              style: TextStyle(
-                  color: colorEstado.withOpacity(0.9),
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600),
-            ),
-          ],
-        ),
+        title: _mostrandoBusqueda
+            ? TextField(
+                controller: _busquedaCtrl,
+                autofocus: true,
+                style: const TextStyle(color: Colors.white),
+                decoration: const InputDecoration(
+                  hintText: 'Buscar cliente, negocio, id...',
+                  hintStyle: TextStyle(color: Colors.white60),
+                  border: InputBorder.none,
+                ),
+                onChanged: (val) {
+                  setState(() {
+                    _queryBusqueda = val;
+                    _limitePaginacion = 20;
+                  });
+                },
+              )
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Gestión de Pedidos',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 17)),
+                  Text(
+                    '${_pedidos.where((p) => p['estado'] == _estadoActual).length} ${_estadoActual.toLowerCase()}',
+                    style: TextStyle(
+                        color: colorEstado.withOpacity(0.9),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600),
+                  ),
+                ],
+              ),
         actions: [
+          IconButton(
+            icon: Icon(_mostrandoBusqueda ? Icons.close : Icons.search, color: Colors.white),
+            onPressed: () {
+              setState(() {
+                _mostrandoBusqueda = !_mostrandoBusqueda;
+                if (!_mostrandoBusqueda) {
+                  _busquedaCtrl.clear();
+                  _queryBusqueda = "";
+                }
+              });
+            },
+          ),
+          IconButton(
+            icon: Icon(
+              Icons.filter_list_rounded,
+              color: (_rangoFechasFiltro != null || _filtroCliente != null || _filtroNegocio != null || _tipoOrden != 'fecha_desc')
+                  ? Colors.amberAccent
+                  : Colors.white,
+            ),
+            tooltip: 'Filtros Avanzados',
+            onPressed: _mostrarModalFiltrosAvanzados,
+          ),
           if (_esPremium)
             RotationTransition(
               turns: _refreshAnim,
@@ -2381,8 +2715,33 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     );
   }
 
+  Widget _buildBotonVerMas(int totalCoincidencias, int cargados) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 20),
+      child: Center(
+        child: ElevatedButton.icon(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: _coloresEstado[_estadoActual],
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+          ),
+          icon: const Icon(Icons.add_rounded, color: Colors.white),
+          label: Text(
+            'VER MÁS ($cargados DE $totalCoincidencias)',
+            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+          ),
+          onPressed: () {
+            setState(() {
+              _limitePaginacion += 20;
+            });
+          },
+        ),
+      ),
+    );
+  }
+
   Widget _listaPedidosAgrupada(bool isOscuro) {
-    final filtrados = _pedidos.where((p) => p['estado'] == _estadoActual).toList();
+    final filtrados = _obtenerPedidosFiltrados();
     if (filtrados.isEmpty) {
       return Center(
         child: Column(
@@ -2407,17 +2766,43 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
       );
     }
 
-    final grupos = _agruparPorFecha(filtrados);
+    // Paginación: tomamos los primeros N pedidos
+    final int totalCoincidencias = filtrados.length;
+    final pedidosPaginados = filtrados.take(_limitePaginacion).toList();
+    final bool hayMas = totalCoincidencias > _limitePaginacion;
+
+    // 🔥 SI EL ORDEN ES POR VALOR: Lista plana pura ordenada por monto (sin agrupar por fecha)
+    if (_tipoOrden.startsWith('valor_')) {
+      return ListView.builder(
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 20),
+        itemCount: pedidosPaginados.length + (hayMas ? 1 : 0),
+        itemBuilder: (context, idx) {
+          if (idx == pedidosPaginados.length) {
+            return _buildBotonVerMas(totalCoincidencias, pedidosPaginados.length);
+          }
+          return _buildTarjetaPedido(pedidosPaginados[idx], isOscuro);
+        },
+      );
+    }
+
+    // SI EL ORDEN ES POR FECHA: Agrupación por días
+    final grupos = _agruparPorFecha(pedidosPaginados);
     final fechasOrdenadas = grupos.keys.toList()
-      ..sort((a, b) => b.compareTo(a));
+      ..sort((a, b) => (_tipoOrden == 'fecha_asc') ? a.compareTo(b) : b.compareTo(a));
+
     return ListView.builder(
       padding: const EdgeInsets.fromLTRB(12, 0, 12, 20),
-      itemCount: fechasOrdenadas.length,
+      itemCount: fechasOrdenadas.length + (hayMas ? 1 : 0),
       itemBuilder: (context, idx) {
+        if (idx == fechasOrdenadas.length) {
+          return _buildBotonVerMas(totalCoincidencias, pedidosPaginados.length);
+        }
+
         final fecha = fechasOrdenadas[idx];
         final pedidosGrupo = grupos[fecha]!;
         final totalGrupo = pedidosGrupo.fold<double>(
             0, (sum, p) => sum + (p['total_venta'] as num).toDouble());
+
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -2426,8 +2811,7 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
               child: Row(
                 children: [
                   Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                     decoration: BoxDecoration(
                       color: _coloresEstado[_estadoActual]!.withOpacity(0.12),
                       borderRadius: BorderRadius.circular(8),
@@ -2446,7 +2830,8 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                   ),
                   const SizedBox(width: 8),
                   Expanded(
-                      child: Divider(color: isOscuro ? Colors.white10 : Colors.black.withOpacity(0.08))),                  const SizedBox(width: 8),
+                      child: Divider(color: isOscuro ? Colors.white10 : Colors.black.withOpacity(0.08))),
+                  const SizedBox(width: 8),
                   Text(
                     '\$${totalGrupo.toStringAsFixed(0)}',
                     style: TextStyle(
@@ -2494,12 +2879,14 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                     offset: const Offset(0, 2))
               ],
       ),
-      child: Theme(
-        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-        child: ExpansionTile(
-          tilePadding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
-          childrenPadding: EdgeInsets.zero,
-          title: Column(
+      child: Material(
+        color: Colors.transparent,
+        child: Theme(
+          data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+          child: ExpansionTile(
+            tilePadding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+            childrenPadding: EdgeInsets.zero,
+            title: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
@@ -2592,31 +2979,60 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                       ),
                     ],
                   ),
-                  if (ciudad.isNotEmpty)
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                      decoration: BoxDecoration(
-                        color: isOscuro ? Colors.white.withOpacity(0.03) : Colors.grey.shade100,
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: isOscuro ? Colors.white10 : Colors.black12),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.location_on_rounded,
-                              size: 12,
-                              color: isOscuro ? Colors.white30 : Colors.black.withOpacity(0.40)),
-                          const SizedBox(width: 4),
-                          Text(
-                            ciudad,
-                            style: TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.bold,
-                                color: isOscuro ? Colors.white54 : Colors.black54),
+                  Flexible(
+                    child: Wrap(
+                      alignment: WrapAlignment.end,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: 6,
+                      runSpacing: 4,
+                      children: [
+                        if (_tipoOrden.startsWith('valor_'))
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: isOscuro ? Colors.white10 : Colors.grey.shade200,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              _formatearFechaGrupo(
+                                (p['fecha_hora']?.toString() ?? '').length >= 10
+                                    ? (p['fecha_hora']?.toString() ?? '').substring(0, 10)
+                                    : 'Sin fecha',
+                              ),
+                              style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: isOscuro ? Colors.white70 : Colors.black87),
+                            ),
                           ),
-                        ],
-                      ),
+                        if (ciudad.isNotEmpty)
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: isOscuro ? Colors.white.withOpacity(0.03) : Colors.grey.shade100,
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(color: isOscuro ? Colors.white10 : Colors.black12),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.location_on_rounded,
+                                    size: 12,
+                                    color: isOscuro ? Colors.white30 : Colors.black.withOpacity(0.40)),
+                                const SizedBox(width: 4),
+                                Flexible(
+                                  child: Text(
+                                    ciudad,
+                                    style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold,
+                                        color: isOscuro ? Colors.white54 : Colors.black54),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                      ],
                     ),
+                  ),
                 ],
               ),
             ],
@@ -2655,6 +3071,7 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
             _buildBotonesAccion(p, estado, hayBloqueo, isOscuro),
           ],
         ),
+      ),
       ),
     );
   }

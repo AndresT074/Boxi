@@ -137,24 +137,35 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
     
-    // 🔥 Descarga primero el perfil real desde Firestore (evita sobrescribir con "MI NEGOCIO")
-    await ServicioNube.descargarPerfilNube(user.uid);
-    await _cargarConfig(); // Refresca la pantalla principal con la foto y nombre descargados
+    final prefs = await SharedPreferences.getInstance();
+
+    // Validar perfil solo una vez al día para ahorrar lecturas
+    String hoy = DateTime.now().toIso8601String().substring(0, 10);
+    if (prefs.getString('perfil_descargado_fecha') != hoy) {
+      await ServicioNube.descargarPerfilNube(user.uid);
+      await prefs.setString('perfil_descargado_fecha', hoy);
+      await _cargarConfig();
+    }
 
     await ServicioNube.procesarColaOffline();
 
-    // 2. Actualizar Token FCM para Notificaciones Push
+    // Actualizar Token FCM únicamente si cambió el token
     try {
       String? fcmToken = await FirebaseMessaging.instance.getToken();
-      if (fcmToken != null) {
+      String? tokenGuardado = prefs.getString('fcm_token_guardado');
+      if (fcmToken != null && fcmToken != tokenGuardado) {
         await FirebaseFirestore.instance
             .collection('usuarios').doc(user.uid)
             .set({'fcm_token': fcmToken}, SetOptions(merge: true));
+        await prefs.setString('fcm_token_guardado', fcmToken);
       }
     } catch (e) { debugPrint("Error FCM: $e"); }
 
     // 3. Verificación de cambios ligeros en Realtime DB
     await _sincronizarSoloSiHayCambios();
+
+    // Refrescar productos en pantalla por si la descarga de inicio trajo datos nuevos
+    await _cargar();
   }
   
   @override
@@ -199,8 +210,12 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     }
     FirebaseAnalytics.instance.logAppOpen();
     
-    // Leemos la ruta que ya resolvió la bienvenida
-    _localBoxiPath = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
+    Directory? extDir;
+    if (Platform.isAndroid) {
+      try { extDir = await getExternalStorageDirectory(); } catch (_) {}
+    }
+    extDir ??= await getApplicationDocumentsDirectory();
+    _localBoxiPath = prefs.getString('local_boxi_path') ?? "${extDir.path}/Boxi";
     
     String nombre = prefs.getString('nombre_negocio') ?? "MI NEGOCIO";
     String nuevaPath = prefs.getString('logo_path') ?? "";
@@ -315,35 +330,28 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     if (!urlOPath.startsWith('http')) {
       try {
         final f = File(urlOPath);
-        if (f.existsSync()) {
-          final raf = f.openSync();
-          raf.readSync(1);
-          raf.closeSync();
-          return urlOPath;
-        }
+        if (f.existsSync() && f.lengthSync() > 0) return urlOPath;
       } catch (_) {}
       return null;
     }
 
-    String name = urlOPath.split('/').last;
-    String ext = name.contains('.') ? name.split('.').last : 'jpg';
-    String id = name.split('.').first;
+    String rawName = urlOPath.split('/').last.split('?').first;
+    String nameWithExt = rawName.contains('.') ? rawName : '$rawName.jpg';
+    String id = rawName.split('.').first;
 
-    // Evaluamos rutas específicas fijas (Instantáneo, nunca congela la UI)
     final candidatos = [
-      File('$_localBoxiPath/$name'),
-      File('$_localBoxiPath/${id}_safe.$ext'),
-      File('$_localBoxiPath/Variantes/$name'),
-      File('$_localBoxiPath/Variantes/${id}_safe.$ext'),
+      File('$_localBoxiPath/$nameWithExt'),
+      File('$_localBoxiPath/$id.png'),
+      File('$_localBoxiPath/$id.jpg'),
+      File('$_localBoxiPath/Variantes/$nameWithExt'),
+      File('$_localBoxiPath/Variantes/$id.png'),
+      File('$_localBoxiPath/Variantes/$id.jpg'),
     ];
 
     for (var f in candidatos) {
       try {
-        if (f.existsSync()) {
-          final raf = f.openSync();
-          raf.readSync(1);
-          raf.closeSync();
-          return f.path; // Retorna si tiene acceso y legibilidad real
+        if (f.existsSync() && f.lengthSync() > 0) {
+          return f.path;
         }
       } catch (_) {}
     }
@@ -572,22 +580,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     setState(() => productos = List.from(filtrados));
     
     if (_esPremium && productosCambiados.isNotEmpty) {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user != null) {
-        WriteBatch batchNube = FirebaseFirestore.instance.batch();
-        for (var p in productosCambiados) {
-          DocumentReference doc = FirebaseFirestore.instance
-              .collection('usuarios').doc(user.uid)
-              .collection('productos').doc(p['id'].toString());
-          batchNube.set(doc, {
-            'orden': p['orden'],
-            'ultima_modificacion': FieldValue.serverTimestamp()
-          }, SetOptions(merge: true));
-        }
-        batchNube.update(FirebaseFirestore.instance.collection('usuarios').doc(user.uid), 
-          {'ultima_mod_productos': FieldValue.serverTimestamp()});
-        await batchNube.commit();
-      }
+      await ServicioNube.compilarYSubirCatalogoRTDB();
     }
   }
 
@@ -1886,11 +1879,8 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     final db = await DBHelper.instance.database;
     await db.update('productos', {'categoria': nuevaCategoria}, where: 'id = ?', whereArgs: [productoId]);
 
-    if (_esPremium && FirebaseAuth.instance.currentUser != null) {
-      await FirebaseFirestore.instance.collection('usuarios').doc(FirebaseAuth.instance.currentUser!.uid)
-        .collection('productos').doc(productoId.toString())
-        .set({'categoria': nuevaCategoria, 'ultima_modificacion': FieldValue.serverTimestamp()}, SetOptions(merge: true));
-      await ServicioNube.compilarYSubirCatalogoRTDB(); // 🔥 Sincroniza el cambio a Realtime DB
+    if (_esPremium) {
+      await ServicioNube.compilarYSubirCatalogoRTDB();
     }
     _cargar();
   }
@@ -1900,11 +1890,8 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     int val = activo ? 1 : 0;
     await db.update('categorias', {'activo': val, 'ultima_modificacion': DateTime.now().toIso8601String()}, where: 'id = ?', whereArgs: [idCat]);
 
-    if (_esPremium && FirebaseAuth.instance.currentUser != null) {
-      await FirebaseFirestore.instance.collection('usuarios').doc(FirebaseAuth.instance.currentUser!.uid)
-        .collection('categorias').doc(idCat.toString())
-        .set({'activo': val, 'ultima_modificacion': FieldValue.serverTimestamp()}, SetOptions(merge: true));
-      await ServicioNube.compilarYSubirCatalogoRTDB(); // 🔥 Sincroniza el cambio a Realtime DB
+    if (_esPremium) {
+      await ServicioNube.compilarYSubirCatalogoRTDB();
     }
     _cargar();
   }
@@ -1914,16 +1901,8 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     await db.delete('categorias', where: 'id = ?', whereArgs: [idCat]);
     await db.rawUpdate('UPDATE productos SET categoria = NULL WHERE categoria = ?', [nombreCat]);
 
-    if (_esPremium && FirebaseAuth.instance.currentUser != null) {
-      String uid = FirebaseAuth.instance.currentUser!.uid;
-      WriteBatch batch = FirebaseFirestore.instance.batch();
-      batch.delete(FirebaseFirestore.instance.collection('usuarios').doc(uid).collection('categorias').doc(idCat.toString()));
-      for (var p in productos.where((p) => p['categoria'] == nombreCat)) {
-         batch.set(FirebaseFirestore.instance.collection('usuarios').doc(uid).collection('productos').doc(p['id'].toString()),
-          {'categoria': null, 'ultima_modificacion': FieldValue.serverTimestamp()}, SetOptions(merge: true));
-      }
-      await batch.commit();
-      await ServicioNube.compilarYSubirCatalogoRTDB(); // 🔥 Sincroniza el cambio a Realtime DB
+    if (_esPremium) {
+      await ServicioNube.compilarYSubirCatalogoRTDB();
     }
     _cargar();
   }
@@ -1937,15 +1916,8 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     }
     await batch.commit(noResult: true);
     
-    if (_esPremium && FirebaseAuth.instance.currentUser != null) {
-      WriteBatch batchNube = FirebaseFirestore.instance.batch();
-      String uid = FirebaseAuth.instance.currentUser!.uid;
-      for (var c in categorias) {
-        batchNube.set(FirebaseFirestore.instance.collection('usuarios').doc(uid).collection('categorias').doc(c['id'].toString()), 
-          {'orden': c['orden'], 'ultima_modificacion': FieldValue.serverTimestamp()}, SetOptions(merge: true));
-      }
-      await batchNube.commit();
-      await ServicioNube.compilarYSubirCatalogoRTDB(); // 🔥 Sincroniza el cambio a Realtime DB
+    if (_esPremium) {
+      await ServicioNube.compilarYSubirCatalogoRTDB();
     }
   }
 
@@ -2176,14 +2148,8 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                   }
                   await batchLocal.commit(noResult: true);
 
-                  if (_esPremium && FirebaseAuth.instance.currentUser != null) {
-                    WriteBatch batch = FirebaseFirestore.instance.batch();
-                    String uid = FirebaseAuth.instance.currentUser!.uid;
-                    for (int pid in seleccionados) {
-                      batch.set(FirebaseFirestore.instance.collection('usuarios').doc(uid).collection('productos').doc(pid.toString()),
-                        {'categoria': categoriaNombre, 'ultima_modificacion': FieldValue.serverTimestamp()}, SetOptions(merge: true));
-                    }
-                    await batch.commit();
+                  if (_esPremium) {
+                    await ServicioNube.compilarYSubirCatalogoRTDB();
                   }
                   _cargar(); // Refresca la pantalla principal
                 },
@@ -2350,46 +2316,18 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                       batchLocal.update('categorias', {'orden': i + 1}, where: 'id = ?', whereArgs: [allCats[i]['id']]);
                     }
                     await batchLocal.commit(noResult: true);
-
-                    int catId = await db.insert('categorias', {'nombre': n, 'activo': 1, 'orden': 0, 'ultima_modificacion': DateTime.now().toIso8601String()});
+                    await db.insert('categorias', {'nombre': n, 'activo': 1, 'orden': 0, 'ultima_modificacion': DateTime.now().toIso8601String()});
                     for (int pid in prodsSeleccionados) await db.update('productos', {'categoria': n}, where: 'id = ?', whereArgs: [pid]);
-                    
-                    if (_esPremium && FirebaseAuth.instance.currentUser != null) {
-                      WriteBatch batch = FirebaseFirestore.instance.batch();
-                      String uid = FirebaseAuth.instance.currentUser!.uid;
-                      
-                      batch.set(FirebaseFirestore.instance.collection('usuarios').doc(uid).collection('categorias').doc(catId.toString()),
-                        {'id': catId, 'nombre': n, 'activo': 1, 'orden': 0, 'ultima_modificacion': FieldValue.serverTimestamp()}, SetOptions(merge: true));
-                      
-                      for (var c in allCats) {
-                        batch.set(
-                          FirebaseFirestore.instance.collection('usuarios').doc(uid).collection('categorias').doc(c['id'].toString()),
-                          {'orden': (c['orden'] as int? ?? 0) + 1}, 
-                          SetOptions(merge: true),
-                        );
-                      }
-
-                      for (int pid in prodsSeleccionados) {
-                        batch.set(FirebaseFirestore.instance.collection('usuarios').doc(uid).collection('productos').doc(pid.toString()),
-                          {'categoria': n, 'ultima_modificacion': FieldValue.serverTimestamp()}, SetOptions(merge: true));
-                      }
-                      await batch.commit();
+                    if (_esPremium) {
+                      await ServicioNube.compilarYSubirCatalogoRTDB();
                     }
                   } else {
                     String nombreAntiguo = categoriaAEditar['nombre'];
                     await db.update('categorias', {'nombre': n, 'ultima_modificacion': DateTime.now().toIso8601String()}, where: 'id = ?', whereArgs: [categoriaAEditar['id']]);
                     await db.rawUpdate('UPDATE productos SET categoria = ? WHERE categoria = ?', [n, nombreAntiguo]);
                     
-                    if (_esPremium && FirebaseAuth.instance.currentUser != null) {
-                      WriteBatch batch = FirebaseFirestore.instance.batch();
-                      String uid = FirebaseAuth.instance.currentUser!.uid;
-                      batch.set(FirebaseFirestore.instance.collection('usuarios').doc(uid).collection('categorias').doc(categoriaAEditar['id'].toString()),
-                        {'nombre': n, 'ultima_modificacion': FieldValue.serverTimestamp()}, SetOptions(merge: true));
-                      for (var p in productos.where((p) => p['categoria'] == nombreAntiguo)) {
-                         batch.set(FirebaseFirestore.instance.collection('usuarios').doc(uid).collection('productos').doc(p['id'].toString()),
-                          {'categoria': n, 'ultima_modificacion': FieldValue.serverTimestamp()}, SetOptions(merge: true));
-                      }
-                      await batch.commit();
+                    if (_esPremium) {
+                      await ServicioNube.compilarYSubirCatalogoRTDB();
                     }
                   }
                   if(mounted) Navigator.pop(ctx);
@@ -3583,7 +3521,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                 _tile(Icons.inventory, 'Inventario', const PantallaInventario(), badgeCount: _badgeInventario, badgeColor: Colors.red),
                 _tile(Icons.people, 'Vendedores', const PantallaVendedores()),
                 _tile(Icons.person_search, 'Clientes', const PantallaClientes()),
-                //_tile(Icons.card_giftcard_rounded, 'Premios Fidelidad', const PantallaFidelidad()),
+                _tile(Icons.card_giftcard_rounded, 'Tarjetas de Regalo', const PantallaFidelidad()),
                 _tile(Icons.receipt_long, 'Gestión Pedidos', const PantallaGestionPedidos(), badgeCount: _badgePedidos, badgeColor: Colors.blue),
                 _tile(Icons.bar_chart, 'Finanzas y Estadisticas', const PantallaPresupuestos()),             
                 ValueListenableBuilder<ThemeMode>(
@@ -4132,7 +4070,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     );
   }
 
- Widget _foto(int id, String data) {
+  Widget _foto(int id, String data) {
     final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
     if (data.isEmpty) {
       return Container(
@@ -4150,15 +4088,18 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
           width: double.infinity,
           height: double.infinity,
           gaplessPlayback: true,
-          errorBuilder: (c, e, s) => const Icon(Icons.broken_image),
+          errorBuilder: (c, e, s) {
+            // Si la foto física guardada falla al abrirse por permisos, mostramos la versión web
+            if (data.startsWith('http')) {
+              return Image.network(optimizarUrlCloudinary(data, width: 400), fit: BoxFit.cover);
+            }
+            return const Icon(Icons.broken_image);
+          },
         );
       }
 
       if (data.startsWith('http')) {
         String urlOptimizada = optimizarUrlCloudinary(data, width: 400); 
-        String urlAltaCalidad = optimizarUrlCloudinary(data, width: 1200); 
-        ServicioNube.descargarFotoIndividualEnSegundoPlano(urlAltaCalidad, _localBoxiPath);
-        
         return Image.network(
           urlOptimizada,
           fit: BoxFit.cover, 
@@ -4170,7 +4111,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       }
       
       if (data.length > 500) {
-        _fotoCache[id] = base64Decode(data);
+        _fotoCache[id] ??= base64Decode(data);
         return Image.memory(
           _fotoCache[id]!, 
           fit: BoxFit.cover, 
