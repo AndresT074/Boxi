@@ -428,7 +428,9 @@ class _CatalogoWebState extends State<CatalogoWeb> {
           _barraCategoriasHorizontal(), // 🔥 BARRA DE CATEGORÍAS DESLIZANTE SUPERIOR
           Expanded(
             child: _estaCargando
-                ? const SizedBox()
+                ? const Center(
+                    child: CircularProgressIndicator(color: Color(0xFF0D47A1)),
+                  )
                 : LayoutBuilder(builder: (context, constraints) {
                     int columnas = constraints.maxWidth > 1200 ? 5 : (constraints.maxWidth > 800 ? 3 : 2);
                     bool esCelular = constraints.maxWidth < 600;
@@ -608,51 +610,46 @@ class _CatalogoWebState extends State<CatalogoWeb> {
   }
 
   Widget _bannerDescargaBoxi() {
-    if (!mostrarBannerBoxi) return const SizedBox();
+    if (!mostrarBannerBoxi) return const SizedBox.shrink();
 
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
-      padding: const EdgeInsets.all(15),
+      padding: const EdgeInsets.fromLTRB(15, 10, 15, 15),
       decoration: BoxDecoration(
         gradient: const LinearGradient(colors: [Color(0xFF0D47A1), Color(0xFF1976D2)]),
         borderRadius: BorderRadius.circular(18),
         boxShadow: [BoxShadow(color: Colors.blue.withOpacity(0.3), blurRadius: 10, offset: const Offset(0, 5))],
       ),
-      child: Stack(
+      child: Column(
+        mainAxisSize: MainAxisSize.min, // 🔥 LIMITA LA ALTURA PARA QUE NUNCA SE ESTIRE
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              const Text("¿Quieres un catálogo como este?", textAlign: TextAlign.center, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w900, color: Colors.white)),
-              const SizedBox(height: 6),
-              const Text("Crea el tuyo GRATIS con Boxi", textAlign: TextAlign.center, style: TextStyle(fontSize: 11, color: Colors.white70)),
-              const SizedBox(height: 12),
-              Center(
-                child: ElevatedButton(
-                  onPressed: _irABoxi,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.white, foregroundColor: const Color(0xFF0D47A1),
-                    padding: const EdgeInsets.symmetric(horizontal: 25, vertical: 10),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(25)),
-                  ),
-                  child: const Text("Descargar App", textAlign: TextAlign.center, style: TextStyle(fontWeight: FontWeight.bold)),
-                ),
-              )
-            ],
-          ),
-          Positioned(
-            right: 0, top: 0,
+          Align(
+            alignment: Alignment.topRight,
             child: InkWell(
               onTap: () => setState(() => mostrarBannerBoxi = false),
               borderRadius: BorderRadius.circular(20),
               child: Container(
                 padding: const EdgeInsets.all(4),
                 decoration: BoxDecoration(color: Colors.white.withOpacity(0.2), shape: BoxShape.circle),
-                child: const Icon(Icons.close, size: 18, color: Colors.white),
+                child: const Icon(Icons.close, size: 16, color: Colors.white),
               ),
             ),
           ),
+          const Text("¿Quieres un catálogo como este?", textAlign: TextAlign.center, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w900, color: Colors.white)),
+          const SizedBox(height: 6),
+          const Text("Crea el tuyo GRATIS con Boxi", textAlign: TextAlign.center, style: TextStyle(fontSize: 11, color: Colors.white70)),
+          const SizedBox(height: 12),
+          ElevatedButton(
+            onPressed: _irABoxi,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.white, foregroundColor: const Color(0xFF0D47A1),
+              padding: const EdgeInsets.symmetric(horizontal: 25, vertical: 10),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(25)),
+            ),
+            child: const Text("Descargar App", textAlign: TextAlign.center, style: TextStyle(fontWeight: FontWeight.bold)),
+          )
         ],
       ),
     );
