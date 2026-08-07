@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:convert';
+import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -773,7 +774,8 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
   }
 
   Future<String> _capturarImagenLocal(ImageSource source) async {
-    FocusManager.instance.primaryFocus?.unfocus(); // 🔥 Cierra el teclado antes de abrir cámara/galería
+    FocusManager.instance.primaryFocus?.unfocus(); 
+    await SystemChannels.textInput.invokeMethod('TextInput.hide'); // 🔥 Fuerza el cierre del teclado nativo
     try {
       await [Permission.camera, Permission.photos].request();
       
@@ -1071,20 +1073,26 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
       );
     }
 
+    final Color fondoPantalla = isOscuro ? const Color(0xFF0A0A0F) : const Color(0xFFF2F4F7);
+
     return Scaffold(
       resizeToAvoidBottomInset: true,
-      backgroundColor: isOscuro ? const Color(0xFF0A0A0F) : const Color(0xFFF2F4F7),
+      backgroundColor: fondoPantalla,
       appBar: AppBar(
         title: Text(widget.producto == null ? 'Nuevo Producto' : 'Editar Producto', style: const TextStyle(fontWeight: FontWeight.bold)), 
         backgroundColor: isOscuro ? const Color(0xFF0D1B2A) : const Color(0xFF0D47A1), 
         foregroundColor: Colors.white,
         elevation: 0,
       ),
-      body: GestureDetector(
-        onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(16),
-          child: Column(
+      body: SizedBox.expand(
+        child: Container(
+          color: fondoPantalla, // 🔥 Tapa cualquier desfase del teclado con el color oscuro
+          child: GestureDetector(
+            onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
+            child: SingleChildScrollView(
+              physics: const ClampingScrollPhysics(), // 🔥 Elimina rebotes que muestren espacios grises
+              padding: const EdgeInsets.all(16),
+              child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children:[
             
@@ -1502,7 +1510,6 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
                 );
               },
             ),
-            
             SwitchListTile(
               contentPadding: const EdgeInsets.symmetric(horizontal: 5, vertical: 10),
               title: const Text("Producto Activo", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
@@ -1535,6 +1542,8 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
             const SizedBox(height: 40),
           ],
         ),
+      ),
+      ),
       ),
       ),
     );

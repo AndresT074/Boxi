@@ -20,7 +20,7 @@ class DBHelper {
     final path = join(dbPath, filePath);
     return await openDatabase(
       path,
-      version: 19,
+      version: 20,
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
     );
@@ -181,6 +181,10 @@ class DBHelper {
     // 🔥 MIGRACIÓN DE LA VERSIÓN 19 (Monto mínimo en tarjetas de fidelidad)
     if (oldVersion < 19) {
       try { await db.execute('ALTER TABLE tarjetas_fidelidad ADD COLUMN monto_minimo REAL DEFAULT 0'); } catch (_) {}
+    }
+
+    if (oldVersion < 20) {
+      try { await db.execute('ALTER TABLE tarjetas_fidelidad ADD COLUMN foto_path TEXT DEFAULT ""'); } catch (_) {}
     }
   }
 

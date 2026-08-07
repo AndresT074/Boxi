@@ -17,6 +17,7 @@ class ServicioFidelidad {
     required String tarjetaId,
     required String nombreNegocio,
     required String logoPath,
+    String? fotoPath, // 👈 AÑADIDO: Foto del premio
     required String tarjetaTitulo,
     required int metaCompras,
     required String premioDesc,
@@ -24,7 +25,7 @@ class ServicioFidelidad {
     dynamic clienteLocalId,
     String? clientUid,
     String? clienteNombre,
-    double? montoMinimo, // 👈 Monto opcional
+    double? montoMinimo,
   }) async {
     String vendorHash = vendorUid.length > 4 ? vendorUid.substring(0, 4) : vendorUid;
     String token = "boxi_fidelidad_${DateTime.now().millisecondsSinceEpoch}_$vendorHash".trim();
@@ -38,6 +39,7 @@ class ServicioFidelidad {
       'clientUid': clientUid ?? '',
       'nombreNegocio': nombreNegocio,
       'logoPath': logoPath,
+      'fotoPath': fotoPath ?? '',
       'tarjetaTitulo': tarjetaTitulo,
       'metaCompras': metaCompras,
       'premioDesc': premioDesc,
@@ -179,6 +181,7 @@ class ServicioFidelidad {
         'clienteNombre': clienteNombre,
         'nombreNegocio': nomNegocioMostrar,
         'logoPath': data['logoPath'] ?? '',
+        'fotoPath': data['fotoPath'] ?? data['foto_path'] ?? '', // 👈 AÑADIDO: Foto de la recompensa
         'tarjetaTitulo': data['tarjetaTitulo'] ?? 'Tarjeta Fidelidad',
         'metaCompras': meta,
         'premioDesc': data['premioDesc'] ?? '',
@@ -241,9 +244,15 @@ class ServicioFidelidad {
       await prefs.remove('pending_fidelidad_token');
 
       // Notificar al vendedor por FCM
+      String nombreAMostrar = clienteNombre.isNotEmpty 
+          ? clienteNombre 
+          : (user.displayName != null && user.displayName!.isNotEmpty 
+              ? user.displayName! 
+              : (user.email ?? 'Un cliente'));
+
       notificarVendedorPuntoReclamado(
         vendorUid: vendorUid,
-        nombreCliente: user.email ?? 'Un cliente',
+        nombreCliente: nombreAMostrar,
         nombreNegocio: data['nombreNegocio'] ?? 'Tu negocio',
         metaAlcanzada: puntosActuales >= meta,
         premioDesc: data['premioDesc'],
@@ -454,35 +463,36 @@ class ServicioFidelidad {
                 'ultima_modificacion': DateTime.now().toIso8601String(),
               }, conflictAlgorithm: ConflictAlgorithm.replace);
 
-              // 🔥 Asegurar tarjeta acumulada en Firestore
-              String targetUid = clientUid.isNotEmpty ? clientUid : uid;
-              String docTarget = (targetUid == uid && cLocId.isNotEmpty)
-                  ? "${uid}_${tId}_$cLocId"
-                  : "${uid}_$tId";
+              if (clientUid.isNotEmpty) {
+                String targetUid = clientUid;
+                String docTarget = (targetUid == uid && cLocId.isNotEmpty)
+                    ? "${uid}_${tId}_$cLocId"
+                    : "${uid}_$tId";
 
-              String nombreNegocioFinal = (targetUid == uid && cNombre.isNotEmpty && cNombre != 'Cliente')
-                  ? "$nomNegocio ($cNombre)"
-                  : nomNegocio;
+                String nombreNegocioFinal = (targetUid == uid && cNombre.isNotEmpty && cNombre != 'Cliente')
+                    ? "$nomNegocio ($cNombre)"
+                    : nomNegocio;
 
-              await FirebaseFirestore.instance
-                  .collection('usuarios')
-                  .doc(targetUid)
-                  .collection('tarjetas_acumuladas')
-                  .doc(docTarget)
-                  .set({
-                'vendorUid': uid,
-                'tarjetaId': tId.toString(),
-                'clienteLocalId': cLocId,
-                'clienteNombre': cNombre,
-                'nombreNegocio': nombreNegocioFinal,
-                'tarjetaTitulo': cData['titulo'] ?? 'Tarjeta',
-                'metaCompras': ((cData['metaCompras'] ?? 10) as num).toInt(),
-                'premioDesc': cData['premioDesc'] ?? cData['titulo'] ?? '',
-                'montoMinimo': ((cData['montoMinimo'] ?? 0) as num).toDouble(),
-                'puntosActuales': ptsCloud,
-                'completadasTotales': compCloud,
-                'ultimaModificacion': FieldValue.serverTimestamp(),
-              }, SetOptions(merge: true));
+                await FirebaseFirestore.instance
+                    .collection('usuarios')
+                    .doc(targetUid)
+                    .collection('tarjetas_acumuladas')
+                    .doc(docTarget)
+                    .set({
+                  'vendorUid': uid,
+                  'tarjetaId': tId.toString(),
+                  'clienteLocalId': cLocId,
+                  'clienteNombre': cNombre,
+                  'nombreNegocio': nombreNegocioFinal,
+                  'tarjetaTitulo': cData['titulo'] ?? 'Tarjeta',
+                  'metaCompras': ((cData['metaCompras'] ?? 10) as num).toInt(),
+                  'premioDesc': cData['premioDesc'] ?? cData['titulo'] ?? '',
+                  'montoMinimo': ((cData['montoMinimo'] ?? 0) as num).toDouble(),
+                  'puntosActuales': ptsCloud,
+                  'completadasTotales': compCloud,
+                  'ultimaModificacion': FieldValue.serverTimestamp(),
+                }, SetOptions(merge: true));
+              }
             }
           }
         }

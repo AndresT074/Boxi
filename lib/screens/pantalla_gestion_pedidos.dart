@@ -197,31 +197,12 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
       WHERE cliente_nombre_snapshot IS NULL OR cliente_nombre_snapshot = ""
     ''');
 
-    // 🔥 2. SINCRONIZACIÓN SILENCIOSA: Si reparamos pedidos y el usuario es Premium, encolamos el respaldo para Firebase
+    // 🔥 2. SINCRONIZACIÓN SILENCIOSA: Si reparamos pedidos y el usuario es Premium, respaldamos directo en RTDB
     if (filasModificadas > 0 && _esPremium) {
       try {
-        final reparados = await db.query('pedidos', columns: ['id', 'cliente_nombre_snapshot'], where: 'cliente_nombre_snapshot IS NOT NULL AND cliente_nombre_snapshot != ""');
-        final String fecha = DateTime.now().toIso8601String();
-        
-        for (var p in reparados) {
-          String? nombreSnap = p['cliente_nombre_snapshot']?.toString();
-          if (nombreSnap != null && nombreSnap.isNotEmpty) {
-            await db.insert('operaciones_pendientes', {
-              'tabla': 'pedidos',
-              'operacion': 'set',
-              'doc_id': p['id'].toString(),
-              'datos_json': jsonEncode({
-                'id': p['id'], 
-                'cliente_nombre_snapshot': nombreSnap
-              }),
-              'fecha_creacion': fecha
-            }, conflictAlgorithm: ConflictAlgorithm.replace);
-          }
-        }
-        // Dispara el procesador de cola offline de forma silenciosa
-        ServicioNube.procesarColaOffline();
+        ServicioNube.respaldarDatosPrivadosRTDB();
       } catch (e) {
-        debugPrint("Error sincronizando auto-saneamiento: $e");
+        debugPrint("Error respaldando auto-saneamiento en RTDB: $e");
       }
     }
 
@@ -1551,9 +1532,33 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
 
               String premioTxt = premioDesc.isNotEmpty ? premioDesc : tituloTarjeta;
               String mensaje = "¡Hola *$clienteNombre*! 🎁 *$nomNegocio* te obsequió *1 punto* para tu tarjeta de regalo *$tituloTarjeta*.\n\nPor *$meta* compras$textoMonto obtienes *$premioTxt*.\n\n*Al completar $meta puntos llevas el premio, descarga la app BOXI para empezar a acumular puntos:*\n$enlaceUnico";
-              String urlWa = "https://wa.me/$fullNum?text=${Uri.encodeComponent(mensaje)}";
-              if (await canLaunchUrl(Uri.parse(urlWa))) {
-                await launchUrl(Uri.parse(urlWa), mode: LaunchMode.externalApplication);
+              String textEncoded = Uri.encodeComponent(mensaje);
+
+              // Esquema nativo whatsapp:// para elegir entre WhatsApp y WhatsApp Business
+              Uri uriApp = fullNum.length >= 10
+                  ? Uri.parse("whatsapp://send?phone=$fullNum&text=$textEncoded")
+                  : Uri.parse("whatsapp://send?text=$textEncoded");
+
+              Uri uriWeb = fullNum.length >= 10
+                  ? Uri.parse("https://wa.me/$fullNum?text=$textEncoded")
+                  : Uri.parse("https://api.whatsapp.com/send?text=$textEncoded");
+
+              try {
+                if (await canLaunchUrl(uriApp)) {
+                  await launchUrl(uriApp, mode: LaunchMode.externalApplication);
+                } else if (await canLaunchUrl(uriWeb)) {
+                  await launchUrl(uriWeb, mode: LaunchMode.externalApplication);
+                } else {
+                  if (ctx.mounted) {
+                    ScaffoldMessenger.of(ctx).showSnackBar(
+                      const SnackBar(content: Text("No se pudo abrir WhatsApp en este dispositivo."))
+                    );
+                  }
+                }
+              } catch (e) {
+                if (await canLaunchUrl(uriWeb)) {
+                  await launchUrl(uriWeb, mode: LaunchMode.externalApplication);
+                }
               }
             },
           ),

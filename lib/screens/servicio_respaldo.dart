@@ -153,7 +153,7 @@ class ServicioRespaldo {
         }
       }
 
-      // PRODUCTOS
+      // PRODUCTOS Y VARIANTES
       if (await _tablaExiste(dbRespaldo, 'productos')) {
         List<Map<String, dynamic>> pRes = await dbRespaldo.query('productos');
         for (var p in pRes) {
@@ -165,7 +165,25 @@ class ServicioRespaldo {
             pMap[p['id']] = newId;
             contadorNuevos++;
           } else {
-            pMap[p['id']] = existe.first['id'] as int;
+            int existingId = existe.first['id'] as int;
+            pMap[p['id']] = existingId;
+
+            // 🔥 RECUPERACIÓN DE VARIANTES: Si el producto existe pero la copia tiene variantes eliminadas o diferentes, las restaura.
+            String varActual = existe.first['variantes']?.toString() ?? "";
+            String varRespaldo = p['variantes']?.toString() ?? "";
+
+            if (varRespaldo.length > 5 && varActual != varRespaldo) {
+              await dbActual.update(
+                'productos', 
+                {
+                  'variantes': varRespaldo,
+                  'ultima_modificacion': ahora,
+                }, 
+                where: 'id = ?', 
+                whereArgs: [existingId]
+              );
+              contadorNuevos++;
+            }
           }
         }
       }
@@ -247,7 +265,8 @@ class ServicioRespaldo {
 
       onComplete(); // Refresca la UI de la pantalla principal
       if (prefs.getBool('es_premium') ?? false) {
-        await ServicioNube.sincronizarBaseDatosHaciaNube();
+        await ServicioNube.respaldarDatosPrivadosRTDB();
+        await ServicioNube.compilarYSubirCatalogoRTDB();
         await ServicioNube.migrarTodoACloudinary();
       }
 

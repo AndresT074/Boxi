@@ -273,19 +273,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       }
     }
     if (necesitaForzarNube && _esPremium) {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user != null) {
-        WriteBatch batchNube = FirebaseFirestore.instance.batch();
-        for (var p in datosEditables) {
-          DocumentReference doc = FirebaseFirestore.instance
-              .collection('usuarios')
-              .doc(user.uid)
-              .collection('productos')
-              .doc(p['id'].toString());
-          batchNube.set(doc, {'orden': p['orden']}, SetOptions(merge: true));
-        }
-        await batchNube.commit();
-      }
+      await ServicioNube.compilarYSubirCatalogoRTDB();
     }
     int productosAgotados = 0;
     for (var p in datosEditables) {
@@ -5553,7 +5541,9 @@ class _PantallaSolicitudesState extends State<PantallaSolicitudes> {
   }
 
   void _abrirWhatsApp(String telefono, Map<String, dynamic> data) async {
-    String numero = telefono.replaceAll(RegExp(r'\D'), ''); 
+    String numClean = telefono.replaceAll(RegExp(r'\D'), ''); 
+    if (numClean.length == 10) numClean = "57$numClean";
+
     String clienteNombre = data['cliente']['nombre'] ?? 'cliente';
     List prods = data['productos'] ?? [];
     String total = data['total'].toString();
@@ -5571,11 +5561,33 @@ class _PantallaSolicitudesState extends State<PantallaSolicitudes> {
     sb.writeln("\n*TOTAL:* \$$total");
     sb.writeln("\nTe escribo para confirmar los detalles del envío.");
 
-    String mensajeCodificado = Uri.encodeComponent(sb.toString());
-    
-    final Uri url = Uri.parse("https://wa.me/$numero?text=$mensajeCodificado");
-    if (await canLaunchUrl(url)) {
-      await launchUrl(url, mode: LaunchMode.externalApplication);
+    String textEncoded = Uri.encodeComponent(sb.toString());
+
+    // Esquema nativo whatsapp:// que activa el selector de aplicaciones (WhatsApp Normal vs Business)
+    Uri uriApp = numClean.length >= 10
+        ? Uri.parse("whatsapp://send?phone=$numClean&text=$textEncoded")
+        : Uri.parse("whatsapp://send?text=$textEncoded");
+
+    Uri uriWeb = numClean.length >= 10
+        ? Uri.parse("https://wa.me/$numClean?text=$textEncoded")
+        : Uri.parse("https://api.whatsapp.com/send?text=$textEncoded");
+
+    try {
+      if (await canLaunchUrl(uriApp)) {
+        await launchUrl(uriApp, mode: LaunchMode.externalApplication);
+      } else if (await canLaunchUrl(uriWeb)) {
+        await launchUrl(uriWeb, mode: LaunchMode.externalApplication);
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("No se pudo abrir WhatsApp en este dispositivo."))
+          );
+        }
+      }
+    } catch (e) {
+      if (await canLaunchUrl(uriWeb)) {
+        await launchUrl(uriWeb, mode: LaunchMode.externalApplication);
+      }
     }
   }
 

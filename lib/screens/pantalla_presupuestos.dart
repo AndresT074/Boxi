@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart'; 
 import 'package:local_auth/local_auth.dart'; 
 import '../database/db_helper.dart';
@@ -203,7 +202,7 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
 
       // 4. DESGLOSE DETALLADO POR CLIENTE (Filtrado por fecha de pago)
       final clientesRaw = await db.rawQuery('''
-        SELECT c.id as cliente_id, COALESCE(c.nombre_completo, 'Cliente Temporal') as nombre_completo, c.nombre_negocio,
+        SELECT c.id as cliente_id, COALESCE(c.nombre_completo, 'Cliente Borrado') as nombre_completo, c.nombre_negocio,
                SUM(p.total_venta) as recaudado, SUM(p.ganancia_total + COALESCE(p.valor_domicilio, 0)) as ganancia_neta, SUM(COALESCE(p.valor_domicilio, 0)) as total_domicilios
         FROM pedidos p LEFT JOIN clientes c ON p.cliente_id = c.id
         WHERE p.estado = 'Completado' AND substr(COALESCE(p.fecha_pago, p.fecha_hora), 1, 7) = ? GROUP BY p.cliente_id
@@ -579,14 +578,7 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
               final db = await DBHelper.instance.database;
               await db.delete('ajustes_capital');
               if (_esPremiumUsuario) {
-                final uid = (await SharedPreferences.getInstance()).getString('user_uid');
-                if (uid != null) {
-                  final snapshot = await FirebaseFirestore.instance.collection('usuarios').doc(uid).collection('ajustes_capital').get();
-                  WriteBatch batch = FirebaseFirestore.instance.batch();
-                  for (var doc in snapshot.docs) { batch.delete(doc.reference); }
-                  await batch.commit();
-                  await FirebaseFirestore.instance.collection('usuarios').doc(uid).update({'ultima_mod_ajustes': FieldValue.serverTimestamp()});
-                }
+                await ServicioNube.respaldarDatosPrivadosRTDB();
               }
               _ejecutarMotorFinanciero();
             }
@@ -644,11 +636,7 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
                     };
                     int idAjuste = await db.insert('ajustes_capital', ajusteData);
                     if (_esPremiumUsuario) {
-                      final uid = (await SharedPreferences.getInstance()).getString('user_uid');
-                      if (uid != null) {
-                        await FirebaseFirestore.instance.collection('usuarios').doc(uid).collection('ajustes_capital').doc(idAjuste.toString()).set({...ajusteData, 'id': idAjuste, 'ultima_modificacion': FieldValue.serverTimestamp()});
-                        await FirebaseFirestore.instance.collection('usuarios').doc(uid).update({'ultima_mod_ajustes': FieldValue.serverTimestamp()});
-                      }
+                      await ServicioNube.guardarAjusteCapitalNube({...ajusteData, 'id': idAjuste});
                     }
                     _ejecutarMotorFinanciero();
                   }
@@ -680,8 +668,7 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
                 int id = r['id'] as int;
                 await db.delete('reportes_guardados', where: 'id = ?', whereArgs: [id]);
                 if (_esPremiumUsuario) {
-                  final uid = (await SharedPreferences.getInstance()).getString('user_uid');
-                  if (uid != null) await FirebaseFirestore.instance.collection('usuarios').doc(uid).collection('reportes_guardados').doc(id.toString()).delete();
+                  await ServicioNube.respaldarDatosPrivadosRTDB();
                 }
                 _ejecutarMotorFinanciero();
               }
@@ -709,22 +696,13 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
               Navigator.pop(ctx);
               if (await _verificarIdentidadUrgente()) {
                 final db = await DBHelper.instance.database;
-                WriteBatch? batch;
-                String? uid;
-                if (_esPremiumUsuario) {
-                  uid = (await SharedPreferences.getInstance()).getString('user_uid');
-                  if (uid != null) batch = FirebaseFirestore.instance.batch();
-                }
-
                 for (var r in reportesABorrar) {
                   int id = r['id'] as int;
                   await db.delete('reportes_guardados', where: 'id = ?', whereArgs: [id]);
-                  if (batch != null && uid != null) {
-                    final docRef = FirebaseFirestore.instance.collection('usuarios').doc(uid).collection('reportes_guardados').doc(id.toString());
-                    batch.delete(docRef);
-                  }
                 }
-                if (batch != null) await batch.commit();
+                if (_esPremiumUsuario) {
+                  await ServicioNube.respaldarDatosPrivadosRTDB();
+                }
                 
                 ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Reportes eliminados correctamente."), backgroundColor: Colors.green));
                 _ejecutarMotorFinanciero();
@@ -752,21 +730,10 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
               Navigator.pop(ctx);
               if (await _verificarIdentidadUrgente()) {
                 final db = await DBHelper.instance.database;
-                if (_esPremiumUsuario) {
-                  final uid = (await SharedPreferences.getInstance()).getString('user_uid');
-                  if (uid != null) {
-                    final pedsCompletados = await db.query('pedidos', columns: ['id'], where: 'estado = "Completado"');
-                    List<int> idsCompletados = pedsCompletados.map((p) => p['id'] as int).toList();
-                    if (idsCompletados.isNotEmpty) {
-                      String placeholders = List.filled(idsCompletados.length, '?').join(', ');
-                      final detNube = await db.query('detalle_pedidos', where: 'nombre_snapshot = ? AND pedido_id IN ($placeholders)', whereArgs: [nombreSnapshot, ...idsCompletados]);
-                      WriteBatch batch = FirebaseFirestore.instance.batch();
-                      for (var d in detNube) { batch.delete(FirebaseFirestore.instance.collection('usuarios').doc(uid).collection('detalle_pedidos').doc(d['id'].toString())); }
-                      await batch.commit();
-                    }
-                  }
-                }
                 await db.rawDelete("DELETE FROM detalle_pedidos WHERE nombre_snapshot = ? AND pedido_id IN (SELECT id FROM pedidos WHERE estado = 'Completado')", [nombreSnapshot]);
+                if (_esPremiumUsuario) {
+                  await ServicioNube.respaldarDatosPrivadosRTDB();
+                }
                 _ejecutarMotorFinanciero();
               }
             },
@@ -795,11 +762,7 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
                 final db = await DBHelper.instance.database;
                 await db.delete('ajustes_capital', where: 'id = ?', whereArgs: [id]);
                 if (_esPremiumUsuario) {
-                  final uid = (await SharedPreferences.getInstance()).getString('user_uid');
-                  if (uid != null) {
-                    await FirebaseFirestore.instance.collection('usuarios').doc(uid).collection('ajustes_capital').doc(id.toString()).delete();
-                    await FirebaseFirestore.instance.collection('usuarios').doc(uid).update({'ultima_mod_ajustes': FieldValue.serverTimestamp()});
-                  }
+                  await ServicioNube.respaldarDatosPrivadosRTDB();
                 }
                 _ejecutarMotorFinanciero();
               }
@@ -1009,7 +972,7 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
         final start = range.start.toIso8601String().split('T')[0]; 
         final end = range.end.toIso8601String().split('T')[0];
         final List<Map<String, dynamic>> peds = await db.rawQuery('''
-          SELECT p.fecha_hora, p.total_venta, (p.ganancia_total + COALESCE(p.valor_domicilio, 0)) as ganancia_real, COALESCE(c.nombre_completo, 'Cliente Temporal') as nombre_completo, c.nombre_negocio 
+          SELECT p.fecha_hora, p.total_venta, (p.ganancia_total + COALESCE(p.valor_domicilio, 0)) as ganancia_real, COALESCE(c.nombre_completo, 'Cliente Borrado') as nombre_completo, c.nombre_negocio 
           FROM pedidos p LEFT JOIN clientes c ON p.cliente_id = c.id 
           WHERE p.estado = 'Completado' AND substr(p.fecha_hora, 1, 10) BETWEEN ? AND ?
         ''', [start, end]);

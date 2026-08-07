@@ -5,6 +5,7 @@ import 'package:flutter_web_plugins/url_strategy.dart';
 import 'package:Boxi/screens/servicio_tema.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:Boxi/web_catalog.dart';
+import 'package:Boxi/screens/pantalla_fidelidad.dart';
 import 'package:Boxi/screens/pantalla_splash.dart';
 import 'package:Boxi/screens/servicio_anuncios.dart';
 import 'package:Boxi/database/db_helper.dart';
@@ -98,12 +99,26 @@ class BoxiApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     String? adminId = Uri.base.queryParameters['id'];
+    String? tokenWeb = Uri.base.queryParameters['token'];
+    String? cardWeb = Uri.base.queryParameters['card'];
 
-    if (adminId == null) {
-      String fullUrl = Uri.base.toString();
-      if (fullUrl.contains("id=")) {
-        adminId = fullUrl.split("id=").last.split("&").first;
-      }
+    String fullUrl = Uri.base.toString();
+    if (adminId == null && fullUrl.contains("id=")) {
+      adminId = fullUrl.split("id=").last.split("&").first;
+    }
+    if (tokenWeb == null && fullUrl.contains("token=")) {
+      tokenWeb = fullUrl.split("token=").last.split("&").first;
+    }
+    if (cardWeb == null && fullUrl.contains("card=")) {
+      cardWeb = fullUrl.split("card=").last.split("&").first;
+    }
+
+    // Determina si abre la Web de Reclamo/Tarjeta, el Catálogo o la App
+    Widget pantallaInicial = const PantallaSplash();
+    if ((tokenWeb != null && tokenWeb.isNotEmpty) || (cardWeb != null && cardWeb.isNotEmpty)) {
+      pantallaInicial = PantallaReclamarPuntoWeb(token: tokenWeb ?? '', cardId: cardWeb);
+    } else if (adminId != null && adminId.isNotEmpty) {
+      pantallaInicial = CatalogoWeb(adminId: adminId);
     }
 
     return ValueListenableBuilder<ThemeMode>(
@@ -137,15 +152,11 @@ class BoxiApp extends StatelessWidget {
             useMaterial3: true,
           ),
           
-          home: adminId != null 
-              ? CatalogoWeb(adminId: adminId) 
-              : const PantallaSplash(),
+          home: pantallaInicial,
 
           onGenerateRoute: (settings) {
             return MaterialPageRoute(
-              builder: (context) => adminId != null 
-                  ? CatalogoWeb(adminId: adminId) 
-                  : const PantallaSplash(),
+              builder: (context) => pantallaInicial,
             );
           },
         );

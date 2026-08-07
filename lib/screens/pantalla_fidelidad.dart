@@ -18,6 +18,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:flutter/foundation.dart'; 
 
 class PantallaFidelidad extends StatefulWidget {
   final String? tokenParaReclamarDirecto;
@@ -55,14 +56,10 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
     final prefs = await SharedPreferences.getInstance();
     final db = await DBHelper.instance.database;
     final user = FirebaseAuth.instance.currentUser;
-    // 🔥 0. PURGA AUTOMÁTICA DE PUNTOS HUÉRFANOS EN EL TELÉFONO (SQLite)
-    // Borra de la memoria del celular cualquier punto cuya tarjeta ya no exista
     await db.rawDelete('''
       DELETE FROM puntos_clientes 
       WHERE tarjeta_id NOT IN (SELECT id FROM tarjetas_fidelidad)
     ''');
-
-    // 🔥 Limpiar la caché de SharedPreferences de tarjetas eliminadas de tu propio usuario
     if (user != null) {
       try {
         final tarjetasValidas = await db.query('tarjetas_fidelidad', columns: ['id']);
@@ -83,7 +80,6 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
     String nombreNeg = prefs.getString('nombre_negocio') ?? "MI NEGOCIO";
     String logoP = prefs.getString('logo_path') ?? "";
     _localBoxiPathGlobal = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
-    // ⚡ 1. CARGA INSTANTÁNEA LOCAL (0 ms) - Construyendo tarjetas acumuladas locales
     final tarjetasRes = await db.query('tarjetas_fidelidad', orderBy: 'id DESC');
     final puntosLocal = await db.query('puntos_clientes');
     final clientesLocal = await db.query('clientes');
@@ -107,8 +103,7 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
       if (pts > 0 && mapaTarjetasVendedor.containsKey(tId)) {
         var tInfo = mapaTarjetasVendedor[tId]!;
         String cNom = mapaClientesNombre[cId] ?? 'Cliente';
-        String keyUnicaLocal = "${user?.uid ?? ''}_${tId}_$cId"; // 👈 Incluye el ID del cliente local
-
+        String keyUnicaLocal = "${user?.uid ?? ''}_${tId}_$cId"; 
         int compTotalesLocal = (p['completadas_totales'] as num?)?.toInt() ?? 0;
         int ptsPrevios = acumuladasMapLocal.containsKey(keyUnicaLocal) ? (acumuladasMapLocal[keyUnicaLocal]!['puntosActuales'] as int) : -1;
         int compPrevias = acumuladasMapLocal.containsKey(keyUnicaLocal) ? (acumuladasMapLocal[keyUnicaLocal]!['completadasTotales'] as int) : -1;
@@ -125,9 +120,16 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
           }
         }
 
-        // Solo mostrar en "MIS PREMIOS ACUMULADOS" si es una prueba personal ("Yo")
-        bool esPruebaPersonal = cNom.toLowerCase() == 'yo' || cNom.toLowerCase().contains('yo (');
-        if (esMasNuevoLocal && esPruebaPersonal) {
+        // Solo mostrar en "MIS PREMIOS ACUMULADOS" si la tarjeta es tuya personal ("Yo" o vinculada a tu propia cuenta)
+        bool esMiTarjetaPersonal = cNom.toLowerCase() == 'yo' || 
+            cNom.toLowerCase().contains('yo (') || 
+            (p['client_uid'] != null && p['client_uid'] == user?.uid);
+
+        if (esMasNuevoLocal && esMiTarjetaPersonal) {
+          String fotoPremio = (tInfo['foto_path'] != null && tInfo['foto_path'].toString().isNotEmpty)
+              ? tInfo['foto_path'].toString()
+              : '';
+
           acumuladasMapLocal[keyUnicaLocal] = {
             'docId': "${user?.uid ?? 'local'}_${tId}_$cId",
             'vendorUid': user?.uid ?? '',
@@ -135,7 +137,8 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
             'clienteLocalId': cId.toString(),
             'clienteNombre': cNom,
             'nombreNegocio': "$nombreNeg ($cNom)",
-            'logoPath': logoP,
+            'logoPath': logoP, // 👈 CORREGIDO: Guarda el logo real de tu negocio
+            'fotoPath': fotoPremio, // 👈 Guarda la foto del producto/premio
             'tarjetaTitulo': tInfo['titulo'] ?? 'Tarjeta',
             'metaCompras': ((tInfo['meta_compras'] ?? 10) as num).toInt(),
             'premioDesc': tInfo['premio_descripcion'] ?? tInfo['titulo'] ?? '',
@@ -205,12 +208,15 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
           int tId = int.tryParse(doc.id) ?? int.tryParse(cData['tarjetaId']?.toString() ?? '0') ?? 0;
 
           if (tId > 0) {
+            String fotoNubeBD = cData['fotoPath']?.toString() ?? cData['foto_path']?.toString() ?? '';
+
             await db.insert('tarjetas_fidelidad', {
               'id': tId,
               'titulo': cData['titulo'] ?? 'Tarjeta',
               'meta_compras': ((cData['metaCompras'] ?? 10) as num).toInt(),
               'premio_descripcion': cData['premioDesc'] ?? cData['titulo'] ?? '',
               'monto_minimo': ((cData['montoMinimo'] ?? 0) as num).toDouble(),
+              'foto_path': fotoNubeBD,
               'activa': ((cData['activa'] ?? 1) as num).toInt(),
               'ultima_modificacion': DateTime.now().toIso8601String(),
             }, conflictAlgorithm: ConflictAlgorithm.replace);
@@ -344,6 +350,17 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
             }
           }
 
+          // ⚡ SI ERES EL VENDEDOR ADMINISTRANDO A UN CLIENTE, MANTENER "Negocio (NombreCliente)"
+          if (user.uid == vUid && cLocId.isNotEmpty) {
+            String cNom = (data['clienteNombre'] ?? '').toString();
+            if (cNom.isNotEmpty && cNom.toLowerCase() != 'yo' && !cNom.toLowerCase().contains('yo (')) {
+              String baseNom = (data['nombreNegocio'] ?? nombreNeg).toString();
+              if (baseNom.contains(' (')) {
+                baseNom = baseNom.split(' (').first;
+              }
+              data['nombreNegocio'] = "$baseNom ($cNom)";
+            }
+          }
           int ptsActuales = ((data['puntosActuales'] ?? 0) as num).toInt();
 
           if (!tarjetasSinClones.containsKey(claveUnica)) {
@@ -383,6 +400,18 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
           String claveUnica = (user.uid == vUid && cLocId.isNotEmpty)
               ? "${vUid}_${tId}_$cLocId"
               : "${vUid}_$tId";
+
+          // Preservar nombre del cliente si es tarjeta administrada por el vendedor
+          if (user.uid == vUid && cLocId.isNotEmpty) {
+            String cNom = (localCard['clienteNombre'] ?? '').toString();
+            if (cNom.isNotEmpty && cNom.toLowerCase() != 'yo' && !cNom.toLowerCase().contains('yo (')) {
+              String baseNom = (localCard['nombreNegocio'] ?? nombreNeg).toString();
+              if (baseNom.contains(' (')) {
+                baseNom = baseNom.split(' (').first;
+              }
+              localCard['nombreNegocio'] = "$baseNom ($cNom)";
+            }
+          }
 
           if (!tarjetasSinClones.containsKey(claveUnica)) {
             tarjetasSinClones[claveUnica] = localCard;
@@ -499,41 +528,31 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
 
   Widget _construirLogoNegocio(String logoPath) {
     if (logoPath.trim().isEmpty) {
-      return const Icon(Icons.store, color: Color(0xFF0D47A1));
+      return const Center(
+        child: Icon(Icons.card_giftcard_rounded, color: Color(0xFF0D47A1), size: 26),
+      );
     }
 
     // 🔥 BUSCAR RECURSO LOCAL SI ES UNA URL DE CLOUDINARY U HTTP
     if (logoPath.startsWith('http')) {
-      String name = logoPath.split('/').last;
+      String name = logoPath.split('/').last.split('?').first;
       if (!name.contains('.')) name += '.jpg';
 
       File fPub = File('$_localBoxiPathGlobal/$name');
       File fVar = File('$_localBoxiPathGlobal/Variantes/$name');
 
-      bool fPubLegible = false;
-      try { if (fPub.existsSync()) { fPub.readAsBytesSync(); fPubLegible = true; } } catch(_) {}
-
-      bool fVarLegible = false;
-      try { if (fVar.existsSync()) { fVar.readAsBytesSync(); fVarLegible = true; } } catch(_) {}
-
-      if (fVarLegible) {
-        return ClipOval(
-          child: Image.file(fVar, width: 52, height: 52, fit: BoxFit.cover, gaplessPlayback: true),
-        );
-      } else if (fPubLegible) {
-        return ClipOval(
-          child: Image.file(fPub, width: 52, height: 52, fit: BoxFit.cover, gaplessPlayback: true),
-        );
+      if (fVar.existsSync() && fVar.lengthSync() > 0) {
+        return Image.file(fVar, fit: BoxFit.cover, gaplessPlayback: true);
+      } else if (fPub.existsSync() && fPub.lengthSync() > 0) {
+        return Image.file(fPub, fit: BoxFit.cover, gaplessPlayback: true);
       }
 
-      return ClipOval(
-        child: Image.network(
-          logoPath,
-          width: 52,
-          height: 52,
-          fit: BoxFit.cover,
-          gaplessPlayback: true,
-          errorBuilder: (_, __, ___) => const Icon(Icons.store, color: Color(0xFF0D47A1)),
+      return Image.network(
+        logoPath,
+        fit: BoxFit.cover,
+        gaplessPlayback: true,
+        errorBuilder: (_, __, ___) => const Center(
+          child: Icon(Icons.card_giftcard_rounded, color: Color(0xFF0D47A1), size: 26),
         ),
       );
     }
@@ -541,22 +560,21 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
     // Archivo local directo
     try {
       File file = File(logoPath);
-      if (file.existsSync()) {
-        file.readAsBytesSync();
-        return ClipOval(
-          child: Image.file(
-            file,
-            width: 52,
-            height: 52,
-            fit: BoxFit.cover,
-            gaplessPlayback: true,
-            errorBuilder: (_, __, ___) => const Icon(Icons.store, color: Color(0xFF0D47A1)),
+      if (file.existsSync() && file.lengthSync() > 0) {
+        return Image.file(
+          file,
+          fit: BoxFit.cover,
+          gaplessPlayback: true,
+          errorBuilder: (_, __, ___) => const Center(
+            child: Icon(Icons.card_giftcard_rounded, color: Color(0xFF0D47A1), size: 26),
           ),
         );
       }
     } catch (_) {}
 
-    return const Icon(Icons.store, color: Color(0xFF0D47A1));
+    return const Center(
+      child: Icon(Icons.card_giftcard_rounded, color: Color(0xFF0D47A1), size: 26),
+    );
   }
 
   // 🔥 MÉTODO OPTIMIZADO: UTILIZA BATCH ATÓMICO EN FIRESTORE PARA EVITAR MÚLTIPLES MODIFICACIONES
@@ -755,10 +773,13 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
       }
     }
   }
+
   void _mostrarAnimacionEstampadoX(Map<String, dynamic> tarjeta, int puntoNuevo) {
     int meta = ((tarjeta['metaCompras'] ?? 10) as num).toInt();
     String nomNegocio = tarjeta['nombreNegocio'] ?? 'Negocio';
     String premio = tarjeta['premioDesc'] ?? tarjeta['titulo'] ?? 'Recompensa';
+    String logoNegocio = tarjeta['logoPath'] ?? _logoPath;
+    String fotoPremio = tarjeta['fotoPath'] ?? tarjeta['foto_path'] ?? '';
     final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
 
     showDialog(
@@ -775,26 +796,70 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
-                  "¡Punto Reclamado en $nomNegocio!",
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16),
-                ),
-                const SizedBox(height: 10),
-                Builder(
-                  builder: (context) {
-                    double mMin = ((tarjeta['montoMinimo'] ?? 0) as num).toDouble();
-                    String textoMonto = mMin > 0 ? " de \$${mMin.toInt()} o más" : "";
-                    return Text(
-                      "Por $meta compras$textoMonto obtienes $premio",
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.bold,
-                        color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1),
+                // 🏪 LOGO DE NEGOCIO + NOMBRE
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Container(
+                      width: 36,
+                      height: 38,
+                      decoration: const BoxDecoration(shape: BoxShape.circle),
+                      clipBehavior: Clip.antiAlias,
+                      child: _construirLogoNegocio(logoNegocio),
+                    ),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Text(
+                        nomNegocio,
+                        style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16),
+                        overflow: TextOverflow.ellipsis,
                       ),
-                      textAlign: TextAlign.center,
-                    );
-                  }
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+
+                // 🎁 RECUADRO DEL PREMIO CON SU FOTO
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: isOscuro ? Colors.cyanAccent.withOpacity(0.08) : Colors.blue.shade50,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: isOscuro ? Colors.cyanAccent.withOpacity(0.3) : Colors.blue.shade200),
+                  ),
+                  child: Row(
+                    children: [
+                      if (fotoPremio.isNotEmpty) ...[
+                        Container(
+                          width: 48,
+                          height: 48,
+                          decoration: BoxDecoration(
+                            color: isOscuro ? Colors.white10 : Colors.grey.shade200,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          clipBehavior: Clip.antiAlias,
+                          child: _construirLogoNegocio(fotoPremio),
+                        ),
+                        const SizedBox(width: 10),
+                      ],
+                      Expanded(
+                        child: Builder(
+                          builder: (context) {
+                            double mMin = ((tarjeta['montoMinimo'] ?? 0) as num).toDouble();
+                            String textoMonto = mMin > 0 ? " de \$${mMin.toInt()} o más" : "";
+                            return Text(
+                              "Por $meta compras$textoMonto obtienes $premio",
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                                color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1),
+                              ),
+                            );
+                          }
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
                 const SizedBox(height: 20),
 
@@ -1144,6 +1209,7 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
     final metaCtrl = TextEditingController(text: tarjetaAEditar != null ? tarjetaAEditar['meta_compras'].toString() : "10");
     final premioCtrl = TextEditingController(text: tarjetaAEditar != null ? (tarjetaAEditar['premio_descripcion'] ?? tarjetaAEditar['titulo']) : "");
     final montoCtrl = TextEditingController(text: tarjetaAEditar != null && tarjetaAEditar['monto_minimo'] != null && (tarjetaAEditar['monto_minimo'] as num) > 0 ? (tarjetaAEditar['monto_minimo'] as num).toInt().toString() : "");
+    String fotoTarjetaPath = tarjetaAEditar != null ? (tarjetaAEditar['foto_path']?.toString() ?? tarjetaAEditar['fotoPath']?.toString() ?? '') : '';
 
     final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
 
@@ -1211,8 +1277,118 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
+                          // 🖼️ SELECCIÓN DE IMAGEN DE REFERENCIA / PREMIO
+                          Center(
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(20),
+                              onTap: () {
+                                showModalBottomSheet(
+                                  context: context,
+                                  shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+                                  builder: (c) => SafeArea(
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        ListTile(
+                                          leading: const Icon(Icons.inventory_2_rounded, color: Color(0xFF0D47A1)),
+                                          title: const Text("Elegir de Producto Existente del Inventario"),
+                                          onTap: () {
+                                            Navigator.pop(c);
+                                            _mostrarDialogoSeleccionarProductoParaTarjeta((p) {
+                                              setModalState(() {
+                                                premioCtrl.text = p['nombre'].toString();
+                                                fotoTarjetaPath = p['foto_path']?.toString() ?? '';
+                                              });
+                                            });
+                                          },
+                                        ),
+                                        ListTile(
+                                          leading: const Icon(Icons.photo_library, color: Colors.orange),
+                                          title: const Text("Elegir de Galería"),
+                                          onTap: () async {
+                                            Navigator.pop(c);
+                                            final XFile? image = await ImagePicker().pickImage(source: ImageSource.gallery, maxWidth: 800, imageQuality: 80);
+                                            if (image != null) setModalState(() => fotoTarjetaPath = image.path);
+                                          },
+                                        ),
+                                        ListTile(
+                                          leading: const Icon(Icons.camera_alt, color: Colors.green),
+                                          title: const Text("Tomar Foto"),
+                                          onTap: () async {
+                                            Navigator.pop(c);
+                                            final XFile? image = await ImagePicker().pickImage(source: ImageSource.camera, maxWidth: 800, imageQuality: 80);
+                                            if (image != null) setModalState(() => fotoTarjetaPath = image.path);
+                                          },
+                                        ),
+                                        if (fotoTarjetaPath.isNotEmpty)
+                                          ListTile(
+                                            leading: const Icon(Icons.delete_forever, color: Colors.red),
+                                            title: const Text("Eliminar Imagen", style: TextStyle(color: Colors.red)),
+                                            onTap: () {
+                                              setModalState(() => fotoTarjetaPath = '');
+                                              Navigator.pop(c);
+                                            },
+                                          ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                              child: Container(
+                                width: 90,
+                                height: 90,
+                                decoration: BoxDecoration(
+                                  color: isOscuro ? Colors.white10 : Colors.grey.shade100,
+                                  borderRadius: BorderRadius.circular(20),
+                                  border: Border.all(color: isOscuro ? Colors.cyanAccent.withOpacity(0.4) : const Color(0xFF0D47A1), width: 1.5),
+                                ),
+                                clipBehavior: Clip.antiAlias,
+                                child: fotoTarjetaPath.isEmpty
+                                    ? Column(
+                                        mainAxisAlignment: MainAxisAlignment.center,
+                                        children: [
+                                          Icon(Icons.add_a_photo_rounded, size: 28, color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)),
+                                          const SizedBox(height: 4),
+                                          Text("Foto Premio", style: TextStyle(fontSize: 10, color: isOscuro ? Colors.white70 : Colors.black54, fontWeight: FontWeight.bold)),
+                                        ],
+                                      )
+                                    : Stack(
+                                        fit: StackFit.expand,
+                                        children: [
+                                          _construirLogoNegocio(fotoTarjetaPath),
+                                          Positioned(
+                                            right: 4, bottom: 4,
+                                            child: Container(
+                                              padding: const EdgeInsets.all(4),
+                                              decoration: const BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
+                                              child: const Icon(Icons.edit, size: 12, color: Colors.white),
+                                            ),
+                                          )
+                                        ],
+                                      ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 14),
+
                           // 1. RECOMPENSA
-                          Text("RECOMPENSA O PREMIO", style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1), letterSpacing: 0.5)),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text("RECOMPENSA O PREMIO", style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1), letterSpacing: 0.5)),
+                              InkWell(
+                                onTap: () {
+                                  _mostrarDialogoSeleccionarProductoParaTarjeta((p) {
+                                    setModalState(() {
+                                      premioCtrl.text = p['nombre'].toString();
+                                      fotoTarjetaPath = p['foto_path']?.toString() ?? '';
+                                    });
+                                  });
+                                },
+                                child: Text("🛍️ Elegir de inventario", style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1))),
+                              )
+                            ],
+                          ),
                           const SizedBox(height: 6),
                           TextField(
                             controller: premioCtrl,
@@ -1385,12 +1561,15 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
                                     }
 
                                     Navigator.pop(ctx);
+
+                                    // ⚡ 1. ACTUALIZAR BASE DE DATOS LOCAL
                                     final db = await DBHelper.instance.database;
                                     Map<String, dynamic> tarjetaMap = {
                                       'titulo': premio,
                                       'meta_compras': meta,
                                       'premio_descripcion': premio,
                                       'monto_minimo': montoMin,
+                                      'foto_path': fotoTarjetaPath,
                                       'activa': tarjetaAEditar != null ? tarjetaAEditar['activa'] : 1,
                                       'ultima_modificacion': DateTime.now().toIso8601String(),
                                     };
@@ -1404,9 +1583,39 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
                                     } else {
                                       idTarjetaInsertada = tarjetaAEditar['id'];
                                       await db.update('tarjetas_fidelidad', tarjetaMap, where: 'id = ?', whereArgs: [idTarjetaInsertada]);
+                                    }
 
-                                      // 🔥 SI LA TARJETA FUE EDITADA Y CAMBIÓ LA META, REAJUSTAR PUNTOS A TODOS LOS CLIENTES
-                                      if (metaAntigua != meta) {
+                                    // ⚡ 2. ACTUALIZAR DOCUMENTO DE VENDEDOR EN LA NUBE PARA QUE NO SOBRESCRIBA LA META
+                                    final user = FirebaseAuth.instance.currentUser;
+                                    if (user != null && await ServicioNube.tieneInternet()) {
+                                      try {
+                                        await FirebaseFirestore.instance
+                                            .collection('usuarios')
+                                            .doc(user.uid)
+                                            .collection('mis_tarjetas_creadas')
+                                            .doc(idTarjetaInsertada.toString())
+                                            .set({
+                                          'tarjetaId': idTarjetaInsertada.toString(),
+                                          'titulo': premio,
+                                          'metaCompras': meta,
+                                          'premioDesc': premio,
+                                          'montoMinimo': montoMin,
+                                          'fotoPath': fotoTarjetaPath,
+                                          'logoPath': _logoPath,
+                                          'activa': tarjetaAEditar != null ? tarjetaAEditar['activa'] : 1,
+                                          'ultimaModificacion': FieldValue.serverTimestamp(),
+                                        }, SetOptions(merge: true));
+                                      } catch (e) {
+                                        debugPrint("Error actualizando tarjeta vendedor en nube: $e");
+                                      }
+                                    }
+
+                                    // ⚡ 3. ACTUALIZAR PANTALLA LOCAL DE INMEDIATO (AMBAS SECCIONES MOSTRARÁN LA NUEVA META)
+                                    _cargarDatosBD();
+
+                                    // ⚡ 4. TAREAS DE PROPAGACIÓN MASIVA A CLIENTES Y FOTO EN SEGUNDO PLANO
+                                    Future.microtask(() async {
+                                      if (tarjetaAEditar != null && metaAntigua != meta) {
                                         await _ajustarPuntosClientesPorNuevaMeta(
                                           tarjetaId: idTarjetaInsertada,
                                           metaAntigua: metaAntigua,
@@ -1415,43 +1624,61 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
                                           premioDesc: premio,
                                         );
                                       }
-                                    }
 
-                                    final user = FirebaseAuth.instance.currentUser;
-                                    if (user != null) {
-                                      Map<String, dynamic> datosNube = {
-                                        'tarjetaId': idTarjetaInsertada.toString(),
-                                        'titulo': premio,
-                                        'metaCompras': meta,
-                                        'premioDesc': premio,
-                                        'montoMinimo': montoMin,
-                                        'activa': tarjetaAEditar != null ? tarjetaAEditar['activa'] : 1,
-                                      };
-
-                                      if (await ServicioNube.tieneInternet()) {
-                                        await FirebaseFirestore.instance
-                                            .collection('usuarios')
-                                            .doc(user.uid)
-                                            .collection('mis_tarjetas_creadas')
-                                            .doc(idTarjetaInsertada.toString())
-                                            .set({
-                                          ...datosNube,
-                                          'ultimaModificacion': FieldValue.serverTimestamp(),
-                                        }, SetOptions(merge: true));
-                                      } else {
-                                        await db.insert('operaciones_pendientes', {
-                                          'tabla': 'mis_tarjetas_creadas',
-                                          'operacion': 'set',
-                                          'doc_id': idTarjetaInsertada.toString(),
-                                          'datos_json': jsonEncode(datosNube),
-                                          'fecha_creacion': DateTime.now().toIso8601String(),
-                                        }, conflictAlgorithm: ConflictAlgorithm.replace);
+                                      String fotoNubeUrl = fotoTarjetaPath;
+                                      if (_esPremium && fotoTarjetaPath.isNotEmpty && !fotoTarjetaPath.startsWith('http')) {
+                                        String urlSubida = await ServicioNube.subirImagenACloudinary(fotoTarjetaPath);
+                                        if (urlSubida.isNotEmpty) {
+                                          fotoNubeUrl = urlSubida;
+                                          await db.update('tarjetas_fidelidad', {'foto_path': fotoNubeUrl}, where: 'id = ?', whereArgs: [idTarjetaInsertada]);
+                                        }
                                       }
 
-                                      await ServicioNube.respaldarDatosPrivadosRTDB();
-                                    }
+                                      if (user != null && await ServicioNube.tieneInternet()) {
+                                        try {
+                                          final clientesSnap = await FirebaseFirestore.instance
+                                              .collection('usuarios')
+                                              .doc(user.uid)
+                                              .collection('mis_tarjetas_creadas')
+                                              .doc(idTarjetaInsertada.toString())
+                                              .collection('clientes')
+                                              .get();
 
-                                    _cargarDatosBD();
+                                          WriteBatch batchPropagacion = FirebaseFirestore.instance.batch();
+
+                                          for (var cDoc in clientesSnap.docs) {
+                                            var cData = cDoc.data();
+                                            String cUid = cData['clientUid']?.toString() ?? cDoc.id;
+                                            String cLocId = cData['clienteLocalId']?.toString() ?? cDoc.id;
+                                            String targetUid = cUid.isNotEmpty ? cUid : user.uid;
+                                            String docTarget = (targetUid == user.uid && cLocId.isNotEmpty)
+                                                ? "${user.uid}_${idTarjetaInsertada}_$cLocId"
+                                                : "${user.uid}_$idTarjetaInsertada";
+
+                                            DocumentReference docRefCliente = FirebaseFirestore.instance
+                                                .collection('usuarios')
+                                                .doc(targetUid)
+                                                .collection('tarjetas_acumuladas')
+                                                .doc(docTarget);
+
+                                            batchPropagacion.set(docRefCliente, {
+                                              'tarjetaTitulo': premio,
+                                              'premioDesc': premio,
+                                              'metaCompras': meta,
+                                              'montoMinimo': montoMin,
+                                              'logoPath': _logoPath,
+                                              'fotoPath': fotoNubeUrl,
+                                              'ultimaModificacion': FieldValue.serverTimestamp(),
+                                            }, SetOptions(merge: true));
+                                          }
+
+                                          await batchPropagacion.commit();
+                                        } catch (e) {
+                                          debugPrint("Error propagando cambios a clientes: $e");
+                                        }
+                                        await ServicioNube.respaldarDatosPrivadosRTDB();
+                                      }
+                                    });
                                   },
                                 ),
                               ),
@@ -1524,12 +1751,17 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
     }
 
     final clientesDB = await db.query('clientes');
-    final pedidosDB = await db.rawQuery("SELECT DISTINCT cliente_nombre_snapshot as nombre, cliente_id as id FROM pedidos WHERE cliente_nombre_snapshot IS NOT NULL AND cliente_nombre_snapshot != ''");
     final puntosLocal = await db.query('puntos_clientes', where: 'tarjeta_id = ?', whereArgs: [tarjetaData['id']]);
+
+    // IDs de clientes activos en la base de datos
+    Set<int> idsClientesActivos = clientesDB.map((c) => c['id'] as int).toSet();
 
     Map<int, int> mapaPuntosLocal = {};
     for (var p in puntosLocal) {
-      mapaPuntosLocal[p['cliente_id'] as int] = p['puntos_actuales'] as int;
+      int cId = p['cliente_id'] as int;
+      if (idsClientesActivos.contains(cId)) {
+        mapaPuntosLocal[cId] = p['puntos_actuales'] as int;
+      }
     }
 
     Map<String, Map<String, dynamic>> clientesUnificados = {};
@@ -1546,20 +1778,6 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
           'nombre_completo': nom,
           'telefono': c['telefono'] ?? '',
           'puntos': pts,
-        };
-      }
-    }
-
-    for (var p in pedidosDB) {
-      String nom = (p['nombre'] ?? '').toString().trim();
-      String pIdKey = (p['id'] ?? DateTime.now().millisecondsSinceEpoch).toString();
-      if (nom.isNotEmpty && !clientesUnificados.values.any((item) => item['nombre_completo'].toString().toLowerCase() == nom.toLowerCase())) {
-        clientesUnificados[pIdKey] = {
-          'id': p['id'] ?? DateTime.now().millisecondsSinceEpoch,
-          'clienteLocalId': pIdKey,
-          'nombre_completo': nom,
-          'telefono': '',
-          'puntos': 0,
         };
       }
     }
@@ -1848,8 +2066,12 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
                               }
                               return;
                             }
+final user = FirebaseAuth.instance.currentUser;
+                            String fotoPremioEnviar = (tarjetaData['foto_path'] ?? tarjetaData['fotoPath'] ?? '').toString();
+                            if (!fotoPremioEnviar.startsWith('http')) {
+                              fotoPremioEnviar = _logoPath;
+                            }
 
-                            final user = FirebaseAuth.instance.currentUser;
                             String token = await ServicioFidelidad.crearTokenUnicoNube(
                               vendorUid: user?.uid ?? 'anon',
                               tarjetaId: tarjetaData['id'].toString(),
@@ -1857,6 +2079,7 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
                               clienteNombre: c['nombre_completo'],
                               nombreNegocio: _nombreNegocio,
                               logoPath: _logoPath,
+                              fotoPath: fotoPremioEnviar,
                               tarjetaTitulo: tarjetaData['titulo'] ?? 'Tarjeta Fidelidad',
                               metaCompras: tarjetaData['meta_compras'],
                               premioDesc: tarjetaData['premio_descripcion'] ?? '',
@@ -1989,8 +2212,8 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
         'a': 'Es un sistema digital de recompensas para premiarte o a tus clientes recurrentes. Cada vez que realices o que tus clientes realicen una compra o alcancen la meta establecida, recibirán sellos (puntos) hasta completar la tarjeta y ganar un premio.'
       },
       {
-        'q': '📱 ¿Cómo crear y dar puntos a un cliente con iPhone?',
-        'a': 'Para tus clientes con iPhone puedes: \n\n1. Cuando les completes un pedido y te salga la invitación a reclamar puntos, copiar el link tu mismo y pegalo en el boton de "Ingresar QR", así tu manejaras la tarjeta del cliente desde tu cuenta. \n\n2. Tocas en Dar un punto manualmente, copias el link y pégalo en el boton de "Ingresar QR", así tu manejaras la tarjeta del cliente desde tu cuenta.'
+        'q': '📱 ¿Cómo enviar o dar puntos a clientes con iPhone o PC?',
+        'a': '¡Es muy sencillo! Tus clientes con iPhone o PC no necesitan instalar ninguna aplicación:\n\n1. Envíales su enlace por WhatsApp (se genera automáticamente al completar un pedido o al presionar "Dar Punto").\n\n2. Reclamo Web Instantáneo: Al abrir el enlace en Safari o Chrome, verán el logo de tu negocio y la foto del premio, y podrán presionar "RECLAMAR MI PUNTO".\n\n3. Tarjeta Guardada: Podrán copiar y guardar el enlace de su tarjeta para revisar sus sellos acumulados cuando quieran desde el navegador de su teléfono.'
       },
       {
         'q': '💳 ¿Cómo crear una nueva Tarjeta de Regalo?',
@@ -2011,6 +2234,10 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
       {
         'q': '🏆 ¿Cómo reclama el cliente su premio?',
         'a': 'Cuando el cliente llega a la meta (ej: 5/5 sellos), en su app aparecerá el botón verde "RECLAMAR RECOMPENSA", el cual enviará un mensaje directo a tu WhatsApp configurado para entregarle el premio.'
+      },
+      {
+        'q': '😞 ¿Si mi cliente no tiene celular?',
+        'a': 'Para tus clientes que no tienen celular puedes: \n\n1. Cuando les completes un pedido y te salga la invitación a reclamar puntos, copiar el link tu mismo y pegalo en el boton de "Ingresar QR", así tu manejaras la tarjeta del cliente desde tu cuenta. \n\n2. Tocas en Dar un punto manualmente, copias el link y pégalo en el boton de "Ingresar QR", así tu manejaras la tarjeta del cliente desde tu cuenta.'
       },
     ];
 
@@ -2294,6 +2521,79 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
     );
   }
 
+  void _mostrarDialogoSeleccionarProductoParaTarjeta(Function(Map<String, dynamic>) onSeleccionado) async {
+    final db = await DBHelper.instance.database;
+    final prods = await db.query('productos', where: 'activo = 1', orderBy: 'nombre ASC');
+    if (!mounted) return;
+
+    String busqueda = "";
+    final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setStDialog) {
+          final filtrados = prods.where((p) => p['nombre'].toString().toLowerCase().contains(busqueda.toLowerCase())).toList();
+
+          return AlertDialog(
+            backgroundColor: Theme.of(context).cardColor,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+            title: const Text("Seleccionar Producto del Inventario", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            content: SizedBox(
+              width: double.maxFinite,
+              height: MediaQuery.of(context).size.height * 0.45,
+              child: Column(
+                children: [
+                  TextField(
+                    onChanged: (v) => setStDialog(() => busqueda = v),
+                    style: TextStyle(fontSize: 13, color: isOscuro ? Colors.white : Colors.black),
+                    decoration: InputDecoration(
+                      hintText: "Buscar producto...",
+                      prefixIcon: const Icon(Icons.search, size: 20),
+                      isDense: true,
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Expanded(
+                    child: filtrados.isEmpty
+                        ? const Center(child: Text("No se encontraron productos", style: TextStyle(color: Colors.grey, fontSize: 12)))
+                        : ListView.separated(
+                            itemCount: filtrados.length,
+                            separatorBuilder: (_, __) => const Divider(height: 1),
+                            itemBuilder: (context, i) {
+                              final p = filtrados[i];
+                              String fotoP = p['foto_path']?.toString() ?? "";
+                              return ListTile(
+                                dense: true,
+                                leading: Container(
+                                  width: 40, height: 40,
+                                  decoration: BoxDecoration(color: isOscuro ? Colors.white10 : Colors.grey.shade200, borderRadius: BorderRadius.circular(8)),
+                                  clipBehavior: Clip.antiAlias,
+                                  child: _construirLogoNegocio(fotoP),
+                                ),
+                                title: Text(p['nombre'].toString(), style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: isOscuro ? Colors.white : Colors.black87)),
+                                subtitle: Text("\$${(p['precio_venta'] as num).toStringAsFixed(0)}", style: const TextStyle(fontSize: 11, color: Colors.green, fontWeight: FontWeight.bold)),
+                                onTap: () {
+                                  Navigator.pop(ctx);
+                                  onSeleccionado(p);
+                                },
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("CANCELAR", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold))),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
@@ -2433,7 +2733,8 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
                         itemCount: tarjetasAMostrar.length,
                         itemBuilder: (ctx, i) {
                           var item = tarjetasAMostrar[i];
-                          String logo = item['logoPath'] ?? '';
+                          String logoNegocio = item['logoPath'] ?? _logoPath;
+                          String fotoPremio = item['fotoPath'] ?? item['foto_path'] ?? '';
                           String nomNegocio = item['nombreNegocio'] ?? 'Negocio';
                           String premio = item['premioDesc'] ?? 'Premio Especial';
                           int pts = ((item['puntosActuales'] ?? 0) as num).toInt();
@@ -2444,10 +2745,10 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
                           return Card(
                             color: Theme.of(context).cardColor,
                             margin: const EdgeInsets.only(bottom: 12),
-                            elevation: isOscuro ? 0 : 3,
+                            elevation: isOscuro ? 0 : 2,
                             shadowColor: Colors.black12,
                             shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(22),
+                              borderRadius: BorderRadius.circular(18),
                               side: BorderSide(
                                 color: metaAlcanzada 
                                     ? const Color(0xFF25D366) 
@@ -2455,150 +2756,220 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
                                 width: metaAlcanzada ? 2 : 1,
                               ),
                             ),
-                            child: Padding(
-                              padding: const EdgeInsets.all(14.0),
-                              child: Column(
-                                children: [
-                                  ListTile(
-                                    contentPadding: EdgeInsets.zero,
-                                    leading: CircleAvatar(
-                                      radius: 26,
-                                      backgroundColor: isOscuro ? Colors.white10 : Colors.grey.shade200,
-                                      child: _construirLogoNegocio(logo),
-                                    ),
-                                    title: Text(nomNegocio, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
-                                    subtitle: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(18),
+                              onTap: () => _mostrarAnimacionEstampadoX(item, pts),
+                              child: Padding(
+                                padding: const EdgeInsets.all(12.0),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    // 1. FILA SUPERIOR: LOGO, NOMBRE DEL NEGOCIO, SELLOS Y TRES PUNTOS
+                                    Row(
                                       children: [
-                                        const SizedBox(height: 4),
-                                        Builder(
-                                          builder: (context) {
-                                            double mMin = ((item['montoMinimo'] ?? 0) as num).toDouble();
-                                            String textoMonto = mMin > 0 ? " de \$${mMin.toInt()} o más" : "";
-                                            return Column(
-                                              crossAxisAlignment: CrossAxisAlignment.start,
-                                              children: [
-                                                Text("Por $meta compras$textoMonto obtienes $premio", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1))),
-                                                const SizedBox(height: 6),
-                                                Text(
-                                                  "👉 Toca aquí para ver tu tabla de sellos",
-                                                  style: TextStyle(
-                                                    fontSize: 11,
-                                                    fontWeight: FontWeight.w800,
-                                                    color: isOscuro ? Colors.orangeAccent : Colors.orange.shade900,
-                                                  ),
-                                                ),
-                                              ],
-                                            );
-                                          }
-                                        ),
-                                      ],
-                                    ),
-                                    trailing: PopupMenuButton<String>(
-                                      icon: const Icon(Icons.more_vert, size: 20, color: Colors.grey),
-                                      onSelected: (val) async {
-                                        if (val == 'delete') {
-                                          bool confirm = await showDialog(
-                                            context: context,
-                                            builder: (ctx) => AlertDialog(
-                                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                                              title: const Text("¿Eliminar Tarjeta?", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.redAccent, fontSize: 16)),
-                                              content: Text("¿Estás seguro de que deseas eliminar la tarjeta de \"$nomNegocio\"?"),
-                                              actions: [
-                                                TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("CANCELAR")),
-                                                ElevatedButton(
-                                                  style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
-                                                  onPressed: () => Navigator.pop(ctx, true),
-                                                  child: const Text("ELIMINAR", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                                                ),
-                                              ],
+                                        Container(
+                                          width: 38,
+                                          height: 38,
+                                          decoration: BoxDecoration(
+                                            color: isOscuro ? Colors.white10 : Colors.grey.shade200,
+                                            shape: BoxShape.circle,
+                                            border: Border.all(
+                                              color: metaAlcanzada 
+                                                  ? const Color(0xFF25D366) 
+                                                  : (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)),
+                                              width: 1.5,
                                             ),
-                                          ) ?? false;
+                                          ),
+                                          clipBehavior: Clip.antiAlias,
+                                          child: _construirLogoNegocio(logoNegocio),
+                                        ),
+                                        const SizedBox(width: 10),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                nomNegocio,
+                                                style: TextStyle(
+                                                  fontWeight: FontWeight.w900,
+                                                  fontSize: 14,
+                                                  color: isOscuro ? Colors.white : Colors.black87,
+                                                ),
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                              Text(
+                                                metaAlcanzada ? "¡COMPLETADO! 🎉" : "$pts de $meta sellos acumulados",
+                                                style: TextStyle(
+                                                  fontSize: 11,
+                                                  fontWeight: FontWeight.bold,
+                                                  color: metaAlcanzada 
+                                                      ? const Color(0xFF25D366) 
+                                                      : (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        PopupMenuButton<String>(
+                                          icon: const Icon(Icons.more_vert, size: 20, color: Colors.grey),
+                                          padding: EdgeInsets.zero,
+                                          constraints: const BoxConstraints(),
+                                          onSelected: (val) async {
+                                            if (val == 'delete') {
+                                              bool confirm = await showDialog(
+                                                context: context,
+                                                builder: (ctx) => AlertDialog(
+                                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                                                  title: const Text("¿Eliminar Tarjeta?", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.redAccent, fontSize: 16)),
+                                                  content: Text("¿Estás seguro de que deseas eliminar la tarjeta de \"$nomNegocio\"?"),
+                                                  actions: [
+                                                    TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("CANCELAR")),
+                                                    ElevatedButton(
+                                                      style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+                                                      onPressed: () => Navigator.pop(ctx, true),
+                                                      child: const Text("ELIMINAR", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ) ?? false;
 
-                                          if (!confirm) return;
+                                              if (!confirm) return;
 
-                                          // ⚡ Borrado visual inmediato
-                                          setState(() {
-                                            _misTarjetasComoCliente.removeWhere((x) => 
-                                              (x['docId'] != null && x['docId'] == item['docId']) ||
-                                              (x['vendorUid'] == item['vendorUid'] && x['tarjetaId'] == item['tarjetaId'])
-                                            );
-                                          });
+                                              setState(() {
+                                                _misTarjetasComoCliente.removeWhere((x) => 
+                                                  (x['docId'] != null && x['docId'] == item['docId']) ||
+                                                  (x['vendorUid'] == item['vendorUid'] && x['tarjetaId'] == item['tarjetaId'])
+                                                );
+                                              });
 
-                                          ServicioFidelidad.eliminarTarjetaAcumuladaCliente(
-                                            vendorUid: item['vendorUid'] ?? '',
-                                            tarjetaId: item['tarjetaId'] ?? 'general',
-                                            docId: item['docId'],
-                                            clienteLocalId: item['clienteLocalId']?.toString(),
-                                          ).then((_) {
-                                            if (mounted) _cargarDatosBD();
-                                          });
-                                        }
-                                      },
-                                      itemBuilder: (ctx) => [
-                                        const PopupMenuItem(
-                                          value: 'delete',
-                                          child: Row(children: [Icon(Icons.delete_outline, size: 16, color: Colors.red), SizedBox(width: 8), Text("Eliminar Tarjeta", style: TextStyle(color: Colors.red, fontSize: 13))]),
+                                              ServicioFidelidad.eliminarTarjetaAcumuladaCliente(
+                                                vendorUid: item['vendorUid'] ?? '',
+                                                tarjetaId: item['tarjetaId'] ?? 'general',
+                                                docId: item['docId'],
+                                                clienteLocalId: item['clienteLocalId']?.toString(),
+                                              ).then((_) {
+                                                if (mounted) _cargarDatosBD();
+                                              });
+                                            }
+                                          },
+                                          itemBuilder: (ctx) => [
+                                            const PopupMenuItem(
+                                              value: 'delete',
+                                              child: Row(children: [Icon(Icons.delete_outline, size: 16, color: Colors.red), SizedBox(width: 8), Text("Eliminar Tarjeta", style: TextStyle(color: Colors.red, fontSize: 13))]),
+                                            ),
+                                          ],
                                         ),
                                       ],
                                     ),
-                                    onTap: () => _mostrarAnimacionEstampadoX(item, pts),
-                                  ),
 
-                                  const SizedBox(height: 10),
+                                    const SizedBox(height: 10),
 
-                                  // BARRA DE PROGRESO VISUAL DE SELLOS
-                                  Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Row(
-                                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                    // 2. CAJA DE RECOMPENSA CON FOTO Y CONDICIÓN
+                                    Container(
+                                      padding: const EdgeInsets.all(8),
+                                      decoration: BoxDecoration(
+                                        color: isOscuro ? Colors.cyanAccent.withOpacity(0.08) : Colors.blue.shade50.withOpacity(0.7),
+                                        borderRadius: BorderRadius.circular(14),
+                                        border: Border.all(color: isOscuro ? Colors.cyanAccent.withOpacity(0.2) : Colors.blue.shade100),
+                                      ),
+                                      child: Row(
                                         children: [
-                                          Text("Progreso de Sellos", style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.grey.shade500)),
-                                          Text(
-                                            metaAlcanzada ? "¡COMPLETADO! 🎉" : "$pts de $meta sellos",
-                                            style: TextStyle(
-                                              fontSize: 11,
-                                              fontWeight: FontWeight.w900,
-                                              color: metaAlcanzada ? const Color(0xFF25D366) : (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)),
+                                          if (fotoPremio.isNotEmpty) ...[
+                                            Container(
+                                              width: 44,
+                                              height: 44,
+                                              decoration: BoxDecoration(
+                                                color: isOscuro ? Colors.white10 : Colors.grey.shade200,
+                                                borderRadius: BorderRadius.circular(10),
+                                              ),
+                                              clipBehavior: Clip.antiAlias,
+                                              child: _construirLogoNegocio(fotoPremio),
+                                            ),
+                                            const SizedBox(width: 10),
+                                          ],
+                                          Expanded(
+                                            child: Builder(
+                                              builder: (context) {
+                                                double mMin = ((item['montoMinimo'] ?? 0) as num).toDouble();
+                                                String textoMonto = mMin > 0 ? " de \$${mMin.toInt()} o más" : "";
+                                                return Text(
+                                                  "Por $meta compras$textoMonto obtienes $premio",
+                                                  style: TextStyle(
+                                                    fontSize: 11.5,
+                                                    fontWeight: FontWeight.bold,
+                                                    color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1),
+                                                    height: 1.25,
+                                                  ),
+                                                );
+                                              }
                                             ),
                                           ),
                                         ],
                                       ),
-                                      const SizedBox(height: 6),
-                                      ClipRRect(
-                                        borderRadius: BorderRadius.circular(10),
-                                        child: LinearProgressIndicator(
-                                          value: porcentaje,
-                                          minHeight: 8,
-                                          backgroundColor: isOscuro ? Colors.white10 : Colors.grey.shade200,
-                                          valueColor: AlwaysStoppedAnimation<Color>(
-                                            metaAlcanzada ? const Color(0xFF25D366) : (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)),
+                                    ),
+
+                                    const SizedBox(height: 10),
+
+                                    // 3. BARRA DE PROGRESO Y PORCENTAJE ABAJO
+                                    Column(
+                                      children: [
+                                        ClipRRect(
+                                          borderRadius: BorderRadius.circular(8),
+                                          child: LinearProgressIndicator(
+                                            value: porcentaje,
+                                            minHeight: 6,
+                                            backgroundColor: isOscuro ? Colors.white10 : Colors.grey.shade200,
+                                            valueColor: AlwaysStoppedAnimation<Color>(
+                                              metaAlcanzada ? const Color(0xFF25D366) : (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)),
+                                            ),
                                           ),
+                                        ),
+                                        const SizedBox(height: 4),
+                                        Row(
+                                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                          children: [
+                                            Text(
+                                              "Progreso de Sellos",
+                                              style: TextStyle(
+                                                fontSize: 10,
+                                                fontWeight: FontWeight.bold,
+                                                color: isOscuro ? Colors.white38 : Colors.grey.shade500,
+                                              ),
+                                            ),
+                                            Text(
+                                              "${(porcentaje * 100).toInt()}%",
+                                              style: TextStyle(
+                                                fontSize: 11,
+                                                fontWeight: FontWeight.w900,
+                                                color: metaAlcanzada ? const Color(0xFF25D366) : (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ],
+                                    ),
+
+                                    if (metaAlcanzada) ...[
+                                      const SizedBox(height: 10),
+                                      ElevatedButton.icon(
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: const Color(0xFF25D366),
+                                          foregroundColor: Colors.white,
+                                          minimumSize: const Size(double.infinity, 38),
+                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                          elevation: 2,
+                                        ),
+                                        onPressed: () => _reclamarRecompensaWhatsApp(item),
+                                        icon: const Icon(Icons.card_giftcard_rounded, size: 18),
+                                        label: const Text(
+                                          "🎁 ¡RECLAMAR RECOMPENSA!", 
+                                          style: TextStyle(fontWeight: FontWeight.w900, fontSize: 12, letterSpacing: 0.5)
                                         ),
                                       ),
                                     ],
-                                  ),
-
-                                  if (metaAlcanzada) ...[
-                                    const SizedBox(height: 14),
-                                    ElevatedButton.icon(
-                                      style: ElevatedButton.styleFrom(
-                                        backgroundColor: const Color(0xFF25D366),
-                                        foregroundColor: Colors.white,
-                                        minimumSize: const Size(double.infinity, 44),
-                                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                                        elevation: 3,
-                                      ),
-                                      onPressed: () => _reclamarRecompensaWhatsApp(item),
-                                      icon: const Icon(Icons.card_giftcard_rounded, size: 20),
-                                      label: const Text(
-                                        "🎁 ¡RECLAMAR RECOMPENSA!", 
-                                        style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13, letterSpacing: 0.5)
-                                      ),
-                                    ),
                                   ],
-                                ],
+                                ),
                               ),
                             ),
                           );
@@ -2727,26 +3098,28 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
                           children: [
                             Row(
                               children: [
-                                // ÍCONO CON GRADIENTE
+                                // FOTO DE REFERENCIA DEL PREMIO
                                 Container(
-                                  padding: const EdgeInsets.all(12),
+                                  width: 52,
+                                  height: 52,
                                   decoration: BoxDecoration(
-                                    gradient: LinearGradient(
-                                      colors: esActiva
-                                          ? [const Color(0xFF0D47A1), const Color(0xFF1976D2)]
-                                          : [Colors.grey.shade400, Colors.grey.shade600],
-                                    ),
+                                    color: isOscuro ? Colors.white10 : Colors.grey.shade200,
                                     borderRadius: BorderRadius.circular(16),
-                                    boxShadow: [
-                                      if (esActiva)
-                                        BoxShadow(
-                                          color: const Color(0xFF0D47A1).withOpacity(0.3),
-                                          blurRadius: 8,
-                                          offset: const Offset(0, 3),
-                                        )
-                                    ],
+                                    border: Border.all(
+                                      color: esActiva 
+                                          ? (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1))
+                                          : Colors.grey,
+                                      width: 1.5,
+                                    ),
                                   ),
-                                  child: const Icon(Icons.card_giftcard_rounded, color: Colors.white, size: 24),
+                                  clipBehavior: Clip.antiAlias,
+                                  child: _construirLogoNegocio(
+                                    (t['foto_path'] != null && t['foto_path'].toString().isNotEmpty)
+                                        ? t['foto_path'].toString()
+                                        : ((t['fotoPath'] != null && t['fotoPath'].toString().isNotEmpty)
+                                            ? t['fotoPath'].toString()
+                                            : '')
+                                  ),
                                 ),
                                 const SizedBox(width: 14),
                                 Expanded(
@@ -3088,6 +3461,591 @@ class _AnuncioNativoWidgetState extends State<AnuncioNativoWidget> {
             ),
           )
         ],
+      ),
+    );
+  }
+}
+
+// ============================================================
+// PANTALLA WEB DE RECLAMO Y VISTA PERMANENTE PARA IPHONE / PC
+// ============================================================
+class PantallaReclamarPuntoWeb extends StatefulWidget {
+  final String token;
+  final String? cardId;
+  const PantallaReclamarPuntoWeb({super.key, required this.token, this.cardId});
+
+  @override
+  State<PantallaReclamarPuntoWeb> createState() => _PantallaReclamarPuntoWebState();
+}
+
+class _PantallaReclamarPuntoWebState extends State<PantallaReclamarPuntoWeb> {
+  bool _cargando = true;
+  String _error = "";
+  Map<String, dynamic>? _cardData;
+  int _puntosTotales = 0;
+  int _meta = 10;
+  String _linkPermanente = "";
+
+  @override
+  void initState() {
+    super.initState();
+    _procesarEntradaWebUltraRapida();
+  }
+
+  Future<void> _procesarEntradaWebUltraRapida() async {
+    try {
+      final String uriStr = Uri.base.toString();
+      String? cardParam = widget.cardId ?? Uri.base.queryParameters['card'];
+      String? tokenParam = widget.token.isNotEmpty ? widget.token : Uri.base.queryParameters['token'];
+
+      if (cardParam == null && uriStr.contains('card=')) {
+        cardParam = uriStr.split('card=').last.split('&').first;
+      }
+      if (tokenParam == null && uriStr.contains('token=')) {
+        tokenParam = uriStr.split('token=').last.split('&').first;
+      }
+
+      // 1️⃣ CONSULTA DIRECTA DE TARJETA PERMANENTE (`card=...`)
+      if (cardParam != null && cardParam.isNotEmpty) {
+        try {
+          List<String> partes = cardParam.split('_');
+          if (partes.length >= 2) {
+            String vUid = partes[0];
+            String tId = partes[1];
+            String cDocId = partes.sublist(2).join('_');
+
+            // Obtener datos reales del negocio (Nombre y Logo) desde el perfil del vendedor
+            String realNomNegocio = "";
+            String realLogoNegocio = "";
+            try {
+              var vDoc = await FirebaseFirestore.instance.collection('usuarios').doc(vUid).get();
+              if (vDoc.exists && vDoc.data() != null) {
+                var vData = vDoc.data()!;
+                realNomNegocio = (vData['nombre_negocio'] ?? vData['nombreNegocio'] ?? vData['nombre'] ?? '').toString();
+                realLogoNegocio = (vData['logo_path'] ?? vData['logoPath'] ?? vData['logo_url'] ?? '').toString();
+              }
+            } catch (_) {}
+
+            var acumSnap = await FirebaseFirestore.instance
+                .collection('usuarios')
+                .doc(vUid)
+                .collection('tarjetas_acumuladas')
+                .doc(cardParam)
+                .get()
+                .timeout(const Duration(seconds: 3));
+
+            var cData = acumSnap.exists ? acumSnap.data() : null;
+
+            if (cData == null) {
+              var clientSnap = await FirebaseFirestore.instance
+                  .collection('usuarios')
+                  .doc(vUid)
+                  .collection('mis_tarjetas_creadas')
+                  .doc(tId)
+                  .collection('clientes')
+                  .doc(cDocId)
+                  .get()
+                  .timeout(const Duration(seconds: 2));
+
+              var tMetaSnap = await FirebaseFirestore.instance
+                  .collection('usuarios')
+                  .doc(vUid)
+                  .collection('mis_tarjetas_creadas')
+                  .doc(tId)
+                  .get()
+                  .timeout(const Duration(seconds: 2));
+
+              if (clientSnap.exists || tMetaSnap.exists) {
+                var clData = clientSnap.data() ?? {};
+                var tMeta = tMetaSnap.data() ?? {};
+                cData = {
+                  'vendorUid': vUid,
+                  'tarjetaId': tId,
+                  'nombreNegocio': realNomNegocio.isNotEmpty ? realNomNegocio : (tMeta['nombreNegocio'] ?? 'Negocio'),
+                  'logoPath': realLogoNegocio.isNotEmpty ? realLogoNegocio : (tMeta['logoPath'] ?? ''),
+                  'fotoPath': tMeta['fotoPath'] ?? tMeta['foto_path'] ?? '',
+                  'premioDesc': tMeta['premioDesc'] ?? tMeta['titulo'] ?? 'Premio',
+                  'metaCompras': ((tMeta['metaCompras'] ?? 10) as num).toInt(),
+                  'montoMinimo': ((tMeta['montoMinimo'] ?? 0) as num).toDouble(),
+                  'puntosActuales': ((clData['puntosActuales'] ?? 0) as num).toInt(),
+                };
+              }
+            } else {
+              if (realNomNegocio.isNotEmpty) cData['nombreNegocio'] = realNomNegocio;
+              if (realLogoNegocio.isNotEmpty) cData['logoPath'] = realLogoNegocio;
+            }
+
+            if (cData != null) {
+              setState(() {
+                _cardData = cData;
+                _meta = ((cData!['metaCompras'] ?? 10) as num).toInt();
+                _puntosTotales = ((cData['puntosActuales'] ?? 0) as num).toInt();
+                _linkPermanente = "https://boxi-catalogo.web.app/reclamar?card=$cardParam";
+                _cargando = false;
+              });
+              return;
+            }
+          }
+        } catch (e) {
+          debugPrint("Error leyendo card: $e");
+        }
+
+        setState(() {
+          _error = "Tarjeta no encontrada o enlace vencido.";
+          _cargando = false;
+        });
+        return;
+      }
+      // 2️⃣ RECLAMO ATÓMICO ULTRA RÁPIDO CON TOKEN (`token=...`) < 1 SEGUNDO
+      if (tokenParam != null && tokenParam.isNotEmpty) {
+        String tokenLimpio = tokenParam.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_]'), '');
+        final tokenSnap = await FirebaseFirestore.instance.collection('tokens_fidelidad').doc(tokenLimpio).get();
+
+        if (!tokenSnap.exists || tokenSnap.data() == null) {
+          setState(() {
+            _error = "El código o enlace no existe o ya fue reclamado.";
+            _cargando = false;
+          });
+          return;
+        }
+
+        final tData = tokenSnap.data()!;
+
+        // Validar expiración de 24 horas
+        if (tData.containsKey('expireAt') && tData['expireAt'] != null) {
+          Timestamp expireAt = tData['expireAt'];
+          if (expireAt.toDate().isBefore(DateTime.now())) {
+            await tokenSnap.reference.delete().catchError((_) {});
+            setState(() {
+              _error = "Este enlace ha caducado (duración máxima 24 horas).";
+              _cargando = false;
+            });
+            return;
+          }
+        }
+
+        String vendorUid = tData['vendorUid'] ?? '';
+        String tarjetaId = tData['tarjetaId'] ?? 'general';
+        String clienteLocalId = tData['clienteLocalId']?.toString() ?? '';
+        String clienteNombre = tData['clienteNombre']?.toString() ?? 'Cliente Web';
+
+        String clientDocId = clienteLocalId.isNotEmpty ? clienteLocalId : "1";
+        String cardKey = "${vendorUid}_${tarjetaId}_$clientDocId";
+
+        // ⚡ Leer la meta más reciente y datos actualizados directamente desde la tarjeta del vendedor
+        int meta = ((tData['metaCompras'] ?? 10) as num).toInt();
+        String premioDesc = tData['premioDesc'] ?? tData['tarjetaTitulo'] ?? 'Premio';
+        double montoMin = ((tData['montoMinimo'] ?? 0) as num).toDouble();
+        String logoPath = tData['logoPath'] ?? '';
+        String fotoPath = tData['fotoPath'] ?? tData['foto_path'] ?? '';
+        String nombreNegocio = tData['nombreNegocio'] ?? 'Negocio';
+
+        try {
+          var tMasterDoc = await FirebaseFirestore.instance
+              .collection('usuarios')
+              .doc(vendorUid)
+              .collection('mis_tarjetas_creadas')
+              .doc(tarjetaId)
+              .get();
+          if (tMasterDoc.exists && tMasterDoc.data() != null) {
+            Map<String, dynamic> mData = tMasterDoc.data() as Map<String, dynamic>;
+            meta = ((mData['metaCompras'] ?? meta) as num).toInt();
+            premioDesc = (mData['premioDesc'] ?? mData['titulo'] ?? premioDesc).toString();
+            montoMin = ((mData['montoMinimo'] ?? montoMin) as num).toDouble();
+            if ((mData['fotoPath'] ?? '').toString().isNotEmpty) fotoPath = mData['fotoPath'].toString();
+            if ((mData['logoPath'] ?? '').toString().isNotEmpty) logoPath = mData['logoPath'].toString();
+          }
+        } catch (_) {}
+
+        // ⚡ Leer los puntos acumulados reales del cliente desde sus datos guardados
+        DocumentReference clientRef = FirebaseFirestore.instance
+            .collection('usuarios')
+            .doc(vendorUid)
+            .collection('mis_tarjetas_creadas')
+            .doc(tarjetaId)
+            .collection('clientes')
+            .doc(clientDocId);
+
+        var clientSnap = await clientRef.get();
+        int ptsAntiguos = 0;
+        int completadas = 0;
+
+        if (clientSnap.exists && clientSnap.data() != null) {
+          Map<String, dynamic> clData = clientSnap.data() as Map<String, dynamic>;
+          ptsAntiguos = ((clData['puntosActuales'] ?? 0) as num).toInt();
+          completadas = ((clData['completadasTotales'] ?? 0) as num).toInt();
+        }
+
+        int ptsActuales = ptsAntiguos + 1;
+        if (ptsAntiguos >= meta) {
+          ptsActuales = 1;
+        } else if (ptsActuales >= meta) {
+          completadas++;
+        }
+
+        Map<String, dynamic> datosTarjetaCompleta = {
+          'vendorUid': vendorUid,
+          'tarjetaId': tarjetaId,
+          'clienteLocalId': clientDocId,
+          'clienteNombre': clienteNombre,
+          'nombreNegocio': nombreNegocio,
+          'logoPath': logoPath,
+          'fotoPath': fotoPath,
+          'tarjetaTitulo': premioDesc,
+          'premioDesc': premioDesc,
+          'metaCompras': meta,
+          'montoMinimo': montoMin,
+          'puntosActuales': ptsActuales,
+          'completadasTotales': completadas,
+          'ultimaModificacion': FieldValue.serverTimestamp(),
+        };
+
+        // 🚀 PROCESAMIENTO ATÓMICO EN UN SOLO LOTE (0 LAG)
+        WriteBatch batch = FirebaseFirestore.instance.batch();
+
+        batch.set(clientRef, {
+          'clienteLocalId': clientDocId,
+          'clienteNombre': clienteNombre,
+          'clienteTelefono': tData['clienteTelefono'] ?? '',
+          'puntosActuales': ptsActuales,
+          'completadasTotales': completadas,
+          'ultimaModificacion': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+
+        // Destruir token usado
+        batch.delete(tokenSnap.reference);
+
+        await batch.commit();
+
+        // Notificar al vendedor por FCM
+        ServicioFidelidad.notificarVendedorPuntoReclamado(
+          vendorUid: vendorUid,
+          nombreCliente: clienteNombre,
+          nombreNegocio: nombreNegocio,
+          metaAlcanzada: ptsActuales >= meta,
+          premioDesc: premioDesc,
+        );
+
+        setState(() {
+          _cardData = datosTarjetaCompleta;
+          _meta = meta;
+          _puntosTotales = ptsActuales;
+          _linkPermanente = "${Uri.base.origin}/reclamar?card=$cardKey";
+          _cargando = false;
+        });
+        return;
+      }
+
+      setState(() {
+        _error = "Enlace no válido.";
+        _cargando = false;
+      });
+    } catch (e) {
+      setState(() {
+        _error = "Error cargando la tarjeta: $e";
+        _cargando = false;
+      });
+    }
+  }
+
+  // 🟢 RECLAMAR RECOMPENSA VÍA WHATSAPP
+  Future<void> _reclamarRecompensaWhatsAppWeb() async {
+    if (_cardData == null) return;
+
+    String vendorUid = _cardData!['vendorUid'] ?? '';
+    String nomNegocio = _cardData!['nombreNegocio'] ?? 'Negocio';
+    String premio = _cardData!['premioDesc'] ?? 'Recompensa';
+    int meta = _meta;
+
+    String telefonoVendedor = "";
+
+    if (vendorUid.isNotEmpty) {
+      try {
+        final vDoc = await FirebaseFirestore.instance.collection('usuarios').doc(vendorUid).get();
+        if (vDoc.exists && vDoc.data() != null) {
+          telefonoVendedor = vDoc.data()?['whatsapp_admin'] ?? vDoc.data()?['telefono'] ?? '';
+        }
+      } catch (_) {}
+    }
+
+    if (telefonoVendedor.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("⚠️ El negocio aún no ha configurado un número de WhatsApp."), backgroundColor: Colors.orange)
+      );
+      return;
+    }
+
+    String numClean = telefonoVendedor.replaceAll(RegExp(r'\D'), '');
+    if (numClean.length == 10) numClean = "57$numClean";
+
+    String mensaje = "¡Hola *$nomNegocio*! 👋 Completé los *$meta puntos* de mi tarjeta de regalo para el premio: *$premio* 🎁.\n\n¿Cómo puedo reclamar mi recompensa? ¡Muchas gracias! 🙌";
+    String textEncoded = Uri.encodeComponent(mensaje);
+
+    Uri uriApp = Uri.parse("whatsapp://send?phone=$numClean&text=$textEncoded");
+    Uri uriWeb = Uri.parse("https://wa.me/$numClean?text=$textEncoded");
+
+    try {
+      if (await canLaunchUrl(uriApp)) {
+        await launchUrl(uriApp, mode: LaunchMode.externalApplication);
+      } else if (await canLaunchUrl(uriWeb)) {
+        await launchUrl(uriWeb, mode: LaunchMode.externalApplication);
+      } else {
+        await launchUrl(Uri.parse("https://api.whatsapp.com/send?phone=$numClean&text=$textEncoded"), mode: LaunchMode.externalApplication);
+      }
+    } catch (_) {
+      await launchUrl(uriWeb, mode: LaunchMode.externalApplication);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    String logoUrl = _cardData?['logoPath'] ?? '';
+    String fotoPremioUrl = _cardData?['fotoPath'] ?? _cardData?['foto_path'] ?? '';
+    String nomNegocio = _cardData?['nombreNegocio'] ?? 'Negocio';
+    String premio = _cardData?['premioDesc'] ?? 'Recompensa';
+    double mMin = ((_cardData?['montoMinimo'] ?? 0) as num).toDouble();
+    String textoMonto = mMin > 0 ? " de \$${mMin.toInt()} o más" : "";
+    bool metaAlcanzada = _puntosTotales >= _meta;
+    double porcentaje = _meta > 0 ? (_puntosTotales / _meta).clamp(0.0, 1.0) : 0.0;
+
+    return Scaffold(
+      backgroundColor: const Color(0xFF0A1628),
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(20),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 440),
+              child: Card(
+                color: const Color(0xFF132238),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(28),
+                  side: const BorderSide(color: Colors.white12),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(24.0),
+                  child: _cargando
+                      ? const Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            CircularProgressIndicator(color: Colors.cyanAccent),
+                            SizedBox(height: 15),
+                            Text("Sumando tu punto...", style: TextStyle(color: Colors.white70, fontSize: 13)),
+                          ],
+                        )
+                      : _error.isNotEmpty
+                          ? Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.error_outline_rounded, color: Colors.redAccent, size: 60),
+                                const SizedBox(height: 15),
+                                const Text("Enlace No Disponible", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18)),
+                                const SizedBox(height: 10),
+                                Text(_error, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white60, fontSize: 12)),
+                              ],
+                            )
+                          : Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                // 🏪 1. LOGO Y NOMBRE DEL NEGOCIO
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    CircleAvatar(
+                                      radius: 22,
+                                      backgroundColor: Colors.white10,
+                                      child: ClipOval(
+                                        child: Image.network(
+                                          logoUrl,
+                                          width: 44, height: 44, fit: BoxFit.cover,
+                                          errorBuilder: (_, __, ___) => const Icon(Icons.storefront_rounded, color: Colors.cyanAccent, size: 24),
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Flexible(
+                                      child: Text(
+                                        nomNegocio,
+                                        style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 18, color: Colors.white),
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 16),
+
+                                // 🎁 2. CAJA DE RECOMPENSA CON FOTO DEL PREMIO
+                                Container(
+                                  padding: const EdgeInsets.all(12),
+                                  decoration: BoxDecoration(
+                                    color: Colors.cyanAccent.withOpacity(0.08),
+                                    borderRadius: BorderRadius.circular(16),
+                                    border: Border.all(color: Colors.cyanAccent.withOpacity(0.3)),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      if (fotoPremioUrl.isNotEmpty && fotoPremioUrl.startsWith('http')) ...[
+                                        Container(
+                                          width: 52,
+                                          height: 52,
+                                          decoration: BoxDecoration(
+                                            color: Colors.white10,
+                                            borderRadius: BorderRadius.circular(12),
+                                          ),
+                                          clipBehavior: Clip.antiAlias,
+                                          child: Image.network(
+                                            fotoPremioUrl,
+                                            fit: BoxFit.cover,
+                                            errorBuilder: (_, __, ___) => const Icon(Icons.card_giftcard, color: Colors.cyanAccent, size: 28),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 12),
+                                      ],
+                                      Expanded(
+                                        child: Text(
+                                          "Por $_meta compras$textoMonto obtienes $premio",
+                                          style: const TextStyle(color: Colors.cyanAccent, fontSize: 12, fontWeight: FontWeight.bold, height: 1.25),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(height: 20),
+
+                                // 🏆 3. ESTAMPAS Y PROGRESO
+                                Text(
+                                  metaAlcanzada ? "🎉 ¡TARJETA COMPLETADA!" : "🎉 ¡Punto Reclamado con Éxito!",
+                                  style: TextStyle(color: metaAlcanzada ? Colors.greenAccent : Colors.cyanAccent, fontWeight: FontWeight.w900, fontSize: 15),
+                                ),
+                                const SizedBox(height: 15),
+
+                                GridView.builder(
+                                  shrinkWrap: true,
+                                  physics: const NeverScrollableScrollPhysics(),
+                                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                                    crossAxisCount: 5,
+                                    crossAxisSpacing: 8,
+                                    mainAxisSpacing: 8,
+                                  ),
+                                  itemCount: _meta,
+                                  itemBuilder: (ctx, idx) {
+                                    bool tieneSello = (idx + 1) <= _puntosTotales;
+                                    return Container(
+                                      decoration: BoxDecoration(
+                                        color: tieneSello ? Colors.green.withOpacity(0.2) : Colors.white10,
+                                        borderRadius: BorderRadius.circular(12),
+                                        border: Border.all(color: tieneSello ? Colors.greenAccent : Colors.white24),
+                                      ),
+                                      child: Center(
+                                        child: tieneSello
+                                            ? const Text("❌", style: TextStyle(fontSize: 20))
+                                            : Text("${idx + 1}", style: const TextStyle(color: Colors.white38, fontSize: 11)),
+                                      ),
+                                    );
+                                  },
+                                ),
+
+                                const SizedBox(height: 15),
+
+                                // BARRA DE PROGRESO Y PORCENTAJE
+                                Column(
+                                  children: [
+                                    ClipRRect(
+                                      borderRadius: BorderRadius.circular(8),
+                                      child: LinearProgressIndicator(
+                                        value: porcentaje,
+                                        minHeight: 6,
+                                        backgroundColor: Colors.white10,
+                                        valueColor: AlwaysStoppedAnimation<Color>(
+                                          metaAlcanzada ? Colors.greenAccent : Colors.cyanAccent,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        const Text("Progreso de Sellos", style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.white38)),
+                                        Text("${(porcentaje * 100).toInt()}%", style: TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: metaAlcanzada ? Colors.greenAccent : Colors.cyanAccent)),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+
+                                const SizedBox(height: 15),
+
+                                // 🟢 4. BOTÓN VERDE RECLAMAR RECOMPENSA (APARECE AL LLEGAR A LA META 5/5)
+                                if (metaAlcanzada) ...[
+                                  ElevatedButton.icon(
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: const Color(0xFF25D366),
+                                      foregroundColor: Colors.white,
+                                      minimumSize: const Size(double.infinity, 50),
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                                      elevation: 3,
+                                    ),
+                                    icon: const Icon(Icons.card_giftcard_rounded, size: 22),
+                                    label: const Text(
+                                      "🎁 ¡RECLAMAR RECOMPENSA VÍA WHATSAPP!", 
+                                      style: TextStyle(fontWeight: FontWeight.w900, fontSize: 12, letterSpacing: 0.5)
+                                    ),
+                                    onPressed: _reclamarRecompensaWhatsAppWeb,
+                                  ),
+                                  const SizedBox(height: 15),
+                                ],
+
+                                // 📋 5. BOTÓN COPIAR ENLACE PERMANENTE (NUNCA MÁS COPIA TOKEN=)
+                                Container(
+                                  padding: const EdgeInsets.all(12),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white.withOpacity(0.05),
+                                    borderRadius: BorderRadius.circular(16),
+                                    border: Border.all(color: Colors.white10),
+                                  ),
+                                  child: Column(
+                                    children: [
+                                      const Text(
+                                        "📌 Guarda este enlace en tus notas para ver tus sellos cuando quieras:",
+                                        textAlign: TextAlign.center,
+                                        style: TextStyle(color: Colors.white70, fontSize: 11),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      ElevatedButton.icon(
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: Colors.cyanAccent,
+                                          foregroundColor: Colors.black,
+                                          minimumSize: const Size(double.infinity, 40),
+                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                        ),
+                                        icon: const Icon(Icons.copy_rounded, size: 16),
+                                        label: const Text("📋 COPIAR MI ENLACE DE TARJETA", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 11)),
+                                        onPressed: () {
+                                          String vUid = _cardData?['vendorUid'] ?? '';
+                                          String tId = _cardData?['tarjetaId'] ?? 'general';
+                                          String cId = _cardData?['clienteLocalId']?.toString() ?? '1';
+                                          
+                                          // Construye la URL de la tarjeta permanente directamente sin depender de token
+                                          String linkPermanenteReal = "https://boxi-catalogo.web.app/reclamar?card=${vUid}_${tId}_$cId";
+                                          if (_linkPermanente.isNotEmpty && _linkPermanente.contains("card=")) {
+                                            linkPermanenteReal = _linkPermanente;
+                                          }
+
+                                          Clipboard.setData(ClipboardData(text: linkPermanenteReal));
+                                          ScaffoldMessenger.of(context).showSnackBar(
+                                            const SnackBar(content: Text("Enlace permanente de la tarjeta copiado 📋"), backgroundColor: Colors.green),
+                                          );
+                                        },
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

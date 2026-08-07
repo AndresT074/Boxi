@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ui' as ui; 
+import 'servicio_fidelidad.dart';  
 import 'package:path_provider/path_provider.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -75,21 +76,6 @@ class ServicioNube {
   }
 
   // ─────────────────────────────────────────────────────────────
-  //  Marcar timestamp de modificación en doc raíz
-  // ─────────────────────────────────────────────────────────────
-  static Future<void> _marcarModificacion(String campo) async {
-    if (_uid == null) return;
-    try {
-      await _db.collection('usuarios').doc(_uid).set(
-        {campo: FieldValue.serverTimestamp()},
-        SetOptions(merge: true),
-      );
-    } catch (e) {
-      debugPrint('Error marcando modificación ($campo): $e');
-    }
-  }
-
-  // ─────────────────────────────────────────────────────────────
   //  COLA OFFLINE
   // ─────────────────────────────────────────────────────────────
   static Future<void> _encolarOperacion({
@@ -122,7 +108,20 @@ class ServicioNube {
   static Future<void> procesarColaOffline() async {
     if (_uid == null) return;
     if (!await tieneInternet()) return;
-
+    // Limpieza de cola acumulada antigua para evitar sobreescrituras desfasadas
+    try {
+      final dbLocal = await DBHelper.instance.database;
+      final pendientes = await dbLocal.query('operaciones_pendientes');
+      if (pendientes.isNotEmpty) {
+        await respaldarDatosPrivadosRTDB();
+        await compilarYSubirCatalogoRTDB();
+        await dbLocal.delete('operaciones_pendientes');
+        debugPrint('🧹 Cola offline procesada y sincronizada directamente con RTDB.');
+        return;
+      }
+    } catch (e) {
+      debugPrint('Error limpiando cola offline: $e');
+    }
     try {
       final dbLocal = await DBHelper.instance.database;
       final pendientes = await dbLocal.query(
@@ -212,45 +211,14 @@ class ServicioNube {
       ..remove('ultima_modificacion')
       ..remove('eliminado');
 
-    bool escrituraFirestoreExitosa = false;
-
     if (await tieneInternet()) {
       try {
-        final WriteBatch batch = _db.batch();
-
-        batch.set(
-          _db
-              .collection('usuarios')
-              .doc(_uid)
-              .collection(tabla)
-              .doc(docId),
-          {
-            ...datosLimpios,
-            'ultima_modificacion': FieldValue.serverTimestamp(),
-          },
-          SetOptions(merge: true),
-        );
-
-        String campoMod = '';
-        if (tabla == 'productos' || tabla == 'fotos_variantes') {
-          campoMod = 'ultima_mod_productos';
-        } else if (tabla == 'pedidos' || tabla == 'detalle_pedidos') {
-          campoMod = 'ultima_mod_pedidos';
-        } else if (tabla == 'ajustes_capital') {
-          campoMod = 'ultima_mod_ajustes';
-        } else if (tabla == 'categorias') { // 🔥 AÑADIDO PARA CATEGORÍAS
-          campoMod = 'ultima_mod_categorias';
-        }
-
-        if (campoMod.isNotEmpty) {
-          batch.update(_db.collection('usuarios').doc(_uid!), {
-            campoMod: FieldValue.serverTimestamp(),
-          });
-        }
-        await batch.commit();
-        escrituraFirestoreExitosa = true;
-
+        // Para las tablas operativas, la fuente primaria en la nube es RTDB
         await respaldarDatosPrivadosRTDB();
+        if (tabla == 'productos' || tabla == 'categorias') {
+          await compilarYSubirCatalogoRTDB();
+        }
+
         try {
           DatabaseReference ref = FirebaseDatabase.instance.ref("sync_triggers/$_uid");
           await ref.update({tabla: ServerValue.timestamp});
@@ -263,33 +231,22 @@ class ServicioNube {
           whereArgs: [tabla, docId],
         );
       } catch (e) {
-        if (_esErrorCuota(e)) {
-          debugPrint('🚨 CUOTA FIRESTORE EXCEDIDA ($tabla/$docId). Guardando en local y RTDB...');
-        } else {
-          debugPrint('Error escribiendo en Firebase ($tabla/$docId): $e — encolando...');
-        }
+        debugPrint('Error actualizando RTDB ($tabla/$docId): $e — encolando...');
+        await _encolarOperacion(
+          tabla: tabla,
+          operacion: 'set',
+          docId: docId,
+          datos: datosLimpios,
+        );
       }
-    }
-
-    // SI NO HAY INTERNET O SI FIRESTORE FALLÓ POR CUOTA:
-    if (!escrituraFirestoreExitosa) {
+    } else {
+      // Si está offline, se encola para procesar en RTDB apenas vuelva el internet
       await _encolarOperacion(
         tabla: tabla,
         operacion: 'set',
         docId: docId,
         datos: datosLimpios,
       );
-
-      if (await tieneInternet()) {
-        try {
-          await respaldarDatosPrivadosRTDB();
-          if (tabla == 'productos' || tabla == 'categorias') {
-            await compilarYSubirCatalogoRTDB();
-          }
-          DatabaseReference ref = FirebaseDatabase.instance.ref("sync_triggers/$_uid");
-          await ref.update({tabla: ServerValue.timestamp});
-        } catch (_) {}
-      }
     }
   }
   
@@ -301,31 +258,14 @@ class ServicioNube {
     required String docId,
   }) async {
     if (_uid == null) return;
-    bool eliminacionFirestoreExitosa = false;
 
     if (await tieneInternet()) {
       try {
-        final WriteBatch batch = _db.batch();
-
-        batch.delete(
-          _db
-              .collection('usuarios')
-              .doc(_uid)
-              .collection(tabla)
-              .doc(docId),
-        );
-
-        String campo = (tabla == 'productos' || tabla == 'fotos_variantes')
-            ? 'ultima_mod_productos'
-            : 'ultima_mod_pedidos';
-        batch.update(_db.collection('usuarios').doc(_uid!), {
-          campo: FieldValue.serverTimestamp(),
-        });
-
-        await batch.commit();
-        eliminacionFirestoreExitosa = true;
-
         await respaldarDatosPrivadosRTDB();
+        if (tabla == 'productos' || tabla == 'categorias') {
+          await compilarYSubirCatalogoRTDB();
+        }
+
         try {
           DatabaseReference ref = FirebaseDatabase.instance.ref("sync_triggers/$_uid");
           await ref.update({tabla: ServerValue.timestamp});
@@ -338,29 +278,19 @@ class ServicioNube {
           whereArgs: [tabla, docId],
         );
       } catch (e) {
-        if (_esErrorCuota(e)) {
-          debugPrint('🚨 CUOTA FIRESTORE EXCEDIDA AL ELIMINAR ($tabla/$docId). Encolando e informando RTDB...');
-        } else {
-          debugPrint('Error eliminando de Firebase ($tabla/$docId): $e — encolando...');
-        }
+        debugPrint('Error eliminando en RTDB ($tabla/$docId): $e — encolando...');
+        await _encolarOperacion(
+          tabla: tabla,
+          operacion: 'delete',
+          docId: docId,
+        );
       }
-    }
-
-    if (!eliminacionFirestoreExitosa) {
+    } else {
       await _encolarOperacion(
         tabla: tabla,
         operacion: 'delete',
         docId: docId,
       );
-
-      if (await tieneInternet()) {
-        try {
-          await respaldarDatosPrivadosRTDB();
-          if (tabla == 'productos' || tabla == 'categorias') {
-            await compilarYSubirCatalogoRTDB();
-          }
-        } catch (_) {}
-      }
     }
   }
 
@@ -1004,62 +934,14 @@ class ServicioNube {
 
   static Future<void> sincronizarBaseDatosHaciaNube() async {
     if (_uid == null || !await tieneInternet()) return;
-    final dbLocal = await DBHelper.instance.database;
-
     try {
-      for (final tabla in _todasLasTablas) {
-        final registros = await dbLocal.query(tabla);
-        if (registros.isEmpty) continue;
-
-        WriteBatch batch = _db.batch();
-        int count = 0;
-
-        for (final row in registros) {
-          final Map<String, dynamic> data = Map.from(row)..remove('archivado');
-          data['ultima_modificacion'] = FieldValue.serverTimestamp();
-          batch.set(
-            _db
-                .collection('usuarios')
-                .doc(_uid)
-                .collection(tabla)
-                .doc(row['id'].toString()),
-            data,
-            SetOptions(merge: true),
-          );
-          
-          count++;
-          if (count == 400) {
-            await batch.commit();
-            batch = _db.batch();
-            count = 0;
-          }
-        }
-        if (count > 0) {
-          await batch.commit();
-        }
-      }
-
-      await _marcarModificacion('ultima_mod_productos');
-      await _marcarModificacion('ultima_mod_pedidos');
+      await respaldarDatosPrivadosRTDB();
+      await compilarYSubirCatalogoRTDB();
+      debugPrint("✅ Base de datos respaldada exitosamente hacia Realtime Database.");
     } catch (e) {
-      if (_esErrorCuota(e)) {
-        debugPrint("🚨 CUOTA EXCEDIDA al subir BD completa. Fallback a RTDB...");
-        await respaldarDatosPrivadosRTDB();
-        await compilarYSubirCatalogoRTDB();
-      }
+      debugPrint("Error respaldando base de datos a RTDB: $e");
     }
   }
-
-  static const List<String> _todasLasTablas = [
-    'vendedores',
-    'clientes',
-    'productos',
-    'pedidos',
-    'detalle_pedidos',
-    'reportes_guardados',
-    'ajustes_capital',
-    'categorias', 
-  ];
 
   static Future<void> descargarPerfilNube(String uid) async {
     if (!await tieneInternet()) return;
@@ -1810,8 +1692,22 @@ class ServicioNube {
   static Future<void> guardarClienteNube(Map<String, dynamic> c) async =>
       _escribir(tabla: 'clientes', docId: c['id'].toString(), datos: c);
 
-  static Future<void> eliminarClienteNube(int id) async =>
-      _eliminar(tabla: 'clientes', docId: id.toString());
+  static Future<void> eliminarClienteNube(int id) async {
+    await _eliminar(tabla: 'clientes', docId: id.toString());
+    try {
+      final dbLocal = await DBHelper.instance.database;
+      await dbLocal.delete('puntos_clientes', where: 'cliente_id = ?', whereArgs: [id]);
+      if (_uid != null) {
+        ServicioFidelidad.eliminarTarjetaAcumuladaCliente(
+          vendorUid: _uid!,
+          tarjetaId: 'general',
+          clienteLocalId: id.toString(),
+        );
+      }
+    } catch (e) {
+      debugPrint("Error eliminando tarjetas del cliente borrado: $e");
+    }
+  }
 
   static Future<void> guardarVendedorNube(Map<String, dynamic> v) async =>
       _escribir(tabla: 'vendedores', docId: v['id'].toString(), datos: v);
@@ -1902,47 +1798,10 @@ class ServicioNube {
     }
 
     try {
-      final viejos = await _db
-          .collection('usuarios')
-          .doc(_uid)
-          .collection('detalle_pedidos')
-          .where('pedido_id', isEqualTo: pedido['id'])
-          .get();
-
-      final WriteBatch batch = _db.batch();
-      for (final doc in viejos.docs) batch.delete(doc.reference);
-
-      void addToBatch(
-          String tabla, Map<String, dynamic> data, String docId) {
-        final limpio = Map<String, dynamic>.from(data)
-          ..remove('archivado');
-        limpio['ultima_modificacion'] = FieldValue.serverTimestamp();
-        batch.set(
-          _db
-              .collection('usuarios')
-              .doc(_uid)
-              .collection(tabla)
-              .doc(docId),
-          limpio,
-          SetOptions(merge: true),
-        );
-      }
-
-      addToBatch('clientes', cliente, cliente['id'].toString());
-      addToBatch('pedidos', pedido, pedido['id'].toString());
-      for (final d in detalles) {
-        addToBatch('detalle_pedidos', d, d['id'].toString());
-      }
-      for (final p in productos) {
-        addToBatch('productos', p, p['id'].toString());
-      }
-      DocumentReference userRef = _db.collection('usuarios').doc(_uid);
-      batch.update(userRef, {
-        'ultima_mod_productos': FieldValue.serverTimestamp(),
-        'ultima_mod_pedidos': FieldValue.serverTimestamp(),
-      });
-      await batch.commit();
+      // Directo a RTDB (Fuente de verdad en la nube)
       await respaldarDatosPrivadosRTDB();
+      await compilarYSubirCatalogoRTDB();
+
       try {
         DatabaseReference ref = FirebaseDatabase.instance.ref("sync_triggers/$_uid");
         await ref.update({
@@ -1952,15 +1811,8 @@ class ServicioNube {
           'productos': ServerValue.timestamp
         });
       } catch (_) {}
-
-      await _marcarModificacion('ultima_mod_productos');
-      await _marcarModificacion('ultima_mod_pedidos');
     } catch (e) {
-      if (_esErrorCuota(e)) {
-        debugPrint('🚨 CUOTA EXCEDIDA al guardar venta. Guardando offline y en RTDB...');
-      } else {
-        debugPrint('Error Batch Venta: $e — encolando...');
-      }
+      debugPrint('Error respaldando venta en RTDB: $e — encolando offline...');
       
       await _encolarOperacion(
         tabla: 'clientes',
@@ -1990,10 +1842,6 @@ class ServicioNube {
           datos: Map.from(p)..remove('archivado'),
         );
       }
-      
-      // Intentamos sincronizar a RTDB como vía de emergencia
-      await respaldarDatosPrivadosRTDB();
-      await compilarYSubirCatalogoRTDB();
     }
   }
 
