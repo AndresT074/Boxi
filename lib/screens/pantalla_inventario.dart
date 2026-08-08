@@ -14,6 +14,7 @@ import 'dart:async';
 import 'dart:ui' as ui;         
 import 'package:path_provider/path_provider.dart';
 import 'package:flutter/foundation.dart'; 
+import 'package:firebase_auth/firebase_auth.dart';
 
 String optimizarUrlCloudinary(String urlOriginal, {int width = 400}) {
   if (urlOriginal.isEmpty) return urlOriginal;
@@ -48,6 +49,7 @@ class _PantallaInventarioState extends State<PantallaInventario> {
   bool _estaCargando = true; 
   int _vistaModo = 1; 
   final _searchCtrl = TextEditingController();
+  StreamSubscription? _subSyncTriggers;
 
   @override
   void initState() {
@@ -65,6 +67,7 @@ class _PantallaInventarioState extends State<PantallaInventario> {
     await ServicioNube.migrarVariantesAlJSONyCarpetas();
     _cargar();
     _activarTiempoReal();
+    _escucharCambiosRTDB(); 
 
     // 🔥 NUEVA COMPROBACIÓN: Si es Premium, migrar imágenes locales/base64 a Cloudinary silenciosamente
     bool esPremium = prefs.getBool('es_premium') ?? false;
@@ -74,7 +77,6 @@ class _PantallaInventarioState extends State<PantallaInventario> {
       });
     }
   }
-
 
   Future<void> _repararFotosPesadas() async {
     final db = await DBHelper.instance.database;
@@ -106,6 +108,7 @@ class _PantallaInventarioState extends State<PantallaInventario> {
 
   @override
   void dispose() {
+    _subSyncTriggers?.cancel();
     _searchCtrl.dispose();
     super.dispose();
   }
@@ -113,6 +116,20 @@ class _PantallaInventarioState extends State<PantallaInventario> {
   Future<void> _activarTiempoReal() async {
     final prefs = await SharedPreferences.getInstance();
     if (mounted) setState(() => _esPremium = prefs.getBool('es_premium') ?? false);
+  }
+
+  void _escucharCambiosRTDB() {
+    if (_subSyncTriggers != null) return;
+    _subSyncTriggers = ServicioNube.escucharCambiosNubeRTDB(() async {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user != null) {
+        debugPrint("🔔 Inventario: Cambio detectado en RTDB. Sincronizando y recargando...");
+        await ServicioNube.sincronizarBorradosFisicos(user.uid, 'productos');
+        if (mounted) {
+          await _cargar(); // 🔥 Desaparece el producto borrado al instante en inventario
+        }
+      }
+    });
   }
 
   Future<void> _cargar() async {
@@ -135,9 +152,15 @@ class _PantallaInventarioState extends State<PantallaInventario> {
     if (!mounted) return;
     setState(() {
       _prods = data;
-      _filtrados = data;
       _esPremium = prefs.getBool('es_premium') ?? false;
       _estaCargando = false;
+      if (_searchCtrl.text.trim().isNotEmpty) {
+        _filtrados = _prods
+            .where((p) => p['nombre'].toLowerCase().contains(_searchCtrl.text.trim().toLowerCase()))
+            .toList();
+      } else {
+        _filtrados = data;
+      }
     });
   }
 
@@ -695,12 +718,14 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
             decoded.map((e) => Map<String, dynamic>.from(e))
           );
 
-          // 3. Limpiamos las opciones para que sean mapas reales también
+          // 3. Limpiamos las opciones inicializando siempre una lista real si viene nula
           for (var grupo in _gruposVariantes) {
-            if (grupo['opciones'] != null) {
+            if (grupo['opciones'] != null && grupo['opciones'] is List) {
               grupo['opciones'] = List<Map<String, dynamic>>.from(
-                grupo['opciones'].map((o) => Map<String, dynamic>.from(o))
+                (grupo['opciones'] as List).map((o) => Map<String, dynamic>.from(o))
               );
+            } else {
+              grupo['opciones'] = <Map<String, dynamic>>[]; // 👈 Evita que grupo['opciones'] sea null
             }
           }
         } catch (e) {
@@ -744,7 +769,8 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
   Future<void> _cargarFotosVariantes() async {
     if (_gruposVariantes.isEmpty) return;
     for (int gIdx = 0; gIdx < _gruposVariantes.length; gIdx++) {
-      var opciones = _gruposVariantes[gIdx]['opciones'] ?? [];
+      var grupo = _gruposVariantes[gIdx];
+      List opciones = (grupo['opciones'] is List) ? grupo['opciones'] : [];
       for (int oIdx = 0; oIdx < opciones.length; oIdx++) {
         String key = "${gIdx}_$oIdx";
         String b64 = opciones[oIdx]['foto_path'] ?? '';
@@ -799,9 +825,13 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
     if (_gruposVariantes.isNotEmpty) {
       int totalPositivos = 0;
       for (var grupo in _gruposVariantes) {
-        for (var opc in grupo['opciones']) {
-          int s = opc['stock'] as int;
-          if (s > 0) totalPositivos += s; 
+        if (grupo['opciones'] is List) {
+          for (var opc in grupo['opciones']) {
+            if (opc is Map) {
+              int s = (opc['stock'] as num?)?.toInt() ?? 0;
+              if (s > 0) totalPositivos += s; 
+            }
+          }
         }
       }
       _sC.text = totalPositivos.toString();
@@ -1307,7 +1337,7 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
               itemCount: _gruposVariantes.length,
               itemBuilder: (ctx, gIndex) {
                 var grupo = _gruposVariantes[gIndex];
-                List opciones = grupo['opciones'];
+                List opciones = (grupo['opciones'] is List) ? grupo['opciones'] : [];
 
                 return Card(
                   elevation: 2,
@@ -1610,7 +1640,8 @@ class _PantallaDetalleProductoState extends State<PantallaDetalleProducto> {
         }
 
         for (int gIdx = 0; gIdx < _gruposVariantes.length; gIdx++) {
-          var opciones = _gruposVariantes[gIdx]['opciones'] ?? [];
+          var grupo = _gruposVariantes[gIdx];
+          List opciones = (grupo != null && grupo['opciones'] is List) ? grupo['opciones'] : [];
           for (int oIdx = 0; oIdx < opciones.length; oIdx++) {
             String key = "${gIdx}_$oIdx";
             String fotoStr = opciones[oIdx]['foto_path'] ?? "";
@@ -1744,11 +1775,11 @@ class _PantallaDetalleProductoState extends State<PantallaDetalleProducto> {
                             ListView.separated(
                               shrinkWrap: true,
                               physics: const NeverScrollableScrollPhysics(),
-                              padding: EdgeInsets.zero, // 🔥 ELIMINA EL ESPACIO GIGANTE SUPERIOR
-                              itemCount: (g['opciones'] as List).length,
+                              padding: EdgeInsets.zero,
+                              itemCount: (g['opciones'] is List) ? (g['opciones'] as List).length : 0,
                               separatorBuilder: (c, i) => Divider(height: 1, color: isOscuro ? Colors.white10 : Colors.black12),
                               itemBuilder: (c, oIndex) {
-                                var o = g['opciones'][oIndex];
+                                var o = (g['opciones'] as List)[oIndex];
                                 int s = o['stock'] ?? 0;
 
                                 return ListTile(

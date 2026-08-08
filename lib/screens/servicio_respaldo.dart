@@ -187,18 +187,15 @@ class ServicioRespaldo {
           }
         }
       }
-
       // PEDIDOS
       if (await _tablaExiste(dbRespaldo, 'pedidos')) {
         List<Map<String, dynamic>> pedRes = await dbRespaldo.query('pedidos');
         for (var ped in pedRes) {
           int? newClienteId = cMap[ped['cliente_id']];
           if (newClienteId == null) continue;
-
           var existe = await dbActual.query('pedidos', 
               where: 'cliente_id = ? AND fecha_hora = ?', 
               whereArgs: [newClienteId, ped['fecha_hora']]);
-              
           if (existe.isEmpty) {
             Map<String, dynamic> pedNueva = Map.from(ped)..remove('id');
             pedNueva['cliente_id'] = newClienteId;
@@ -210,7 +207,6 @@ class ServicioRespaldo {
           }
         }
       }
-
       if (await _tablaExiste(dbRespaldo, 'detalle_pedidos')) {
         List<Map<String, dynamic>> detRes = await dbRespaldo.query('detalle_pedidos');
         for (var d in detRes) {
@@ -261,13 +257,33 @@ class ServicioRespaldo {
       await dbRespaldo.close();
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('migracion_definitiva_completa_v6', false);
-      await ServicioNube.migrarVariantesAlJSONyCarpetas();
 
-      onComplete(); // Refresca la UI de la pantalla principal
+      try {
+        await ServicioNube.migrarVariantesAlJSONyCarpetas();
+      } catch (e) {
+        debugPrint("⚠️ Error en migración de variantes: $e");
+      }
+
+      onComplete(); // Refresca la UI de la pantalla principal inmediatamente
+
       if (prefs.getBool('es_premium') ?? false) {
-        await ServicioNube.respaldarDatosPrivadosRTDB();
-        await ServicioNube.compilarYSubirCatalogoRTDB();
-        await ServicioNube.migrarTodoACloudinary();
+        try {
+          await ServicioNube.respaldarDatosPrivadosRTDB();
+        } catch (e) {
+          debugPrint("⚠️ Error respaldando datos privados: $e");
+        }
+
+        try {
+          await ServicioNube.compilarYSubirCatalogoRTDB();
+        } catch (e) {
+          debugPrint("⚠️ Error respaldando catálogo web: $e");
+        }
+
+        try {
+          await ServicioNube.migrarTodoACloudinary();
+        } catch (e) {
+          debugPrint("⚠️ Error migrando fotos a Cloudinary: $e");
+        }
       }
 
       if (context.mounted) {

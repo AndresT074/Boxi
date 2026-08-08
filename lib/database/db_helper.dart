@@ -20,7 +20,7 @@ class DBHelper {
     final path = join(dbPath, filePath);
     return await openDatabase(
       path,
-      version: 20,
+      version: 21,
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
     );
@@ -62,6 +62,7 @@ class DBHelper {
         meta_compras INTEGER NOT NULL,
         premio_descripcion TEXT,
         monto_minimo REAL DEFAULT 0,
+        foto_path TEXT,
         activa INTEGER DEFAULT 1,
         ultima_modificacion TEXT
       )
@@ -178,12 +179,15 @@ class DBHelper {
       } catch (_) {}
     }
 
-    // 🔥 MIGRACIÓN DE LA VERSIÓN 19 (Monto mínimo en tarjetas de fidelidad)
     if (oldVersion < 19) {
       try { await db.execute('ALTER TABLE tarjetas_fidelidad ADD COLUMN monto_minimo REAL DEFAULT 0'); } catch (_) {}
     }
 
     if (oldVersion < 20) {
+      try { await db.execute('ALTER TABLE tarjetas_fidelidad ADD COLUMN foto_path TEXT DEFAULT ""'); } catch (_) {}
+    }
+
+    if (oldVersion < 21) {
       try { await db.execute('ALTER TABLE tarjetas_fidelidad ADD COLUMN foto_path TEXT DEFAULT ""'); } catch (_) {}
     }
   }

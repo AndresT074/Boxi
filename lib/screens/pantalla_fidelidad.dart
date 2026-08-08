@@ -515,6 +515,74 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
     }
   }
 
+  // 🛍️ ABRIR EL CATÁLOGO WEB DEL VENDEDOR DESDE LA TARJETA DEL CLIENTE
+  void _abrirCatalogoWebNegocio(String vendorUid) async {
+    String cleanUid = vendorUid.trim();
+    if (cleanUid.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("⚠️ El negocio no tiene un catálogo web activo."))
+      );
+      return;
+    }
+
+    String urlStr = "https://boxi-catalogo.web.app/catalogo/?id=$cleanUid";
+    Uri uri = Uri.parse(urlStr);
+
+    try {
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      } else {
+        await launchUrl(Uri.parse("https://boxi-catalogo.web.app/?id=$cleanUid"), mode: LaunchMode.externalApplication);
+      }
+    } catch (e) {
+      debugPrint("Error abriendo catálogo web: $e");
+    }
+  }
+
+  // 🔍 AMPLIAR FOTO DEL PREMIO CON ZOOM INTERACTIVO
+  void _ampliarImagen(BuildContext context, String fotoSource, String titulo) {
+    if (fotoSource.trim().isEmpty) return;
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.all(10),
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            InteractiveViewer(
+              minScale: 0.5,
+              maxScale: 4.0,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(15),
+                child: Container(
+                  constraints: const BoxConstraints(maxHeight: 400),
+                  child: _construirLogoNegocio(fotoSource),
+                ),
+              ),
+            ),
+            Positioned(
+              top: 10, right: 10,
+              child: IconButton(
+                icon: const Icon(Icons.close, color: Colors.white, size: 32),
+                onPressed: () => Navigator.pop(ctx),
+              ),
+            ),
+            if (titulo.isNotEmpty)
+              Positioned(
+                bottom: 15,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(20)),
+                  child: Text(titulo, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13)),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _ejecutarReclamoDirecto(String token) {
     ServicioFidelidad.reclamarPuntoToken(
       token: token,
@@ -533,7 +601,21 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
       );
     }
 
-    // 🔥 BUSCAR RECURSO LOCAL SI ES UNA URL DE CLOUDINARY U HTTP
+    // 1. FORMATO BASE64
+    if (logoPath.length > 500) {
+      try {
+        return Image.memory(
+          base64Decode(logoPath.replaceAll(RegExp(r'\s+'), '')),
+          fit: BoxFit.cover,
+          gaplessPlayback: true,
+          errorBuilder: (_, __, ___) => const Center(
+            child: Icon(Icons.card_giftcard_rounded, color: Color(0xFF0D47A1), size: 26),
+          ),
+        );
+      } catch (_) {}
+    }
+
+    // 2. URL DE CLOUDINARY / HTTP
     if (logoPath.startsWith('http')) {
       String name = logoPath.split('/').last.split('?').first;
       if (!name.contains('.')) name += '.jpg';
@@ -557,7 +639,7 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
       );
     }
 
-    // Archivo local directo
+    // 3. ARCHIVO LOCAL EN EL DISCO
     try {
       File file = File(logoPath);
       if (file.existsSync() && file.lengthSync() > 0) {
@@ -1630,7 +1712,12 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
                                         String urlSubida = await ServicioNube.subirImagenACloudinary(fotoTarjetaPath);
                                         if (urlSubida.isNotEmpty) {
                                           fotoNubeUrl = urlSubida;
-                                          await db.update('tarjetas_fidelidad', {'foto_path': fotoNubeUrl}, where: 'id = ?', whereArgs: [idTarjetaInsertada]);
+                                          try {
+                                            final dbSegura = await DBHelper.instance.database;
+                                            await dbSegura.update('tarjetas_fidelidad', {'foto_path': fotoNubeUrl}, where: 'id = ?', whereArgs: [idTarjetaInsertada]);
+                                          } catch (e) {
+                                            debugPrint("Error actualizando foto en SQLite: $e");
+                                          }
                                         }
                                       }
 
@@ -2876,15 +2963,18 @@ final user = FirebaseAuth.instance.currentUser;
                                       child: Row(
                                         children: [
                                           if (fotoPremio.isNotEmpty) ...[
-                                            Container(
-                                              width: 44,
-                                              height: 44,
-                                              decoration: BoxDecoration(
-                                                color: isOscuro ? Colors.white10 : Colors.grey.shade200,
-                                                borderRadius: BorderRadius.circular(10),
+                                            InkWell(
+                                              onTap: () => _ampliarImagen(context, fotoPremio, premio),
+                                              child: Container(
+                                                width: 44,
+                                                height: 44,
+                                                decoration: BoxDecoration(
+                                                  color: isOscuro ? Colors.white10 : Colors.grey.shade200,
+                                                  borderRadius: BorderRadius.circular(10),
+                                                ),
+                                                clipBehavior: Clip.antiAlias,
+                                                child: _construirLogoNegocio(fotoPremio),
                                               ),
-                                              clipBehavior: Clip.antiAlias,
-                                              child: _construirLogoNegocio(fotoPremio),
                                             ),
                                             const SizedBox(width: 10),
                                           ],
@@ -2950,8 +3040,24 @@ final user = FirebaseAuth.instance.currentUser;
                                       ],
                                     ),
 
+                                    const SizedBox(height: 10),
+
+                                    // 🛍️ BOTÓN VER CATÁLOGO DEL NEGOCIO
+                                    OutlinedButton.icon(
+                                      style: OutlinedButton.styleFrom(
+                                        foregroundColor: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1),
+                                        backgroundColor: isOscuro ? Colors.cyanAccent.withOpacity(0.05) : Colors.blue.shade50.withOpacity(0.5),
+                                        minimumSize: const Size(double.infinity, 36),
+                                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                        side: BorderSide(color: isOscuro ? Colors.cyanAccent.withOpacity(0.4) : const Color(0xFF0D47A1).withOpacity(0.4)),
+                                      ),
+                                      onPressed: () => _abrirCatalogoWebNegocio(item['vendorUid']?.toString() ?? ''),
+                                      icon: const Icon(Icons.storefront_rounded, size: 16),
+                                      label: const Text("🛍️ Ver Catálogo del Negocio", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11)),
+                                    ),
+
                                     if (metaAlcanzada) ...[
-                                      const SizedBox(height: 10),
+                                      const SizedBox(height: 8),
                                       ElevatedButton.icon(
                                         style: ElevatedButton.styleFrom(
                                           backgroundColor: const Color(0xFF25D366),
@@ -3797,6 +3903,47 @@ class _PantallaReclamarPuntoWebState extends State<PantallaReclamarPuntoWeb> {
     }
   }
 
+  // 🔍 VISOR CON ZOOM PARA LA PÁGINA WEB
+  void _ampliarImagenWeb(BuildContext context, String url, String titulo) {
+    if (url.trim().isEmpty) return;
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.all(10),
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            InteractiveViewer(
+              minScale: 0.5,
+              maxScale: 4.0,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(15),
+                child: Image.network(url, fit: BoxFit.contain, errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, color: Colors.white, size: 50)),
+              ),
+            ),
+            Positioned(
+              top: 10, right: 10,
+              child: IconButton(
+                icon: const Icon(Icons.close, color: Colors.white, size: 32),
+                onPressed: () => Navigator.pop(ctx),
+              ),
+            ),
+            if (titulo.isNotEmpty)
+              Positioned(
+                bottom: 15,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(20)),
+                  child: Text(titulo, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13)),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     String logoUrl = _cardData?['logoPath'] ?? '';
@@ -3885,18 +4032,21 @@ class _PantallaReclamarPuntoWebState extends State<PantallaReclamarPuntoWeb> {
                                   child: Row(
                                     children: [
                                       if (fotoPremioUrl.isNotEmpty && fotoPremioUrl.startsWith('http')) ...[
-                                        Container(
-                                          width: 52,
-                                          height: 52,
-                                          decoration: BoxDecoration(
-                                            color: Colors.white10,
-                                            borderRadius: BorderRadius.circular(12),
-                                          ),
-                                          clipBehavior: Clip.antiAlias,
-                                          child: Image.network(
-                                            fotoPremioUrl,
-                                            fit: BoxFit.cover,
-                                            errorBuilder: (_, __, ___) => const Icon(Icons.card_giftcard, color: Colors.cyanAccent, size: 28),
+                                        InkWell(
+                                          onTap: () => _ampliarImagenWeb(context, fotoPremioUrl, premio),
+                                          child: Container(
+                                            width: 52,
+                                            height: 52,
+                                            decoration: BoxDecoration(
+                                              color: Colors.white10,
+                                              borderRadius: BorderRadius.circular(12),
+                                            ),
+                                            clipBehavior: Clip.antiAlias,
+                                            child: Image.network(
+                                              fotoPremioUrl,
+                                              fit: BoxFit.cover,
+                                              errorBuilder: (_, __, ___) => const Icon(Icons.card_giftcard, color: Colors.cyanAccent, size: 28),
+                                            ),
                                           ),
                                         ),
                                         const SizedBox(width: 12),
@@ -3993,6 +4143,31 @@ class _PantallaReclamarPuntoWebState extends State<PantallaReclamarPuntoWeb> {
                                   ),
                                   const SizedBox(height: 15),
                                 ],
+
+                                // 🛍️ 5. BOTÓN VER CATÁLOGO DEL NEGOCIO EN LA WEB
+                                ElevatedButton.icon(
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: const Color(0xFF0D47A1),
+                                    foregroundColor: Colors.white,
+                                    minimumSize: const Size(double.infinity, 45),
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                                    elevation: 2,
+                                  ),
+                                  icon: const Icon(Icons.storefront_rounded, size: 20),
+                                  label: const Text(
+                                    "🛍️ VER CATÁLOGO DEL NEGOCIO",
+                                    style: TextStyle(fontWeight: FontWeight.w900, fontSize: 12, letterSpacing: 0.5),
+                                  ),
+                                  onPressed: () {
+                                    String vUid = _cardData?['vendorUid']?.toString() ?? '';
+                                    if (vUid.isNotEmpty) {
+                                      String linkCatalogo = "https://boxi-catalogo.web.app/catalogo/?id=$vUid";
+                                      launchUrl(Uri.parse(linkCatalogo), mode: LaunchMode.externalApplication);
+                                    }
+                                  },
+                                ),
+
+                                const SizedBox(height: 15),
 
                                 // 📋 5. BOTÓN COPIAR ENLACE PERMANENTE (NUNCA MÁS COPIA TOKEN=)
                                 Container(

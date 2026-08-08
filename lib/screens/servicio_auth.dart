@@ -1,3 +1,6 @@
+import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -8,6 +11,63 @@ import 'package:google_sign_in/google_sign_in.dart';
 class ServicioAuth {
   static final FirebaseAuth _auth = FirebaseAuth.instance;
   static final FirebaseFirestore _db = FirebaseFirestore.instance;
+
+  // 🔥 NUEVO: Función para aniquilar cualquier rastro de caché local antes de iniciar sesión
+  static Future<void> limpiarCacheLocalCompleta() async {
+    try {
+      // 1. Limpiar caché de memoria RAM de imágenes
+      PaintingBinding.instance.imageCache.clear();
+      PaintingBinding.instance.imageCache.clearLiveImages();
+
+      // 2. Limpiar todas las tablas de la base de datos local SQLite
+      try {
+        await DBHelper.instance.limpiarTablas();
+      } catch (e) {
+        debugPrint("Error limpiando tablas SQLite: $e");
+      }
+
+      // 3. Limpiar SharedPreferences (claves de perfil, negocio y caché)
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('nombre_negocio');
+      await prefs.remove('logo_path');
+      await prefs.remove('whatsapp_admin');
+      await prefs.remove('whatsapp_admin_indicativo');
+      await prefs.remove('whatsapp_admin_numero');
+      await prefs.remove('es_premium');
+      await prefs.remove('rt_timestamp_privado');
+      await prefs.remove('rt_timestamp_catalogo');
+      await prefs.remove('perfil_descargado_fecha');
+      await prefs.remove('pending_fidelidad_token');
+
+      // 4. Limpiar fotos físicas de productos/variantes en la memoria del teléfono
+      try {
+        String pathBoxi = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
+        
+        Future<void> aniquilarCarpeta(Directory dir) async {
+          if (!await dir.exists()) return;
+          try {
+            final List<FileSystemEntity> entidades = dir.listSync(recursive: true);
+            for (FileSystemEntity entity in entidades) {
+              if (entity is File) {
+                try { await entity.delete(); } catch (_) {}
+              }
+            }
+            try { await dir.delete(recursive: true); } catch (_) {}
+          } catch (_) {}
+        }
+
+        await aniquilarCarpeta(Directory(pathBoxi));
+        final appDir = await getApplicationDocumentsDirectory();
+        await aniquilarCarpeta(Directory('${appDir.path}/Boxi'));
+      } catch (e) {
+        debugPrint("Error limpiando carpetas de fotos: $e");
+      }
+
+      debugPrint("🧹 Caché, fotos y SQLite eliminados por completo antes de cargar el usuario.");
+    } catch (e) {
+      debugPrint("Error en limpieza completa de caché: $e");
+    }
+  }
 
   static Future<User?> registrarUsuario(String email, String password) async {
     try {
@@ -39,6 +99,10 @@ class ServicioAuth {
         await _auth.signOut();
         throw "EMAIL_NOT_VERIFIED";
       }
+
+      // 🔥 LIMPIEZA ABSOLUTA DE CACHÉ Y SQLITE ANTES DE CARGAR LOS DATOS DEL NUEVO USUARIO
+      await limpiarCacheLocalCompleta();
+
       final String uid = userCredential.user!.uid;
       try {
         PackageInfo packageInfo = await PackageInfo.fromPlatform();
@@ -51,7 +115,7 @@ class ServicioAuth {
         await prefs.setString('ultimo_registro_firestore', DateTime.now().toIso8601String().substring(0, 10));
         await prefs.setString('version_app_registrada', versionActual);
       } catch (e) {
-        print("Error registrando versión en login: $e");
+        debugPrint("Error registrando versión en login: $e");
       }
       await actualizarEstadoPremiumNube(uid);
       return userCredential.user;
@@ -75,6 +139,9 @@ class ServicioAuth {
       User? user = userCredential.user;
 
       if (user != null) {
+        // 🔥 LIMPIEZA ABSOLUTA DE CACHÉ Y SQLITE ANTES DE CARGAR LOS DATOS DEL NUEVO USUARIO
+        await limpiarCacheLocalCompleta();
+
         final prefs = await SharedPreferences.getInstance();
         final docRef = _db.collection('usuarios').doc(user.uid);
         final docSnap = await docRef.get();
@@ -108,7 +175,7 @@ class ServicioAuth {
 
       return user;
     } catch (e) {
-      print("Error en Google Sign-In: $e");
+      debugPrint("Error en Google Sign-In: $e");
       return null;
     }
   }
@@ -132,16 +199,13 @@ class ServicioAuth {
         bool esPremiumNube = data['es_premium'] ?? false;
         await prefs.setBool('es_premium', esPremiumNube);
       }
-    } catch (e) { print(e); }
+    } catch (e) { debugPrint("Error actualizando estado premium: $e"); }
   }
-
-  // Busca el método cerrarSesion en servicio_auth.dart:
 
   static Future<void> cerrarSesion() async {
     final user = _auth.currentUser;
     final prefs = await SharedPreferences.getInstance();
 
-    // 🔥 Verificar en nube antes de decidir si limpiar datos
     bool esPremiumFinal = false;
     if (user != null) {
       try {
@@ -150,14 +214,16 @@ class ServicioAuth {
         esPremiumFinal = doc.data()?['es_premium'] ?? false;
         if (esPremiumFinal) await prefs.setBool('es_premium', true);
       } catch (e) {
-        // Sin internet: usamos lo que hay localmente
         esPremiumFinal = prefs.getBool('es_premium') ?? false;
       }
     }
 
-    // Solo limpiar datos si NO es premium
     if (!esPremiumFinal) {
-      await DBHelper.instance.limpiarTablas();
+      try {
+        await DBHelper.instance.limpiarTablas();
+      } catch (e) {
+        debugPrint("Error limpiando tablas al cerrar sesión: $e");
+      }
     }
 
     await prefs.setBool('es_premium', false);

@@ -77,6 +77,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   int _cantidadSolicitudes = 0;
   bool _primeraCargaSolicitudes = true;
   StreamSubscription? _subSolicitudes;
+  StreamSubscription? _subSyncTriggers; 
   String _logoPath = "";
   ImageProvider? _logoImageCached; 
   String _nombreNegocio = "MI NEGOCIO";
@@ -171,7 +172,8 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   @override
   void dispose() {
     _linkSubscription?.cancel();
-    // 🔥 Cancelar todos los timers primero para que no intenten mover los ScrollControllers
+    _subSolicitudes?.cancel();
+    _subSyncTriggers?.cancel();
     _timerReorden?.cancel();
     _autoScrollTimer?.cancel();
     _dragTimer?.cancel();
@@ -193,11 +195,13 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      ServicioNube.procesarColaOffline().then((_) {
-        _sincronizarSoloSiHayCambios();
+      ServicioNube.procesarColaOffline().then((_) async {
+        await _sincronizarSoloSiHayCambios();
+        if (mounted) {
+          await _cargar(); // 🔥 Recarga los productos editados offline en pantalla
+        }
       });
-      if (mounted) setState(() {});
-      debugPrint("▶️ App en primer plano, procesando cola offline y sincronizando...");
+      debugPrint("▶️ App en primer plano: Cola offline procesada e inventario recargado.");
     }
   }
   
@@ -349,49 +353,70 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   void _escucharSolicitudes() {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
-    if (_subSolicitudes != null) return;
     
-    _subSolicitudes = FirebaseFirestore.instance
-        .collection('solicitudes')
-        .where('adminId', isEqualTo: user.uid)
-        .where('estado', isEqualTo: 'pendiente')
-        .snapshots()
-        .listen(
-          (snap) {
-            final ahora = DateTime.now();
-            WriteBatch batch = FirebaseFirestore.instance.batch();
-            bool hayExpirados = false;
-            
-            if (!_primeraCargaSolicitudes) {
-              for (var change in snap.docChanges) {
-                if (change.type == DocumentChangeType.added) {
-                  SharedPreferences.getInstance().then((prefs) {
-                    prefs.setString('ultima_revision_pedidos',
-                        DateTime.now().toIso8601String());
-                  });
+    // 1. Escuchador de Pedidos Web desde Firestore
+    if (_subSolicitudes == null) {
+      _subSolicitudes = FirebaseFirestore.instance
+          .collection('solicitudes')
+          .where('adminId', isEqualTo: user.uid)
+          .where('estado', isEqualTo: 'pendiente')
+          .snapshots()
+          .listen(
+            (snap) {
+              final ahora = DateTime.now();
+              WriteBatch batch = FirebaseFirestore.instance.batch();
+              bool hayExpirados = false;
+              
+              if (!_primeraCargaSolicitudes) {
+                for (var change in snap.docChanges) {
+                  if (change.type == DocumentChangeType.added) {
+                    SharedPreferences.getInstance().then((prefs) {
+                      prefs.setString('ultima_revision_pedidos',
+                          DateTime.now().toIso8601String());
+                    });
+                  }
                 }
               }
-            }
-            _primeraCargaSolicitudes = false;
-            
-            for (var doc in snap.docs) {
-              final data = doc.data();
-              if (data.containsKey('expireAt')) {
-                Timestamp expireAt = data['expireAt'];
-                if (expireAt.toDate().isBefore(ahora)) {
-                  batch.delete(doc.reference);
-                  hayExpirados = true;
+              _primeraCargaSolicitudes = false;
+              
+              for (var doc in snap.docs) {
+                final data = doc.data();
+                if (data.containsKey('expireAt')) {
+                  Timestamp expireAt = data['expireAt'];
+                  if (expireAt.toDate().isBefore(ahora)) {
+                    batch.delete(doc.reference);
+                    hayExpirados = true;
+                  }
                 }
               }
-            }
-            if (hayExpirados) batch.commit();
-            if (mounted) {
-              setState(() => _cantidadSolicitudes = snap.docs.length);
-            }
-          },
-          onError: (e) =>
-              debugPrint("Error suscripción solicitudes web: $e"),
-        );
+              if (hayExpirados) batch.commit();
+              if (mounted) {
+                setState(() => _cantidadSolicitudes = snap.docs.length);
+              }
+            },
+            onError: (e) =>
+                debugPrint("Error suscripción solicitudes web: $e"),
+          );
+    }
+
+    // 2. 🔥 Escuchador en tiempo real directamente sobre el Catálogo Web
+    if (_subSyncTriggers == null) {
+      bool esPrimerEvento = true; // 👈 Ignora el primer evento de conexión inicial
+      _subSyncTriggers = ServicioNube.escucharCambiosNubeRTDB(() async {
+        if (esPrimerEvento) {
+          esPrimerEvento = false;
+          return; // Omite el disparo inicial duplicado al abrir la pantalla
+        }
+        final uid = FirebaseAuth.instance.currentUser?.uid;
+        if (uid != null) {
+          debugPrint("🔔 Cambio en catalogos_web detectado. Sincronizando borrados y recargando pantalla...");
+          await ServicioNube.sincronizarBorradosFisicos(uid, 'productos');
+          if (mounted) {
+            await _cargar();
+          }
+        }
+      });
+    }
   }
 
   Future<void> _initDeepLinks() async {

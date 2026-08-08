@@ -180,14 +180,21 @@ class ServicioNube {
       }
 
       // 🚀 Sincronizar datos privados y catálogo compilado a Realtime DB
-      await respaldarDatosPrivadosRTDB();
-      await compilarYSubirCatalogoRTDB();
+      await respaldarDatosPrivadosRTDB().timeout(const Duration(seconds: 5));
+      await compilarYSubirCatalogoRTDB().timeout(const Duration(seconds: 5));
 
       await dbLocal.delete('operaciones_pendientes');
 
       try {
-        DatabaseReference ref = FirebaseDatabase.instance.ref("sync_triggers/$_uid");
-        await ref.update({'sync': ServerValue.timestamp});
+        final uid = _auth.currentUser?.uid;
+        if (uid != null) {
+          DatabaseReference ref = FirebaseDatabase.instance.ref("sync_triggers/$uid");
+          await ref.update({
+            'sync': ServerValue.timestamp,
+            'productos': ServerValue.timestamp,
+            'catalogos_web': ServerValue.timestamp,
+          });
+        }
       } catch (_) {}
 
       debugPrint('✅ Cola offline procesada: fotos subidas a Cloudinary y sincronizado a Realtime DB.');
@@ -204,24 +211,27 @@ class ServicioNube {
     required String docId,
     required Map<String, dynamic> datos,
   }) async {
-    if (_uid == null) return;
+    final uidActual = _auth.currentUser?.uid;
+    if (uidActual == null) return;
 
     final Map<String, dynamic> datosLimpios = Map.from(datos)
       ..remove('archivado')
       ..remove('ultima_modificacion')
       ..remove('eliminado');
 
-    if (await tieneInternet()) {
+    bool hayRed = await tieneInternet();
+
+    if (hayRed) {
       try {
-        // Para las tablas operativas, la fuente primaria en la nube es RTDB
-        await respaldarDatosPrivadosRTDB();
-        if (tabla == 'productos' || tabla == 'categorias') {
-          await compilarYSubirCatalogoRTDB();
-        }
+        // 🔥 Timeout de 3 segundos: si la red falla o está lenta, pasa al catch y ENCOLA OFFLINE
+        await Future.wait([
+          respaldarDatosPrivadosRTDB(),
+          if (tabla == 'productos' || tabla == 'categorias') compilarYSubirCatalogoRTDB(),
+        ]).timeout(const Duration(seconds: 3));
 
         try {
-          DatabaseReference ref = FirebaseDatabase.instance.ref("sync_triggers/$_uid");
-          await ref.update({tabla: ServerValue.timestamp});
+          DatabaseReference ref = FirebaseDatabase.instance.ref("sync_triggers/$uidActual");
+          await ref.update({tabla: ServerValue.timestamp}).timeout(const Duration(seconds: 2));
         } catch (_) {}
 
         final dbLocal = await DBHelper.instance.database;
@@ -231,7 +241,7 @@ class ServicioNube {
           whereArgs: [tabla, docId],
         );
       } catch (e) {
-        debugPrint('Error actualizando RTDB ($tabla/$docId): $e — encolando...');
+        debugPrint('⏱️ Timeout o fallo de red en RTDB ($tabla/$docId) — Encolando OFFLINE de inmediato...');
         await _encolarOperacion(
           tabla: tabla,
           operacion: 'set',
@@ -240,7 +250,7 @@ class ServicioNube {
         );
       }
     } else {
-      // Si está offline, se encola para procesar en RTDB apenas vuelva el internet
+      // Offline detectado: guardar en la cola de operaciones pendientes directamente
       await _encolarOperacion(
         tabla: tabla,
         operacion: 'set',
@@ -294,9 +304,17 @@ class ServicioNube {
     }
   }
 
-  static Future<void> eliminarProductoNube(int id) async =>
-      _eliminar(tabla: 'productos', docId: id.toString());
-
+  static Future<void> eliminarProductoNube(int id) async {
+    try {
+      final dbLocal = await DBHelper.instance.database;
+      await dbLocal.delete('productos', where: 'id = ?', whereArgs: [id]);
+      await dbLocal.delete('fotos_variantes', where: 'producto_id = ?', whereArgs: [id]);
+    } catch (e) {
+      debugPrint("Error borrando producto localmente: $e");
+    }
+    await _eliminar(tabla: 'productos', docId: id.toString());
+    await compilarYSubirCatalogoRTDB();
+  }
   // ─────────────────────────────────────────────────────────────
   //  DESCARGA CON CHUNKING Y BARRERA ANTI-CUOTA (FALLBACK A RTDB)
   // ─────────────────────────────────────────────────────────────
@@ -538,12 +556,17 @@ class ServicioNube {
       String uid, String tabla, {bool force = false}) async {
     if (!await tieneInternet()) return;
     try {
-      final prefs = await SharedPreferences.getInstance();
-      if (!(prefs.getBool('es_premium') ?? false)) return;
-
       final dbLocal = await DBHelper.instance.database;
       List<int> idsNube = [];
       bool consultaExitosa = false;
+
+      // Auxiliar para convertir Lists o Maps de RTDB en una lista limpia
+      List<dynamic> extraerLista(dynamic obj) {
+        if (obj == null) return [];
+        if (obj is List) return obj;
+        if (obj is Map) return obj.values.toList(); // 🔥 Permite leer Maps cuando RTDB convierte arrays
+        return [];
+      }
 
       if (tabla == 'productos' || tabla == 'categorias') {
         final ref = FirebaseDatabase.instance.ref("catalogos_web/$uid");
@@ -552,40 +575,42 @@ class ServicioNube {
           consultaExitosa = true;
           Map<String, dynamic> datos = {};
           final rawValue = snap.value;
+
           if (rawValue is String) {
             try { datos = jsonDecode(rawValue); } catch (_) {}
           } else if (rawValue is Map) {
-            datos = Map<String, dynamic>.from(rawValue);
+            rawValue.forEach((k, v) => datos[k.toString()] = v);
           }
 
           if (tabla == 'productos') {
-            final activos = datos['productos'] != null ? List<dynamic>.from(datos['productos']) : [];
-            final inactivos = datos['productos_inactivos'] != null ? List<dynamic>.from(datos['productos_inactivos']) : [];
+            final activos = extraerLista(datos['productos']);
+            final inactivos = extraerLista(datos['productos_inactivos']);
             for (var p in [...activos, ...inactivos]) {
-              if (p != null && p['id'] != null) idsNube.add((p['id'] as num).toInt());
+              if (p != null && p is Map && p['id'] != null) {
+                idsNube.add((p['id'] as num).toInt());
+              }
             }
           } else if (tabla == 'categorias') {
-            final activos = datos['categorias'] != null ? List<dynamic>.from(datos['categorias']) : [];
-            final inactivos = datos['categorias_inactivas'] != null ? List<dynamic>.from(datos['categorias_inactivas']) : [];
+            final activos = extraerLista(datos['categorias']);
+            final inactivos = extraerLista(datos['categorias_inactivas']);
             for (var c in [...activos, ...inactivos]) {
-              if (c != null && c['id'] != null) idsNube.add((c['id'] as num).toInt());
+              if (c != null && c is Map && c['id'] != null) {
+                idsNube.add((c['id'] as num).toInt());
+              }
             }
           }
         }
       } else {
-        // 🔒 Sincronización de borrados desde Realtime DB
+        // Sincronización de borrados desde Realtime DB para tablas privadas
         final ref = FirebaseDatabase.instance.ref("datos_privados/$uid/$tabla");
         final snap = await ref.get();
         if (snap.exists && snap.value != null) {
           consultaExitosa = true;
           final raw = snap.value;
-          if (raw is List) {
-            for (var item in raw) {
-              if (item != null && item['id'] != null) idsNube.add((item['id'] as num).toInt());
-            }
-          } else if (raw is Map) {
-            for (var item in raw.values) {
-              if (item != null && item['id'] != null) idsNube.add((item['id'] as num).toInt());
+          List<dynamic> lista = extraerLista(raw);
+          for (var item in lista) {
+            if (item != null && item is Map && item['id'] != null) {
+              idsNube.add((item['id'] as num).toInt());
             }
           }
         }
@@ -597,7 +622,6 @@ class ServicioNube {
       final List<int> idsLocales = registrosLocales.map((row) => row['id'] as int).toList();
 
       final Batch batchLocal = dbLocal.batch();
-      final WriteBatch batchFirestore = _db.batch();
       bool huboBorrados = false;
 
       for (int idLocal in idsLocales) {
@@ -606,22 +630,13 @@ class ServicioNube {
           if (tabla == 'productos') {
             batchLocal.delete('fotos_variantes', where: 'producto_id = ?', whereArgs: [idLocal]);
           }
-
-          // 🔥 TAMBIÉN SE ELIMINA EL DOCUMENTO EN FIRESTORE
-          DocumentReference docRef = _db
-              .collection('usuarios')
-              .doc(uid)
-              .collection(tabla)
-              .doc(idLocal.toString());
-          batchFirestore.delete(docRef);
-
           huboBorrados = true;
         }
       }
 
       if (huboBorrados) {
         await batchLocal.commit(noResult: true);
-        try { await batchFirestore.commit(); } catch (_) {}
+        debugPrint("🧹 Borrados de la consola web sincronizados y eliminados de SQLite ($tabla).");
       }
     } catch (e) {
       debugPrint('Error sincronizarBorradosFisicos ($tabla): $e');
@@ -773,6 +788,9 @@ class ServicioNube {
       descargas.add(descargarSoloModificados(_uid!, t, 'ultima_modificacion'));
     }
     await Future.wait(descargas);
+
+    // 🚀 Si hay inventario local SQLite, asegurar que esté subido en Realtime DB
+    await sincronizarCatalogoLocalSiExiste();
   }
 
   static Future<void> importarCatalogoDesdeRTDB(String uid) async {
@@ -1288,38 +1306,50 @@ class ServicioNube {
         }
 
         if (map['variantes'] != null && map['variantes'].toString().length > 5) {
-          List<dynamic> dec = jsonDecode(map['variantes']);
-          var grupos = (dec.isNotEmpty && !dec[0].containsKey('grupo')) ? [{'opciones': dec}] : dec;
-          bool varActualizada = false;
-          
-          for (int gIdx = 0; gIdx < grupos.length; gIdx++) {
-            for (int oIdx = 0; oIdx < grupos[gIdx]['opciones'].length; oIdx++) {
-              String varFoto = grupos[gIdx]['opciones'][oIdx]['foto_path']?.toString() ?? "";
+          try {
+            dynamic dec = jsonDecode(map['variantes']);
+            if (dec is List && dec.isNotEmpty) {
+              var grupos = (!dec[0].containsKey('grupo')) ? [{'opciones': dec}] : dec;
+              bool varActualizada = false;
               
-              if (varFoto.isNotEmpty && !varFoto.startsWith('http')) {
-                if (esPremium && hayInternet) {
-                  String urlVar = await subirImagenACloudinary(varFoto);
-                  if (urlVar.isNotEmpty) {
-                    grupos[gIdx]['opciones'][oIdx]['foto_path'] = urlVar;
-                    fotosVariantesCache["${map['id']}_${gIdx}_${oIdx}"] = urlVar;
-                    varActualizada = true;
-                  } else {
-                    grupos[gIdx]['opciones'][oIdx]['foto_path'] = "";
+              for (int gIdx = 0; gIdx < grupos.length; gIdx++) {
+                var g = grupos[gIdx];
+                if (g == null || g['opciones'] == null || g['opciones'] is! List) continue;
+                List<dynamic> opciones = g['opciones'];
+
+                for (int oIdx = 0; oIdx < opciones.length; oIdx++) {
+                  var o = opciones[oIdx];
+                  if (o == null || o is! Map) continue;
+                  String varFoto = o['foto_path']?.toString() ?? "";
+                  
+                  if (varFoto.isNotEmpty && !varFoto.startsWith('http')) {
+                    if (esPremium && hayInternet) {
+                      String urlVar = await subirImagenACloudinary(varFoto);
+                      if (urlVar.isNotEmpty) {
+                        opciones[oIdx]['foto_path'] = urlVar;
+                        fotosVariantesCache["${map['id']}_${gIdx}_${oIdx}"] = urlVar;
+                        varActualizada = true;
+                      } else {
+                        opciones[oIdx]['foto_path'] = "";
+                      }
+                    } else {
+                      opciones[oIdx]['foto_path'] = "";
+                    }
+                  } else if (varFoto.startsWith('http')) {
+                     fotosVariantesCache["${map['id']}_${gIdx}_${oIdx}"] = varFoto;
                   }
-                } else {
-                  grupos[gIdx]['opciones'][oIdx]['foto_path'] = "";
                 }
-              } else if (varFoto.startsWith('http')) {
-                 fotosVariantesCache["${map['id']}_${gIdx}_${oIdx}"] = varFoto;
               }
+              
+              if (varActualizada) {
+                 String nuevoJson = jsonEncode(dec);
+                 await db.update('productos', {'variantes': nuevoJson}, where: 'id = ?', whereArgs: [map['id']]);
+              }
+              map['variantes'] = dec;
             }
+          } catch (e) {
+            debugPrint("⚠️ Error procesando variantes de producto activo ${map['id']}: $e");
           }
-          
-          if (varActualizada) {
-             String nuevoJson = jsonEncode(dec);
-             await db.update('productos', {'variantes': nuevoJson}, where: 'id = ?', whereArgs: [map['id']]);
-          }
-          map['variantes'] = dec;
         }
 
         productos.add(map);
@@ -1351,38 +1381,50 @@ class ServicioNube {
         }
 
         if (map['variantes'] != null && map['variantes'].toString().length > 5) {
-          List<dynamic> dec = jsonDecode(map['variantes']);
-          var grupos = (dec.isNotEmpty && !dec[0].containsKey('grupo')) ? [{'opciones': dec}] : dec;
-          bool varActualizada = false;
-          
-          for (int gIdx = 0; gIdx < grupos.length; gIdx++) {
-            for (int oIdx = 0; oIdx < grupos[gIdx]['opciones'].length; oIdx++) {
-              String varFoto = grupos[gIdx]['opciones'][oIdx]['foto_path']?.toString() ?? "";
+          try {
+            dynamic dec = jsonDecode(map['variantes']);
+            if (dec is List && dec.isNotEmpty) {
+              var grupos = (!dec[0].containsKey('grupo')) ? [{'opciones': dec}] : dec;
+              bool varActualizada = false;
               
-              if (varFoto.isNotEmpty && !varFoto.startsWith('http')) {
-                if (esPremium && hayInternet) {
-                  String urlVar = await subirImagenACloudinary(varFoto);
-                  if (urlVar.isNotEmpty) {
-                    grupos[gIdx]['opciones'][oIdx]['foto_path'] = urlVar;
-                    fotosVariantesCache["${map['id']}_${gIdx}_${oIdx}"] = urlVar;
-                    varActualizada = true;
-                  } else {
-                    grupos[gIdx]['opciones'][oIdx]['foto_path'] = "";
+              for (int gIdx = 0; gIdx < grupos.length; gIdx++) {
+                var g = grupos[gIdx];
+                if (g == null || g['opciones'] == null || g['opciones'] is! List) continue;
+                List<dynamic> opciones = g['opciones'];
+
+                for (int oIdx = 0; oIdx < opciones.length; oIdx++) {
+                  var o = opciones[oIdx];
+                  if (o == null || o is! Map) continue;
+                  String varFoto = o['foto_path']?.toString() ?? "";
+                  
+                  if (varFoto.isNotEmpty && !varFoto.startsWith('http')) {
+                    if (esPremium && hayInternet) {
+                      String urlVar = await subirImagenACloudinary(varFoto);
+                      if (urlVar.isNotEmpty) {
+                        opciones[oIdx]['foto_path'] = urlVar;
+                        fotosVariantesCache["${map['id']}_${gIdx}_${oIdx}"] = urlVar;
+                        varActualizada = true;
+                      } else {
+                        opciones[oIdx]['foto_path'] = "";
+                      }
+                    } else {
+                      opciones[oIdx]['foto_path'] = "";
+                    }
+                  } else if (varFoto.startsWith('http')) {
+                     fotosVariantesCache["${map['id']}_${gIdx}_${oIdx}"] = varFoto;
                   }
-                } else {
-                  grupos[gIdx]['opciones'][oIdx]['foto_path'] = "";
                 }
-              } else if (varFoto.startsWith('http')) {
-                 fotosVariantesCache["${map['id']}_${gIdx}_${oIdx}"] = varFoto;
               }
+              
+              if (varActualizada) {
+                 String nuevoJson = jsonEncode(dec);
+                 await db.update('productos', {'variantes': nuevoJson}, where: 'id = ?', whereArgs: [map['id']]);
+              }
+              map['variantes'] = dec;
             }
+          } catch (e) {
+            debugPrint("⚠️ Error procesando variantes de producto inactivo ${map['id']}: $e");
           }
-          
-          if (varActualizada) {
-             String nuevoJson = jsonEncode(dec);
-             await db.update('productos', {'variantes': nuevoJson}, where: 'id = ?', whereArgs: [map['id']]);
-          }
-          map['variantes'] = dec;
         }
 
         productosInactivos.add(map);
@@ -1407,10 +1449,18 @@ class ServicioNube {
         'ultima_actualizacion': DateTime.now().toIso8601String()
       };
 
+      // 🔥 1. SUBIR CATÁLOGO A RTDB
       DatabaseReference ref = FirebaseDatabase.instance.ref("catalogos_web/${user.uid}");
-      await ref.set(superJson); // 🔥 Guarda como Estructura Nativa Map limpia en RTDB
-      
-      debugPrint("✅ Catálogo compilado exitosamente en RTDB como Map Nativo.");
+      await ref.set(superJson);
+
+      // 🔥 2. ACTUALIZAR SYNC TRIGGERS PARA ALERTAR A LA WEB Y OTROS DISPOSITIVOS
+      DatabaseReference refTrigger = FirebaseDatabase.instance.ref("sync_triggers/${user.uid}");
+      await refTrigger.update({
+        'productos': ServerValue.timestamp,
+        'catalogos_web': ServerValue.timestamp,
+      });
+
+      debugPrint("✅ Catálogo y sync_triggers compilados y subidos a RTDB exitosamente.");
     } catch (e) {
       debugPrint("❌ Error subiendo catálogo a RTDB: $e");
     }
@@ -1462,36 +1512,47 @@ class ServicioNube {
             String varStr = p['variantes']?.toString() ?? "";
             
             if (varStr.length > 5) {
-              List<dynamic> dec = jsonDecode(varStr);
-              bool cambiado = false;
-              
-              for (var f in fotosPorProd[pid]!) {
-                int gIdx = f['grupo_index'] as int;
-                int oIdx = f['opcion_index'] as int;
-                String fotoUrl = f['foto_base64']?.toString() ?? "";
+              try {
+                dynamic dec = jsonDecode(varStr);
+                bool cambiado = false;
                 
-                if (fotoUrl.isNotEmpty) {
-                  if (dec.isNotEmpty && !dec[0].containsKey('grupo')) {
-                     if (oIdx < dec.length) { dec[oIdx]['foto_path'] = fotoUrl; cambiado = true; }
-                  } else {
-                     if (gIdx < dec.length && oIdx < dec[gIdx]['opciones'].length) {
-                       dec[gIdx]['opciones'][oIdx]['foto_path'] = fotoUrl; cambiado = true;
-                     }
+                for (var f in fotosPorProd[pid]!) {
+                  int gIdx = f['grupo_index'] as int;
+                  int oIdx = f['opcion_index'] as int;
+                  String fotoUrl = f['foto_base64']?.toString() ?? "";
+                  
+                  if (fotoUrl.isNotEmpty && dec != null) {
+                    if (dec.isNotEmpty && !dec[0].containsKey('grupo')) {
+                       if (oIdx < dec.length && dec[oIdx] is Map) { 
+                         dec[oIdx]['foto_path'] = fotoUrl; 
+                         cambiado = true; 
+                       }
+                    } else {
+                       if (gIdx < dec.length && dec[gIdx] is Map && dec[gIdx]['opciones'] is List) {
+                         List ops = dec[gIdx]['opciones'];
+                         if (oIdx < ops.length && ops[oIdx] is Map) {
+                           ops[oIdx]['foto_path'] = fotoUrl; 
+                           cambiado = true;
+                         }
+                       }
+                    }
                   }
                 }
-              }
-              
-              if (cambiado) {
-                String nuevoJson = jsonEncode(dec);
-                batchLocal.update('productos', {'variantes': nuevoJson}, where: 'id = ?', whereArgs: [pid]);
-                huboCambiosEnNube = true;
+                
+                if (cambiado) {
+                  String nuevoJson = jsonEncode(dec);
+                  batchLocal.update('productos', {'variantes': nuevoJson}, where: 'id = ?', whereArgs: [pid]);
+                  huboCambiosEnNube = true;
 
-                try {
-                  await _db.collection('usuarios').doc(user.uid).collection('productos').doc(pid).update({
-                    'variantes': nuevoJson,
-                    'ultima_modificacion': FieldValue.serverTimestamp()
-                  });
-                } catch (_) {}
+                  try {
+                    await _db.collection('usuarios').doc(user.uid).collection('productos').doc(pid).update({
+                      'variantes': nuevoJson,
+                      'ultima_modificacion': FieldValue.serverTimestamp()
+                    });
+                  } catch (_) {}
+                }
+              } catch (e) {
+                debugPrint("⚠️ Error procesando variantes en rescate: $e");
               }
             }
           }
@@ -1548,26 +1609,35 @@ class ServicioNube {
         }
 
         if (variantesJson.length > 5) {
-          List<dynamic> dec = jsonDecode(variantesJson);
-          bool varCambiada = false;
-          
-          for (var g in (dec.isNotEmpty && !dec[0].containsKey('grupo') ? [{'opciones': dec}] : dec)) {
-             for (var o in g['opciones']) {
-               String vFoto = o['foto_path']?.toString() ?? "";
-               if (vFoto.isNotEmpty && !vFoto.startsWith('http') && vFoto.length < 500 && !vFoto.contains(varDir.path)) {
-                  File oldFile = File(vFoto);
-                  if (await oldFile.exists()) {
-                    File newFile = await oldFile.copy('${varDir.path}/${vFoto.split('/').last}');
-                    o['foto_path'] = newFile.path;
-                    varCambiada = true;
-                    fotosMovidas++;
-                  }
-               }
-             }
-          }
-          if (varCambiada) {
-            variantesJson = jsonEncode(dec);
-            actualizado = true;
+          try {
+            dynamic dec = jsonDecode(variantesJson);
+            bool varCambiada = false;
+            
+            if (dec != null && dec.isNotEmpty) {
+              var grupos = (!dec[0].containsKey('grupo')) ? [{'opciones': dec}] : dec;
+              for (var g in grupos) {
+                 if (g == null || g['opciones'] == null || g['opciones'] is! List) continue;
+                 for (var o in g['opciones']) {
+                   if (o == null || o is! Map) continue;
+                   String vFoto = o['foto_path']?.toString() ?? "";
+                   if (vFoto.isNotEmpty && !vFoto.startsWith('http') && vFoto.length < 500 && !vFoto.contains(varDir.path)) {
+                      File oldFile = File(vFoto);
+                      if (await oldFile.exists()) {
+                        File newFile = await oldFile.copy('${varDir.path}/${vFoto.split('/').last}');
+                        o['foto_path'] = newFile.path;
+                        varCambiada = true;
+                        fotosMovidas++;
+                      }
+                   }
+                 }
+              }
+            }
+            if (varCambiada) {
+              variantesJson = jsonEncode(dec);
+              actualizado = true;
+            }
+          } catch (e) {
+            debugPrint("⚠️ Error procesando JSON de variantes en archivo físico: $e");
           }
         }
 
@@ -1683,6 +1753,27 @@ class ServicioNube {
       debugPrint("Error descargando foto en segundo plano: $e");
     } finally {
       _descargasActivas.remove(url);
+    }
+  }
+
+  // 🔥 AUTO-DETECTOR Y SINCRONIZADOR DE BORRADOS Y PRODUCTOS SQLITE -> RTDB
+  static Future<void> sincronizarCatalogoLocalSiExiste() async {
+    final uid = _auth.currentUser?.uid;
+    if (uid == null || !await tieneInternet()) return;
+    try {
+      // 1. Si borraste algo directamente desde la consola web de Firebase, eliminarlo de SQLite
+      await sincronizarBorradosFisicos(uid, 'productos');
+
+      final db = await DBHelper.instance.database;
+      final countRes = await db.rawQuery('SELECT COUNT(*) as cant FROM productos');
+      int cantProds = Sqflite.firstIntValue(countRes) ?? 0;
+
+      if (cantProds > 0) {
+        debugPrint("📦 Detector: $cantProds productos en SQLite local. Sincronizando catálogo a RTDB...");
+        await compilarYSubirCatalogoRTDB();
+      }
+    } catch (e) {
+      debugPrint("Error auto-sincronizando inventario local hacia la nube: $e");
     }
   }
   
@@ -1986,8 +2077,10 @@ class ServicioNube {
   }
 
   static StreamSubscription? escucharCambiosNubeRTDB(Function() onUpdate) {
-    if (_uid == null) return null;
-    DatabaseReference ref = FirebaseDatabase.instance.ref("sync_triggers/$_uid");
+    final uid = _auth.currentUser?.uid;
+    if (uid == null) return null;
+    
+    DatabaseReference ref = FirebaseDatabase.instance.ref("catalogos_web/$uid");
     return ref.onValue.listen((event) {
       if (event.snapshot.exists) {
         onUpdate();
