@@ -56,7 +56,7 @@ class ServicioNube {
   }
 
   // 🔥 NUEVO: Optimizador de URLs de Cloudinary integrado en el servicio de nube
-  static String optimizarUrlCloudinary(String urlOriginal, {int width = 800}) {
+  static String optimizarUrlCloudinary(String urlOriginal, {int width = 1000}) {
     if (urlOriginal.isEmpty) return urlOriginal;
     if (!urlOriginal.contains('cloudinary.com') || urlOriginal.contains('q_auto')) {
       return urlOriginal;

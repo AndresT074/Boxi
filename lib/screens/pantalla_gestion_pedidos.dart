@@ -831,36 +831,49 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     if (pRes.isEmpty) return;
 
     var p = pRes.first;
-    int nuevoStockGeneral = (p['stock'] as int) - cantidadADescontar;
+    int nuevoStockGeneral = (p['stock'] as num?)?.toInt() ?? 0;
+    nuevoStockGeneral -= cantidadADescontar;
     String variantesStr = p['variantes']?.toString() ?? "";
 
     if (variantesStr.length > 5 && nombreSnapshot != null) {
       try {
         List<dynamic> grupos = jsonDecode(variantesStr);
         bool encontrado = false;
+
         for (var g in grupos) {
-          if (!g.containsKey('grupo')) continue;
+          if (g == null || g is! Map || g['opciones'] == null || g['opciones'] is! List) continue;
+
           for (var o in g['opciones']) {
-            String nombreVar = "${p['nombre']} - ${g['grupo']}: ${o['nombre']}";
-            String nombreAntigua = "${p['nombre']} - ${o['nombre']}";
-            if (nombreVar == nombreSnapshot || nombreAntigua == nombreSnapshot) {
-              o['stock'] = (o['stock'] as int) - cantidadADescontar;
+            if (o == null || o is! Map) continue;
+            String nombreVar1 = "${p['nombre']} - ${g['grupo']}: ${o['nombre']}".trim();
+            String nombreVar2 = "${p['nombre']} - ${o['nombre']}".trim();
+            String targetSnap = nombreSnapshot.trim();
+
+            if (targetSnap == nombreVar1 || targetSnap == nombreVar2 || targetSnap.endsWith(o['nombre'].toString().trim())) {
+              int stockActual = (o['stock'] as num?)?.toInt() ?? 0;
+              o['stock'] = stockActual - cantidadADescontar;
               encontrado = true;
               break;
             }
           }
           if (encontrado) break;
         }
+
+        // Recalcular stock global acumulando únicamente variantes válidas
         int totalPositivos = 0;
         for (var g in grupos) {
+          if (g == null || g is! Map || g['opciones'] == null || g['opciones'] is! List) continue;
           for (var o in g['opciones']) {
-            int s = o['stock'] as int;
+            if (o == null || o is! Map) continue;
+            int s = (o['stock'] as num?)?.toInt() ?? 0;
             if (s > 0) totalPositivos += s;
           }
         }
         nuevoStockGeneral = totalPositivos;
         variantesStr = jsonEncode(grupos);
-      } catch (_) {}
+      } catch (e) {
+        debugPrint("Error modificando stock de variante: $e");
+      }
     }
 
     await db.update(
@@ -875,7 +888,10 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
 
     if (_esPremium) {
       final pAct = await db.query('productos', where: 'id = ?', whereArgs: [productoId]);
-      if (pAct.isNotEmpty) ServicioNube.guardarProductoNube(Map<String, dynamic>.from(pAct.first));
+      if (pAct.isNotEmpty) {
+        await ServicioNube.guardarProductoNube(Map<String, dynamic>.from(pAct.first));
+        await ServicioNube.compilarYSubirCatalogoRTDB();
+      }
     }
   }
 
@@ -947,7 +963,7 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
         fechaPagoVal = "${ahora.year}-${ahora.month.toString().padLeft(2, '0')}-${ahora.day.toString().padLeft(2, '0')} $hora12:${ahora.minute.toString().padLeft(2, '0')} $periodo";
       }
 
-      // 1. Actualizar Base de Datos
+      // 1. Actualizar Base de Datos Local
       await db.update(
           'pedidos',
           {
@@ -958,21 +974,12 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
           where: 'id = ?',
           whereArgs: [pedidoId]);
 
-      // 2. Refrescar listado en pantalla
-      await _cargar();
-
-      // 3. Mostrar pantalla de éxito y ESPERAR a que termine de cerrarse
-      await _mostrarPantallaExito(nuevoEstado);
-
-      // 4. LUEGO de que la pantalla de éxito se cierra, otorgar punto y abrir la invitación de WhatsApp
-      if (nuevoEstado == 'Completado') {
-        final pedDoc = await db.query('pedidos', columns: ['cliente_id', 'total_venta', 'cliente_nombre_snapshot'], where: 'id = ?', whereArgs: [pedidoId]);
-        if (pedDoc.isNotEmpty) {
-          int clienteIdPedido = (pedDoc.first['cliente_id'] as num?)?.toInt() ?? 0;
-          double totalVenta = (pedDoc.first['total_venta'] as num?)?.toDouble() ?? 0.0;
-          String nombreSnap = pedDoc.first['cliente_nombre_snapshot']?.toString() ?? 'Cliente';
-
-          await _otorgarPuntoFidelidadAutomatico(clienteIdPedido, totalVenta, nombreSnap);
+      // 🔥 2. ACTUALIZAR EN LA NUBE INMEDIATAMENTE (ANTES DE ABRIR WHATSAPP)
+      if (_esPremium) {
+        try {
+          await ServicioNube.actualizarEstadoPedidoNube(pedidoId, nuevoEstado, fechaPago: fechaPagoVal);
+        } catch (e) {
+          debugPrint("Error al sincronizar estado offline: $e");
         }
       }
 
@@ -985,11 +992,21 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
         }
       }
 
-      if (_esPremium) {
-        try {
-          await ServicioNube.actualizarEstadoPedidoNube(pedidoId, nuevoEstado, fechaPago: fechaPagoVal);
-        } catch (e) {
-          debugPrint("Error al sincronizar estado offline: $e");
+      // 3. Refrescar listado en pantalla
+      await _cargar();
+
+      // 4. Mostrar pantalla de éxito y ESPERAR a que termine de cerrarse
+      await _mostrarPantallaExito(nuevoEstado);
+
+      // 5. LUEGO de que la pantalla de éxito se cierra, otorgar punto y abrir la invitación de WhatsApp
+      if (nuevoEstado == 'Completado') {
+        final pedDoc = await db.query('pedidos', columns: ['cliente_id', 'total_venta', 'cliente_nombre_snapshot'], where: 'id = ?', whereArgs: [pedidoId]);
+        if (pedDoc.isNotEmpty) {
+          int clienteIdPedido = (pedDoc.first['cliente_id'] as num?)?.toInt() ?? 0;
+          double totalVenta = (pedDoc.first['total_venta'] as num?)?.toDouble() ?? 0.0;
+          String nombreSnap = pedDoc.first['cliente_nombre_snapshot']?.toString() ?? 'Cliente';
+
+          await _otorgarPuntoFidelidadAutomatico(clienteIdPedido, totalVenta, nombreSnap);
         }
       }
     }
@@ -1411,6 +1428,7 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     required String nomNegocio,
     required String logoPath,
   }) {
+    final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
     String numLimpio = telefono.replaceAll(RegExp(r'\D'), '');
     String ind = "57";
     String telSolo = numLimpio;
@@ -1445,124 +1463,265 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
 
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
+      builder: (ctx) => Dialog(
         backgroundColor: Theme.of(context).cardColor,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: Row(
-          children: [
-            const Icon(Icons.card_giftcard_rounded, color: Colors.green, size: 26),
-            const SizedBox(width: 8),
-            Expanded(child: Text("¡Invita a $clienteNombre!", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16))),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text("Invita a $clienteNombre a acumular sus compras para la tarjeta \"$tituloTarjeta\".", style: const TextStyle(fontSize: 12, color: Colors.grey)),
-            const SizedBox(height: 15),
-            const Text("Número de WhatsApp del cliente:", style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 8),
-            Row(
+        insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+        clipBehavior: Clip.antiAlias,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 440),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                SizedBox(
-                  width: 65,
-                  child: TextField(
-                    controller: indCtrl,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(prefixText: "+", hintText: "57", border: OutlineInputBorder(), isDense: true),
+                // 🎨 CABECERA VERDE WHATSAPP ELEGANTE
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+                  decoration: const BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: [Color(0xFF1B5E20), Color(0xFF2E7D32), Color(0xFF25D366)],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(color: Colors.white.withOpacity(0.2), shape: BoxShape.circle),
+                        child: const Icon(Icons.card_giftcard_rounded, color: Colors.white, size: 28),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              "¡Punto para $clienteNombre!",
+                              style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 17, color: Colors.white),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            const SizedBox(height: 2),
+                            const Text("Invitación a Tarjeta de Regalo", style: TextStyle(color: Colors.white70, fontSize: 11)),
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: TextField(
-                    controller: numCtrl,
-                    keyboardType: TextInputType.phone,
-                    decoration: const InputDecoration(border: OutlineInputBorder(), isDense: true),
+
+                Padding(
+                  padding: const EdgeInsets.all(20),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // 🎁 TARJETA DE VISTA PREVIA
+                      Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: isOscuro ? Colors.cyanAccent.withOpacity(0.08) : Colors.green.shade50,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: isOscuro ? Colors.cyanAccent.withOpacity(0.3) : Colors.green.shade200),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                const Icon(Icons.stars_rounded, color: Color(0xFF25D366), size: 18),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    tituloTarjeta,
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w900,
+                                      fontSize: 13,
+                                      color: isOscuro ? Colors.white : Colors.black87,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            Builder(
+                              builder: (context) {
+                                String textoMonto = montoMinimo > 0 ? " de \$${montoMinimo.toInt()} o más" : "";
+                                String premioTxt = premioDesc.isNotEmpty ? premioDesc : tituloTarjeta;
+                                return Text(
+                                  "Por $meta compras$textoMonto obtienes $premioTxt",
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                    color: isOscuro ? Colors.cyanAccent : const Color(0xFF1B5E20),
+                                  ),
+                                );
+                              }
+                            ),
+                          ],
+                        ),
+                      ),
+
+                      const SizedBox(height: 18),
+
+                      // 📱 NÚMERO DE WHATSAPP
+                      Text("NÚMERO DE WHATSAPP DEL CLIENTE", 
+                        style: TextStyle(fontSize: 10, fontWeight: FontWeight.w900, color: isOscuro ? Colors.white60 : Colors.grey.shade700, letterSpacing: 0.5)),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          SizedBox(
+                            width: 70,
+                            child: TextField(
+                              controller: indCtrl,
+                              keyboardType: TextInputType.number,
+                              style: TextStyle(color: isOscuro ? Colors.white : Colors.black87, fontWeight: FontWeight.bold, fontSize: 13),
+                              decoration: InputDecoration(
+                                prefixText: "+",
+                                hintText: "57",
+                                hintStyle: const TextStyle(color: Colors.grey),
+                                filled: true,
+                                fillColor: isOscuro ? Colors.white.withOpacity(0.05) : Colors.grey.shade100,
+                                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                                contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: TextField(
+                              controller: numCtrl,
+                              keyboardType: TextInputType.phone,
+                              style: TextStyle(color: isOscuro ? Colors.white : Colors.black87, fontWeight: FontWeight.bold, fontSize: 13),
+                              decoration: InputDecoration(
+                                hintText: "Número de celular...",
+                                hintStyle: const TextStyle(color: Colors.grey, fontSize: 12),
+                                prefixIcon: const Icon(Icons.phone_iphone_rounded, size: 18, color: Color(0xFF25D366)),
+                                filled: true,
+                                fillColor: isOscuro ? Colors.white.withOpacity(0.05) : Colors.grey.shade100,
+                                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(height: 18),
+
+                      // 📋 BOTÓN COPIAR ENLACE ÚNICO
+                      OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: isOscuro ? Colors.cyanAccent : const Color(0xFF1B5E20),
+                          backgroundColor: isOscuro ? Colors.cyanAccent.withOpacity(0.05) : Colors.green.shade50.withOpacity(0.5),
+                          minimumSize: const Size(double.infinity, 42),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          side: BorderSide(color: isOscuro ? Colors.cyanAccent.withOpacity(0.5) : Colors.green.shade300),
+                        ),
+                        icon: const Icon(Icons.copy_rounded, size: 16),
+                        label: const Text("Copiar Enlace de Invitación", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                        onPressed: () async {
+                          String tokenGenerado = await obtenerToken();
+                          String enlaceUnico = "https://boxi-catalogo.web.app/reclamar?token=$tokenGenerado";
+                          Clipboard.setData(ClipboardData(text: enlaceUnico));
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text("Enlace copiado al portapapeles 📋"), duration: Duration(seconds: 2))
+                            );
+                          }
+                        },
+                      ),
+
+                      const SizedBox(height: 20),
+
+                      // 🟢 BOTONES INFERIORES
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton(
+                              style: OutlinedButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                side: BorderSide(color: isOscuro ? Colors.white24 : Colors.grey.shade300),
+                              ),
+                              onPressed: () => Navigator.pop(ctx),
+                              child: Text("OMITIR", style: TextStyle(color: isOscuro ? Colors.white60 : Colors.grey.shade700, fontWeight: FontWeight.bold)),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            flex: 2,
+                            child: ElevatedButton.icon(
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFF25D366),
+                                foregroundColor: Colors.white,
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                elevation: 2,
+                              ),
+                              icon: const Icon(Icons.send_rounded, size: 18),
+                              label: const Text("ENVIAR AHORA", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 12, letterSpacing: 0.5)),
+                              onPressed: () async {
+                                Navigator.pop(ctx);
+                                String tokenGenerado = await obtenerToken();
+                                String enlaceUnico = "https://boxi-catalogo.web.app/reclamar?token=$tokenGenerado";
+                                final prefs = await SharedPreferences.getInstance();
+                                String nomNegocioLocal = prefs.getString('nombre_negocio') ?? "Nuestro Negocio";
+                                String indClean = indCtrl.text.trim().replaceAll(RegExp(r'\D'), '');
+                                if (indClean.isEmpty) indClean = "57";
+                                String telClean = numCtrl.text.trim().replaceAll(RegExp(r'\D'), '');
+                                String fullNum = "$indClean$telClean";
+
+                                String textoMonto = "";
+                                if (montoMinimo > 0) {
+                                  String mFormateado = montoMinimo == montoMinimo.roundToDouble() 
+                                      ? montoMinimo.toInt().toString() 
+                                      : montoMinimo.toStringAsFixed(0);
+                                  textoMonto = " de *\$$mFormateado* o más";
+                                }
+
+                                String premioTxt = premioDesc.isNotEmpty ? premioDesc : tituloTarjeta;
+                                String mensaje = "¡Hola *$clienteNombre*! 🎁 *$nomNegocioLocal* te obsequió *1 punto* para tu tarjeta de regalo *$tituloTarjeta*.\n\nPor *$meta* compras$textoMonto obtienes *$premioTxt*.\n\n*Al completar $meta puntos llevas el premio, ingresa a este enlace para reclamar tu punto:*\n$enlaceUnico";
+                                String textEncoded = Uri.encodeComponent(mensaje);
+
+                                Uri uriApp = fullNum.length >= 10
+                                    ? Uri.parse("whatsapp://send?phone=$fullNum&text=$textEncoded")
+                                    : Uri.parse("whatsapp://send?text=$textEncoded");
+
+                                Uri uriWeb = fullNum.length >= 10
+                                    ? Uri.parse("https://wa.me/$fullNum?text=$textEncoded")
+                                    : Uri.parse("https://api.whatsapp.com/send?text=$textEncoded");
+
+                                try {
+                                  if (await canLaunchUrl(uriApp)) {
+                                    await launchUrl(uriApp, mode: LaunchMode.externalApplication);
+                                  } else if (await canLaunchUrl(uriWeb)) {
+                                    await launchUrl(uriWeb, mode: LaunchMode.externalApplication);
+                                  } else {
+                                    if (ctx.mounted) {
+                                      ScaffoldMessenger.of(ctx).showSnackBar(
+                                        const SnackBar(content: Text("No se pudo abrir WhatsApp en este dispositivo."))
+                                      );
+                                    }
+                                  }
+                                } catch (e) {
+                                  if (await canLaunchUrl(uriWeb)) {
+                                    await launchUrl(uriWeb, mode: LaunchMode.externalApplication);
+                                  }
+                                }
+                              },
+                            ),
+                          ),
+                        ],
+                      )
+                    ],
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 15),
-            // 🔥 BOTÓN PARA COPIAR ENLACE ÚNICO
-            OutlinedButton.icon(
-              style: OutlinedButton.styleFrom(
-                minimumSize: const Size(double.infinity, 42),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-              ),
-              icon: const Icon(Icons.copy, size: 16),
-              label: const Text("Copiar Enlace Único", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-              onPressed: () async {
-                String tokenGenerado = await obtenerToken();
-                String enlaceUnico = "https://boxi-catalogo.web.app/reclamar?token=$tokenGenerado";
-                Clipboard.setData(ClipboardData(text: enlaceUnico));
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text("Enlace copiado al portapapeles 📋"), duration: Duration(seconds: 2))
-                  );
-                }
-              },
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("DESPUÉS")),
-          ElevatedButton.icon(
-            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF25D366), foregroundColor: Colors.white),
-            icon: const Icon(Icons.send_rounded, size: 16),
-            label: const Text("ENVIAR WHATSAPP"),
-            onPressed: () async {
-              Navigator.pop(ctx);
-              String tokenGenerado = await obtenerToken();
-              String enlaceUnico = "https://boxi-catalogo.web.app/reclamar?token=$tokenGenerado";
-              final prefs = await SharedPreferences.getInstance();
-              String nomNegocio = prefs.getString('nombre_negocio') ?? "Nuestro Negocio";
-              String indClean = indCtrl.text.trim().replaceAll(RegExp(r'\D'), '');
-              if (indClean.isEmpty) indClean = "57";
-              String telClean = numCtrl.text.trim().replaceAll(RegExp(r'\D'), '');
-              String fullNum = "$indClean$telClean";
-
-              String textoMonto = "";
-              if (montoMinimo > 0) {
-                String mFormateado = montoMinimo == montoMinimo.roundToDouble() 
-                    ? montoMinimo.toInt().toString() 
-                    : montoMinimo.toStringAsFixed(0);
-                textoMonto = " de *\$$mFormateado* o más";
-              }
-
-              String premioTxt = premioDesc.isNotEmpty ? premioDesc : tituloTarjeta;
-              String mensaje = "¡Hola *$clienteNombre*! 🎁 *$nomNegocio* te obsequió *1 punto* para tu tarjeta de regalo *$tituloTarjeta*.\n\nPor *$meta* compras$textoMonto obtienes *$premioTxt*.\n\n*Al completar $meta puntos llevas el premio, descarga la app BOXI para empezar a acumular puntos:*\n$enlaceUnico";
-              String textEncoded = Uri.encodeComponent(mensaje);
-
-              // Esquema nativo whatsapp:// para elegir entre WhatsApp y WhatsApp Business
-              Uri uriApp = fullNum.length >= 10
-                  ? Uri.parse("whatsapp://send?phone=$fullNum&text=$textEncoded")
-                  : Uri.parse("whatsapp://send?text=$textEncoded");
-
-              Uri uriWeb = fullNum.length >= 10
-                  ? Uri.parse("https://wa.me/$fullNum?text=$textEncoded")
-                  : Uri.parse("https://api.whatsapp.com/send?text=$textEncoded");
-
-              try {
-                if (await canLaunchUrl(uriApp)) {
-                  await launchUrl(uriApp, mode: LaunchMode.externalApplication);
-                } else if (await canLaunchUrl(uriWeb)) {
-                  await launchUrl(uriWeb, mode: LaunchMode.externalApplication);
-                } else {
-                  if (ctx.mounted) {
-                    ScaffoldMessenger.of(ctx).showSnackBar(
-                      const SnackBar(content: Text("No se pudo abrir WhatsApp en este dispositivo."))
-                    );
-                  }
-                }
-              } catch (e) {
-                if (await canLaunchUrl(uriWeb)) {
-                  await launchUrl(uriWeb, mode: LaunchMode.externalApplication);
-                }
-              }
-            },
           ),
-        ],
+        ),
       ),
     );
   }
@@ -2618,6 +2777,150 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     );
   }
 
+  // 🟡 BARRA INTELIGENTE DE FILTROS ACTIVOS CON ELIMINACIÓN DE UN SOLO TOQUE
+  Widget _buildBannerFiltrosActivos(bool isOscuro) {
+    bool hayFechas = _rangoFechasFiltro != null;
+    bool hayCliente = _filtroCliente != null && _filtroCliente!.isNotEmpty;
+    bool hayNegocio = _filtroNegocio != null && _filtroNegocio!.isNotEmpty;
+    bool hayOrden = _tipoOrden != 'fecha_desc';
+    bool hayBusqueda = _queryBusqueda.isNotEmpty;
+
+    bool hayFiltros = hayFechas || hayCliente || hayNegocio || hayOrden || hayBusqueda;
+
+    if (!hayFiltros) return const SizedBox.shrink();
+
+    String nombreOrden = "Personalizado";
+    if (_tipoOrden == 'fecha_asc') nombreOrden = "Fecha: Antiguos";
+    if (_tipoOrden == 'valor_desc') nombreOrden = "Valor: Mayor a Menor";
+    if (_tipoOrden == 'valor_asc') nombreOrden = "Valor: Menor a Mayor";
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 6, 12, 4),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: isOscuro ? Colors.amber.withOpacity(0.12) : Colors.amber.shade50,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.amber.withOpacity(isOscuro ? 0.3 : 0.5)),
+      ),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        physics: const BouncingScrollPhysics(),
+        child: Row(
+          children: [
+            const Icon(Icons.filter_alt_rounded, size: 16, color: Colors.amber),
+            const SizedBox(width: 6),
+            const Text(
+              "Filtros activos:",
+              style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.amber),
+            ),
+            const SizedBox(width: 8),
+
+            if (hayFechas) ...[
+              _chipFiltroIndividual(
+                "📅 ${_rangoFechasFiltro!.start.day}/${_rangoFechasFiltro!.start.month} al ${_rangoFechasFiltro!.end.day}/${_rangoFechasFiltro!.end.month}",
+                () => setState(() => _rangoFechasFiltro = null),
+                isOscuro,
+              ),
+              const SizedBox(width: 6),
+            ],
+
+            if (hayCliente) ...[
+              _chipFiltroIndividual(
+                "👤 $_filtroCliente",
+                () => setState(() => _filtroCliente = null),
+                isOscuro,
+              ),
+              const SizedBox(width: 6),
+            ],
+
+            if (hayNegocio) ...[
+              _chipFiltroIndividual(
+                "🏪 $_filtroNegocio",
+                () => setState(() => _filtroNegocio = null),
+                isOscuro,
+              ),
+              const SizedBox(width: 6),
+            ],
+
+            if (hayOrden) ...[
+              _chipFiltroIndividual(
+                "🔀 $nombreOrden",
+                () => setState(() => _tipoOrden = 'fecha_desc'),
+                isOscuro,
+              ),
+              const SizedBox(width: 6),
+            ],
+
+            if (hayBusqueda) ...[
+              _chipFiltroIndividual(
+                "🔍 \"$_queryBusqueda\"",
+                () => setState(() {
+                  _queryBusqueda = "";
+                  _busquedaCtrl.clear();
+                  _mostrandoBusqueda = false;
+                }),
+                isOscuro,
+              ),
+              const SizedBox(width: 6),
+            ],
+
+            // Botón Limpiar Todo
+            InkWell(
+              onTap: () {
+                setState(() {
+                  _rangoFechasFiltro = null;
+                  _filtroCliente = null;
+                  _filtroNegocio = null;
+                  _tipoOrden = 'fecha_desc';
+                  _queryBusqueda = "";
+                  _busquedaCtrl.clear();
+                  _mostrandoBusqueda = false;
+                  _limitePaginacion = 20;
+                });
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.red.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.close_rounded, size: 12, color: Colors.redAccent),
+                    SizedBox(width: 4),
+                    Text("Limpiar Todo", style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.redAccent)),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _chipFiltroIndividual(String texto, VoidCallback onBorrar, bool isOscuro) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: isOscuro ? Colors.white10 : Colors.white,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: isOscuro ? Colors.white24 : Colors.grey.shade300),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(texto, style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: isOscuro ? Colors.white70 : Colors.black87)),
+          const SizedBox(width: 4),
+          InkWell(
+            onTap: onBorrar,
+            child: const Icon(Icons.cancel_rounded, size: 14, color: Colors.grey),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
@@ -2713,6 +3016,7 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
           _buildResumenEstadisticas(isOscuro),
           const SizedBox(height: 10),
           _buildChipsFiltro(isOscuro),
+          _buildBannerFiltrosActivos(isOscuro), // 🟡 BARRA INTELIGENTE DE FILTROS ACTIVOS
           const SizedBox(height: 8),
           Expanded(child: _listaPedidosAgrupada(isOscuro)),
         ],

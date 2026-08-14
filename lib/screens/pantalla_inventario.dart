@@ -16,7 +16,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:flutter/foundation.dart'; 
 import 'package:firebase_auth/firebase_auth.dart';
 
-String optimizarUrlCloudinary(String urlOriginal, {int width = 400}) {
+String optimizarUrlCloudinary(String urlOriginal, {int width = 800}) {
   if (urlOriginal.isEmpty) return urlOriginal;
   if (!urlOriginal.contains('cloudinary.com') || urlOriginal.contains('q_auto')) {
     return urlOriginal;
@@ -155,9 +155,34 @@ class _PantallaInventarioState extends State<PantallaInventario> {
       _esPremium = prefs.getBool('es_premium') ?? false;
       _estaCargando = false;
       if (_searchCtrl.text.trim().isNotEmpty) {
-        _filtrados = _prods
-            .where((p) => p['nombre'].toLowerCase().contains(_searchCtrl.text.trim().toLowerCase()))
-            .toList();
+        String query = _searchCtrl.text.trim().toLowerCase();
+        _filtrados = _prods.where((p) {
+          String nombre = (p['nombre'] ?? '').toString().toLowerCase();
+          if (nombre.contains(query)) return true;
+
+          String varStr = p['variantes']?.toString() ?? "";
+          if (varStr.length > 5) {
+            try {
+              var dec = jsonDecode(varStr);
+              if (dec is List) {
+                for (var g in dec) {
+                  if (g is Map) {
+                    List opciones = (g['opciones'] is List) ? g['opciones'] : [];
+                    for (var o in opciones) {
+                      if (o is Map) {
+                        String opcNom = (o['nombre'] ?? '').toString().trim().toLowerCase();
+                        if (opcNom.isNotEmpty && opcNom.contains(query)) {
+                          return true;
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            } catch (_) {}
+          }
+          return false;
+        }).toList();
       } else {
         _filtrados = data;
       }
@@ -166,9 +191,41 @@ class _PantallaInventarioState extends State<PantallaInventario> {
 
   void _filtrar(String q) {
     setState(() {
-      _filtrados = _prods
-          .where((p) => p['nombre'].toLowerCase().contains(q.toLowerCase()))
-          .toList();
+      String query = q.trim().toLowerCase();
+      if (query.isEmpty) {
+        _filtrados = _prods;
+      } else {
+        _filtrados = _prods.where((p) {
+          // 1. Coincidencia en Nombre del Producto
+          String nombre = (p['nombre'] ?? '').toString().toLowerCase();
+          if (nombre.contains(query)) return true;
+
+          // 2. Coincidencia en Nombre de Opciones de Variantes
+          String varStr = p['variantes']?.toString() ?? "";
+          if (varStr.length > 5) {
+            try {
+              var dec = jsonDecode(varStr);
+              if (dec is List) {
+                for (var g in dec) {
+                  if (g is Map) {
+                    List opciones = (g['opciones'] is List) ? g['opciones'] : [];
+                    for (var o in opciones) {
+                      if (o is Map) {
+                        String opcNom = (o['nombre'] ?? '').toString().trim().toLowerCase();
+                        if (opcNom.isNotEmpty && opcNom.contains(query)) {
+                          return true;
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            } catch (_) {}
+          }
+
+          return false;
+        }).toList();
+      }
     });
   }
 
@@ -310,9 +367,15 @@ class _PantallaInventarioState extends State<PantallaInventario> {
                   estaInactivo 
                     ? ColorFiltered(
                         colorFilter: const ColorFilter.mode(Colors.grey, BlendMode.saturation),
-                        child: ImagenInventario(key: ValueKey('img_${p['id']}'), id: p['id']), 
+                        child: ImagenInventario(
+                          key: ValueKey('img_${p['id']}_${p['foto_path']}_${p['ultima_modificacion']}'), 
+                          id: p['id']
+                        ), 
                       )
-                    : ImagenInventario(key: ValueKey('img_${p['id']}'), id: p['id']), 
+                    : ImagenInventario(
+                        key: ValueKey('img_${p['id']}_${p['foto_path']}_${p['ultima_modificacion']}'), 
+                        id: p['id']
+                      ),
                   if (estaInactivo)
                     Center(
                       child: Container(
@@ -476,11 +539,77 @@ class _PantallaInventarioState extends State<PantallaInventario> {
                                 child: Text('Venta: \$${precioFinal.toStringAsFixed(0)}',
                                     style: TextStyle(
                                         fontSize: (esCompacto ? 12 : 13) * factorTexto,
-                                        height: esCompacto ? 1.1 : null, // 🔥 Elimina el margen invisible
+                                        height: esCompacto ? 1.1 : null,
                                         color: descuentoPct > 0
                                             ? const Color.fromARGB(255, 19, 190, 107)
                                             : (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)),
                                         fontWeight: FontWeight.bold))),
+
+                            // 🔍 DESPLEGABLE DE VARIANTES COINCIDENTES EN LA BÚSQUEDA
+                            Builder(
+                              builder: (context) {
+                                String qBusqueda = _searchCtrl.text.trim().toLowerCase();
+                                if (qBusqueda.isEmpty || p['variantes'] == null || p['variantes'].toString().length <= 5) {
+                                  return const SizedBox.shrink();
+                                }
+
+                                List<Map<String, dynamic>> variantesCoincidentes = [];
+                                try {
+                                  var dec = jsonDecode(p['variantes'].toString());
+                                  if (dec is List) {
+                                    for (var g in dec) {
+                                      if (g is Map) {
+                                        String grupoNom = (g['grupo'] ?? '').toString();
+                                        List opciones = (g['opciones'] is List) ? g['opciones'] : [];
+                                        for (var o in opciones) {
+                                          if (o is Map) {
+                                            String opcNom = (o['nombre'] ?? '').toString();
+                                            if (opcNom.toLowerCase().contains(qBusqueda) || grupoNom.toLowerCase().contains(qBusqueda)) {
+                                              variantesCoincidentes.add({
+                                                'grupo': grupoNom,
+                                                'nombre': opcNom,
+                                                'stock': (o['stock'] as num?)?.toInt() ?? 0,
+                                              });
+                                            }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                } catch (_) {}
+
+                                if (variantesCoincidentes.isEmpty) return const SizedBox.shrink();
+
+                                return Container(
+                                  margin: const EdgeInsets.only(top: 4, bottom: 2),
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                                  decoration: BoxDecoration(
+                                    color: isOscuro ? Colors.cyanAccent.withOpacity(0.12) : Colors.blue.shade50,
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(color: isOscuro ? Colors.cyanAccent.withOpacity(0.3) : Colors.blue.shade200),
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: variantesCoincidentes.take(2).map((v) {
+                                      int stVar = v['stock'] as int;
+                                      return Padding(
+                                        padding: const EdgeInsets.symmetric(vertical: 1),
+                                        child: Text(
+                                          "🔹 ${v['nombre']} (Stock: $stVar)",
+                                          style: TextStyle(
+                                            fontSize: (esCompacto ? 8.5 : 10) * factorTexto,
+                                            fontWeight: FontWeight.bold,
+                                            color: stVar <= 0 ? Colors.redAccent : (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)),
+                                          ),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      );
+                                    }).toList(),
+                                  ),
+                                );
+                              },
+                            ),
                             
                             if (!esCompacto) const SizedBox(height: 6) else const SizedBox(height: 3),
                             
@@ -807,9 +936,9 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
       
       final XFile? x = await ImagePicker().pickImage(
         source: source,
-        maxWidth: 800,
-        maxHeight: 800,
-        imageQuality: 70,
+        maxWidth: 1200,
+        maxHeight: 1200,
+        imageQuality: 85,
       );
       
       if (x != null) {
@@ -854,6 +983,12 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("⚠️ El precio base de venta debe ser mayor al de compra"), backgroundColor: Colors.red));
       return;
     }
+    _gruposVariantes.removeWhere((g) {
+      if (g['opciones'] == null || g['opciones'] is! List) return true;
+      List ops = g['opciones'];
+      ops.removeWhere((o) => (o['nombre']?.toString().trim().isEmpty ?? true));
+      return (g['grupo']?.toString().trim().isEmpty ?? true) && ops.isEmpty;
+    });
 
     String variantesJson = jsonEncode(_gruposVariantes);
     setState(() => _estaGuardando = true);
@@ -1045,25 +1180,32 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
 
   Future<String> _guardarImagenEnLocalPersistente(String tempPath, {bool esVariante = false}) async {
     try {
-      // 🔥 EVITAR DUPLICADOS: Si la imagen ya está en la carpeta Boxi, no hacemos una copia nueva.
       if (tempPath.contains('/Boxi/')) {
         return tempPath;
       }
 
-      // Intentamos usar la galería principal pública
-      Directory baseDir = Directory('/storage/emulated/0/Pictures/Boxi');
-      if (!await baseDir.exists()) {
+      final prefs = await SharedPreferences.getInstance();
+      Directory? baseDir;
+
+      if (Platform.isAndroid) {
         try {
-          await baseDir.create(recursive: true);
-        } catch (_) {
-          // Fallback a app directory si Android bloquea Pictures por seguridad
-          final appDir = await getApplicationDocumentsDirectory();
-          baseDir = Directory('${appDir.path}/Boxi');
-        }
+          final extDir = await getExternalStorageDirectory();
+          if (extDir != null) {
+            baseDir = Directory('${extDir.path}/Boxi');
+          }
+        } catch (_) {}
       }
-      
+
+      if (baseDir == null) {
+        final appDir = await getApplicationDocumentsDirectory();
+        baseDir = Directory('${appDir.path}/Boxi');
+      }
+
+      await prefs.setString('local_boxi_path', baseDir.path);
+
       Directory targetDir = esVariante ? Directory('${baseDir.path}/Variantes') : baseDir;
       if (!await targetDir.exists()) await targetDir.create(recursive: true);
+
       final File tempFile = File(tempPath);
       String ext = tempPath.contains('.') ? tempPath.split('.').last : 'jpg';
       if (ext.length > 4 || ext.isEmpty) ext = 'jpg';
@@ -1963,6 +2105,16 @@ class _ImagenInventarioState extends State<ImagenInventario> {
   void initState() {
     super.initState();
     _fotoFuture = _cargarFoto();
+  }
+
+  @override
+  void didUpdateWidget(covariant ImagenInventario oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.id != widget.id || oldWidget.key != widget.key) {
+      setState(() {
+        _fotoFuture = _cargarFoto(); // 🔥 Forzar recarga inmediata de foto
+      });
+    }
   }
 
   Future<dynamic> _cargarFoto() async {

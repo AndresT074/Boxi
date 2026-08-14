@@ -94,7 +94,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   double _descuentoGlobalPct = 0.0;
   int _badgeInventario = 0;
   int _badgePedidos = 0;
-  int _columnasIndex = 1;
+  int _columnasIndex = 2;
   final List<int> _colsVertical = [4, 3, 2, 1];
   final List<int> _colsHorizontal = [8, 5, 3, 1];
   final TextEditingController _searchCtrl = TextEditingController();
@@ -1603,13 +1603,38 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
 
   void _aplicarFiltro() {
     setState(() {
-      if (_estaBuscando && _searchCtrl.text.isNotEmpty) {
-        filtrados = productos
-            .where((p) => p['nombre']
-                .toString()
-                .toLowerCase()
-                .contains(_searchCtrl.text.toLowerCase()))
-            .toList();
+      if (_estaBuscando && _searchCtrl.text.trim().isNotEmpty) {
+        String query = _searchCtrl.text.trim().toLowerCase();
+        filtrados = productos.where((p) {
+          // 1. Coincidencia en Nombre del Producto
+          String nombre = (p['nombre'] ?? '').toString().toLowerCase();
+          if (nombre.contains(query)) return true;
+
+          // 2. Coincidencia en Nombre de Opciones de Variantes
+          String varStr = p['variantes']?.toString() ?? "";
+          if (varStr.length > 5) {
+            try {
+              var dec = jsonDecode(varStr);
+              if (dec is List) {
+                for (var g in dec) {
+                  if (g is Map) {
+                    List opciones = (g['opciones'] is List) ? g['opciones'] : [];
+                    for (var o in opciones) {
+                      if (o is Map) {
+                        String opcNom = (o['nombre'] ?? '').toString().trim().toLowerCase();
+                        if (opcNom.isNotEmpty && opcNom.contains(query)) {
+                          return true;
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            } catch (_) {}
+          }
+
+          return false;
+        }).toList();
       } else {
         filtrados = productos;
       }
@@ -4232,6 +4257,72 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                               Text(p['nombre'], style: TextStyle(fontWeight: FontWeight.bold, fontSize: columnas >= 5 ? 9 : 12), maxLines: 3, overflow: TextOverflow.ellipsis),
                               if (desc > 0) Text('\$$precioOriginal', style: TextStyle(color: isOscuro ? Colors.redAccent.shade100 : Colors.red, fontSize: 10, decoration: TextDecoration.lineThrough)),
                               Text('\$${precioFinal.toStringAsFixed(0)}', style: TextStyle(color: desc > 0 ? (isOscuro ? Colors.greenAccent : Colors.green) : (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)), fontWeight: FontWeight.bold, fontSize: columnas >= 5 ? 9 : 13)),
+
+                              // 🔍 DESPLEGABLE DE VARIANTES COINCIDENTES EN LA BÚSQUEDA
+                              Builder(
+                                builder: (context) {
+                                  String qBusqueda = _searchCtrl.text.trim().toLowerCase();
+                                  if (!_estaBuscando || qBusqueda.isEmpty || p['variantes'] == null || p['variantes'].toString().length <= 5) {
+                                    return const SizedBox.shrink();
+                                  }
+
+                                  List<Map<String, dynamic>> variantesCoincidentes = [];
+                                  try {
+                                    var dec = jsonDecode(p['variantes'].toString());
+                                    if (dec is List) {
+                                      for (var g in dec) {
+                                        if (g is Map) {
+                                          String grupoNom = (g['grupo'] ?? '').toString();
+                                          List opciones = (g['opciones'] is List) ? g['opciones'] : [];
+                                          for (var o in opciones) {
+                                            if (o is Map) {
+                                              String opcNom = (o['nombre'] ?? '').toString();
+                                              if (opcNom.toLowerCase().contains(qBusqueda) || grupoNom.toLowerCase().contains(qBusqueda)) {
+                                                variantesCoincidentes.add({
+                                                  'grupo': grupoNom,
+                                                  'nombre': opcNom,
+                                                  'stock': (o['stock'] as num?)?.toInt() ?? 0,
+                                                });
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  } catch (_) {}
+
+                                  if (variantesCoincidentes.isEmpty) return const SizedBox.shrink();
+
+                                  return Container(
+                                    margin: const EdgeInsets.only(top: 4, bottom: 2),
+                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                                    decoration: BoxDecoration(
+                                      color: isOscuro ? Colors.cyanAccent.withOpacity(0.12) : Colors.blue.shade50,
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(color: isOscuro ? Colors.cyanAccent.withOpacity(0.3) : Colors.blue.shade200),
+                                    ),
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: variantesCoincidentes.take(2).map((v) {
+                                        int stVar = v['stock'] as int;
+                                        return Padding(
+                                          padding: const EdgeInsets.symmetric(vertical: 1),
+                                          child: Text(
+                                            "🔹 ${v['nombre']} (Stock: $stVar)",
+                                            style: TextStyle(
+                                              fontSize: (columnas >= 5 ? 8 : 10).toDouble(),
+                                              fontWeight: FontWeight.bold,
+                                              color: stVar <= 0 ? Colors.redAccent : (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)),
+                                            ),
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        );
+                                      }).toList(),
+                                    ),
+                                  );
+                                },
+                              ),
                           ])),
                         ],
                       ),
@@ -4309,10 +4400,19 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
               },
               onPointerUp: (e) => _detenerArrastreGlobal(),
               onPointerCancel: (e) => _detenerArrastreGlobal(),
-              child: ReorderableListView(
-                scrollController: _mainScroll,
-                physics: const BouncingScrollPhysics(),
-                buildDefaultDragHandles: false,
+              child: RawScrollbar(
+                controller: _mainScroll,
+                thumbVisibility: true, // Muestra la barra al deslizar
+                thickness: 7, // Grosor cómodo para el tacto
+                radius: const Radius.circular(10),
+                thumbColor: isOscuro 
+                    ? Colors.cyanAccent.withOpacity(0.7) 
+                    : const Color(0xFF0D47A1).withOpacity(0.7),
+                interactive: true, // 🔥 PERMITE TOCAR Y ARRASTRAR LA BARRA SUPER RÁPIDO
+                child: ReorderableListView(
+                  scrollController: _mainScroll,
+                  physics: const BouncingScrollPhysics(),
+                  buildDefaultDragHandles: false,
                 proxyDecorator: (Widget child, int index, Animation<double> animation) {
                   return AnimatedBuilder(
                     animation: animation,
@@ -4607,7 +4707,8 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                   const SizedBox(key: ValueKey('spacer_end'), height: 100),
                 ],
               ),
-            );
+            ),
+          );
           }(),
         ),
       ],

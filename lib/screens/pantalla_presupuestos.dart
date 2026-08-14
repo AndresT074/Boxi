@@ -147,7 +147,18 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
       final Database db = await DBHelper.instance.database;
       final now = DateTime.now();
       final String mesActualStr = "${now.year}-${now.month.toString().padLeft(2, '0')}";
-      
+
+      // 🔥 0. AUTO-REPARADOR: Si hay pedidos completados sin detalles locales, restaurar de Realtime DB
+      final pedidosSinDetalle = await db.rawQuery('''
+        SELECT id FROM pedidos 
+        WHERE estado = 'Completado' AND id NOT IN (SELECT DISTINCT pedido_id FROM detalle_pedidos)
+      ''');
+
+      if (pedidosSinDetalle.isNotEmpty && _esPremiumUsuario) {
+        debugPrint("🛡️ Detectados ${pedidosSinDetalle.length} pedidos sin detalles locales. Restaurando desde RTDB...");
+        await ServicioNube.descargarDatosPrivadosRTDB();
+      }
+
       // 1. INVENTARIO
       final prods = await db.query('productos', columns: ['id', 'nombre', 'stock', 'variantes', 'precio_compra', 'precio_venta']);
       List<Map<String, dynamic>> prodsProcesados = [];
@@ -172,20 +183,34 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
         prodsProcesados.add(pClon);
       }
 
-      // 2. CAPITAL GLOBAL CON FECHA ASOCIADA POR TRANSACCIÓN (Últimos 150 registros)
+      // 2. CAPITAL GLOBAL (Rescata productos eliminados estimando su costo si ya no están en inventario)
       final capitalVentasRaw = await db.rawQuery('''
-        SELECT d.nombre_snapshot, d.cantidad as cantidad_total, p.fecha_hora as fecha,
-               (d.cantidad * (SELECT precio_compra FROM productos WHERE id = d.producto_id)) as capital_recuperado
+        SELECT COALESCE(d.nombre_snapshot, (SELECT nombre FROM productos WHERE id = d.producto_id), 'Producto') as nombre_snapshot, 
+               d.cantidad as cantidad_total, 
+               COALESCE(p.fecha_pago, p.fecha_hora) as fecha,
+               (d.cantidad * COALESCE(
+                 NULLIF((SELECT precio_compra FROM productos WHERE id = d.producto_id), 0),
+                 NULLIF(d.precio_unitario * 0.5, 0),
+                 0
+               )) as capital_recuperado
         FROM detalle_pedidos d JOIN pedidos p ON d.pedido_id = p.id
-        WHERE p.estado = 'Completado' AND (d.cantidad * (SELECT precio_compra FROM productos WHERE id = d.producto_id)) > 0
-        ORDER BY p.fecha_hora DESC
+        WHERE p.estado = 'Completado' AND d.cantidad > 0
+        ORDER BY COALESCE(p.fecha_pago, p.fecha_hora) DESC
         LIMIT 150
       ''');
 
       // LÍMITE DE MEMORIA: Solo los últimos 150 ajustes manuales
       final ajustesManuales = await db.query('ajustes_capital', columns: ['id', 'monto', 'descripcion', 'fecha'], orderBy: 'id DESC', limit: 150);
 
-      final totalRecuperadoVentas = await db.rawQuery("SELECT SUM(cantidad * (SELECT precio_compra FROM productos WHERE id = producto_id)) as total FROM detalle_pedidos WHERE pedido_id IN (SELECT id FROM pedidos WHERE estado = 'Completado')");
+      final totalRecuperadoVentas = await db.rawQuery('''
+        SELECT SUM(d.cantidad * COALESCE(
+                 NULLIF((SELECT precio_compra FROM productos WHERE id = d.producto_id), 0),
+                 NULLIF(d.precio_unitario * 0.5, 0),
+                 0
+               )) as total 
+        FROM detalle_pedidos d JOIN pedidos p ON d.pedido_id = p.id 
+        WHERE p.estado = 'Completado'
+      ''');
       final totalGastadoQ = await db.rawQuery("SELECT SUM(monto) as total FROM ajustes_capital");
       
       double capRecup = (totalRecuperadoVentas.first['total'] as num? ?? 0).toDouble();
@@ -1092,20 +1117,24 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
       DateTime dateInicioRankings = now.subtract(Duration(days: _filtroRankings == 'Semana' ? 6 : (_filtroRankings == 'Mes' ? (now.day - 1) : 365)));
       String inicioRankingsStr = dateInicioRankings.toIso8601String().substring(0, 10);
 
-      // 3. RANKINGS (Productos vs Variantes)
+      // 3. RANKINGS (Productos vs Variantes sin productos nulos)
       String queryProds = _tipoRanking == 'Productos' 
           ? '''
-            SELECT (SELECT nombre FROM productos WHERE id = d.producto_id) as nombre, SUM(d.cantidad) as total_vendido, COUNT(DISTINCT d.pedido_id) as total_pedidos
+            SELECT COALESCE((SELECT nombre FROM productos WHERE id = d.producto_id), d.nombre_snapshot, 'Producto') as nombre, 
+                   SUM(d.cantidad) as total_vendido, 
+                   COUNT(DISTINCT d.pedido_id) as total_pedidos
             FROM detalle_pedidos d JOIN pedidos p ON d.pedido_id = p.id 
-            WHERE p.estado = 'Completado' AND substr(p.fecha_hora, 1, 10) >= ?
-            GROUP BY d.producto_id 
+            WHERE p.estado = 'Completado' AND substr(COALESCE(p.fecha_pago, p.fecha_hora), 1, 10) >= ?
+            GROUP BY COALESCE((SELECT nombre FROM productos WHERE id = d.producto_id), d.nombre_snapshot)
             ORDER BY total_vendido DESC LIMIT $_limiteRankings
           '''
           : '''
-            SELECT d.nombre_snapshot as nombre, SUM(d.cantidad) as total_vendido, COUNT(DISTINCT d.pedido_id) as total_pedidos
+            SELECT COALESCE(d.nombre_snapshot, (SELECT nombre FROM productos WHERE id = d.producto_id), 'Producto') as nombre, 
+                   SUM(d.cantidad) as total_vendido, 
+                   COUNT(DISTINCT d.pedido_id) as total_pedidos
             FROM detalle_pedidos d JOIN pedidos p ON d.pedido_id = p.id 
-            WHERE p.estado = 'Completado' AND substr(p.fecha_hora, 1, 10) >= ?
-            GROUP BY d.nombre_snapshot 
+            WHERE p.estado = 'Completado' AND substr(COALESCE(p.fecha_pago, p.fecha_hora), 1, 10) >= ?
+            GROUP BY COALESCE(d.nombre_snapshot, d.producto_id) 
             ORDER BY total_vendido DESC LIMIT $_limiteRankings
           ''';
 
@@ -2038,6 +2067,10 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
               var d = datos[i];
               int uVendidas = (d['total_vendido'] as num).toInt();
               int totalPeds = (d['total_pedidos'] as num).toInt();
+              String nombreMostrar = (d['nombre'] == null || d['nombre'].toString() == 'null' || d['nombre'].toString().trim().isEmpty)
+                  ? 'Producto'
+                  : d['nombre'].toString();
+
               return ListTile(
                 contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
                 leading: CircleAvatar(
@@ -2045,8 +2078,7 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
                   backgroundColor: Colors.orange.withOpacity(0.15), 
                   child: Text("${i+1}", style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: Colors.orange))
                 ),
-                // 🔥 CORREGIDO: maxLines: 2 para que los nombres de variantes se vean completos
-                title: Text(d['nombre'].toString(), style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: isOscuro ? Colors.white : Colors.black87), maxLines: 2, overflow: TextOverflow.ellipsis),
+                title: Text(nombreMostrar, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: isOscuro ? Colors.white : Colors.black87), maxLines: 2, overflow: TextOverflow.ellipsis),
                 subtitle: Text("Solicitado en $totalPeds ${totalPeds == 1 ? 'pedido' : 'pedidos'}", style: TextStyle(fontSize: 10, color: isOscuro ? Colors.white38 : Colors.grey, fontWeight: FontWeight.w500)),
                 trailing: Text("$uVendidas u.", style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 14, color: Colors.orange)),
               );

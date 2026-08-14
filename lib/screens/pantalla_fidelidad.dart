@@ -2459,7 +2459,7 @@ final user = FirebaseAuth.instance.currentUser;
                 }
 
                 String premioTxt = premioDesc.isNotEmpty ? premioDesc : tarjetaTitulo;
-                String mensaje = "¡Hola *$nombreCliente*! 🎁 *$_nombreNegocio* te obsequió *1 punto* para tu tarjeta de regalo *$tarjetaTitulo*.\n\nPor *$metaCompras* compras$textoMonto obtienes *$premioTxt*.\n\n*Al completar 5 puntos llevas el premio, reclama tu punto ingresando a este enlace:*\n$enlaceUnico";
+                String mensaje = "¡Hola *$nombreCliente*! 🎁 *$_nombreNegocio* te obsequió *1 punto* para tu tarjeta de regalo *$tarjetaTitulo*.\n\nPor *$metaCompras* compras$textoMonto obtienes *$premioTxt*.\n\n*Al completar $metaCompras puntos llevas el premio, reclama tu punto ingresando a este enlace:*\n$enlaceUnico";
                 String numClean = telefono.replaceAll(RegExp(r'\D'), '');
 
                 if (numClean.length == 10) numClean = "57$numClean";

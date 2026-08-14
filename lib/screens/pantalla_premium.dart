@@ -18,6 +18,7 @@ class _PantallaPremiumState extends State<PantallaPremium> {
   final InAppPurchase _iap = InAppPurchase.instance;
   bool _procesando = false;
   bool _cargandoTienda = true; 
+  bool _yaEsPro = false; // 👈 NUEVO: Estado si ya es usuario Premium
   ProductDetails? _productoPro; 
   StreamSubscription<List<PurchaseDetails>>? _subscription;
 
@@ -32,6 +33,7 @@ class _PantallaPremiumState extends State<PantallaPremium> {
       debugPrint("Error en stream: $error");
     });
 
+    _comprobarSiYaEsProLocal();
     _cargarPrecioReal();
     _verificarLicenciaReal(); 
   }
@@ -40,6 +42,15 @@ class _PantallaPremiumState extends State<PantallaPremium> {
   void dispose() {
     _subscription?.cancel();
     super.dispose();
+  }
+
+  Future<void> _comprobarSiYaEsProLocal() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) {
+      setState(() {
+        _yaEsPro = prefs.getBool('es_premium') ?? false;
+      });
+    }
   }
 
   Future<void> _verificarLicenciaReal() async {
@@ -79,7 +90,7 @@ class _PantallaPremiumState extends State<PantallaPremium> {
   }
 
   void _listenToPurchaseUpdated(List<PurchaseDetails> purchaseDetailsList) async {
-    if (purchaseDetailsList.isEmpty) return; // ✅ simple y seguro
+    if (purchaseDetailsList.isEmpty) return;
 
     for (var purchaseDetails in purchaseDetailsList) {
       if (purchaseDetails.status == PurchaseStatus.purchased ||
@@ -129,7 +140,7 @@ class _PantallaPremiumState extends State<PantallaPremium> {
               backgroundColor: Colors.red, 
             )
           );
-          return; // Lo rebotamos inmediatamente y NO le damos el Premium
+          return;
         }
 
         // 🔥 VALIDACIÓN 2: ¿Es de otro usuario? 
@@ -165,8 +176,10 @@ class _PantallaPremiumState extends State<PantallaPremium> {
       await ServicioNube.respaldarDatosPrivadosRTDB();      // A Realtime DB (Privado)
       await ServicioNube.compilarYSubirCatalogoRTDB();     // A Realtime DB (Catálogo Web)
       await ServicioNube.migrarTodoACloudinary();         // Fotos locales a Cloudinary
+
       if (mounted) {
         setState(() {
+          _yaEsPro = true;
           _procesando = false;
         });
         _mostrarDialogoExito();
@@ -195,12 +208,33 @@ class _PantallaPremiumState extends State<PantallaPremium> {
     }
   }
 
+  // 🔄 RESTAURACIÓN MANUAL PARA REQUISITO DE GOOGLE Y APPLE
+  Future<void> _restaurarComprasManual() async {
+    setState(() => _procesando = true);
+    try {
+      await _iap.restorePurchases();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("🔎 Verificando compras anteriores en tu cuenta de Google..."))
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Error al restaurar: $e"), backgroundColor: Colors.red)
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _procesando = false);
+    }
+  }
+
   void _mostrarDialogoExito() {
     showDialog(context: context, barrierDismissible: false, builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF1B263B),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: const BorderSide(color: Colors.amberAccent)),
         title: const Icon(Icons.verified_user, color: Colors.greenAccent, size: 60),
-        content: const Text("¡BIENVENIDO AL PREMIUM!\nTu inventario se ha sincronizado con la nube.", textAlign: TextAlign.center, style: TextStyle(color: Colors.white)),
+        content: const Text("¡BIENVENIDO AL NIVEL PRO! 👑\nTu inventario y catálogo web se han sincronizado con la nube.", textAlign: TextAlign.center, style: TextStyle(color: Colors.white)),
         actions: [
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: Colors.amberAccent),
@@ -258,6 +292,28 @@ class _PantallaPremiumState extends State<PantallaPremium> {
                       children: [
                         const Icon(Icons.workspace_premium_rounded, size: 70, color: Colors.amberAccent),
                         const Text("BOXI NIVEL PRO", style: TextStyle(color: Colors.amberAccent, fontSize: 28, fontWeight: FontWeight.w900)),
+                        
+                        // 👑 AVISO SI YA ES PRO
+                        if (_yaEsPro) ...[
+                          const SizedBox(height: 10),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: Colors.amberAccent.withOpacity(0.15),
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(color: Colors.amberAccent),
+                            ),
+                            child: const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.verified, color: Colors.amberAccent, size: 18),
+                                SizedBox(width: 8),
+                                Text("¡YA ERES USUARIO PRO! 👑", style: TextStyle(color: Colors.amberAccent, fontWeight: FontWeight.bold, fontSize: 12)),
+                              ],
+                            ),
+                          ),
+                        ],
+
                         const SizedBox(height: 20),
                         _tablaComparativa(),
                         const SizedBox(height: 25),
@@ -283,17 +339,28 @@ class _PantallaPremiumState extends State<PantallaPremium> {
                           )
                         else Column(
                           children: [
-                            ElevatedButton(
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: _productoPro != null ? Colors.amberAccent : Colors.grey, 
-                                minimumSize: const Size(double.infinity, 60), 
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15))
+                            if (!_yaEsPro) ...[
+                              ElevatedButton(
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: _productoPro != null ? Colors.amberAccent : Colors.grey, 
+                                  minimumSize: const Size(double.infinity, 60), 
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15))
+                                ),
+                                onPressed: _productoPro != null ? _comprarNivelPro : null,
+                                child: const Text("OBTENER NIVEL PRO 👑", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18, color: Colors.black)),
                               ),
-                              onPressed: _productoPro != null ? _comprarNivelPro : null,
-                              child: const Text("OBTENER NIVEL PRO 👑", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18, color: Colors.black)),
+                              const SizedBox(height: 12),
+                            ],
+                            
+                            // 🔄 BOTÓN DE RESTAURAR COMPRAS OBLIGATORIO
+                            TextButton.icon(
+                              onPressed: _restaurarComprasManual,
+                              icon: const Icon(Icons.restore, color: Colors.amberAccent, size: 16),
+                              label: const Text("Restaurar Compras Anteriores", style: TextStyle(color: Colors.amberAccent, fontSize: 12, fontWeight: FontWeight.bold)),
                             ),
                           ],
                         ),
+                        const SizedBox(height: 10),
                         TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cerrar", style: TextStyle(color: Colors.white38)))
                       ],
                     ),
@@ -315,7 +382,9 @@ class _PantallaPremiumState extends State<PantallaPremium> {
           _filaHeader(),
           _filaDato("Límite Productos", "Hasta 50", "Ilimitados"),
           _filaDato("Publicidad", "Con Anuncios", "Sin Anuncios"),
-          _filaDato("Sincronización Nube", "❌", "✅"),
+          _filaDato("Tarjetas de Fidelidad", "❌", "✅"),
+          _filaDato("Fotos HD en Nube", "❌", "✅ (Cloudinary)"),
+          _filaDato("Sincronización Nube", "❌", "✅ Realtime"),
           _filaDato("Multi-dispositivo", "❌", "✅"),
           _filaDato("Catálogo Web", "❌", "✅"),
           _filaDato("Respaldo Automático", "Manual", "✅"),

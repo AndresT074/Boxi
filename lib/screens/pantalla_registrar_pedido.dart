@@ -653,8 +653,6 @@ class _PantallaRegistrarPedidoState extends State<PantallaRegistrarPedido> {
         const SizedBox(height: 12),
         _in(_negC, 'Nombre del Negocio (Opcional)', Icons.store),
         const SizedBox(height: 12),
-        _in(_dC, 'Dirección (Opcional)', Icons.location_on), 
-        const SizedBox(height: 12),
         Padding(
           padding: const EdgeInsets.only(bottom: 6, left: 4),
           child: Row(
@@ -711,6 +709,8 @@ class _PantallaRegistrarPedidoState extends State<PantallaRegistrarPedido> {
             ),
           ],
         ),
+        const SizedBox(height: 12),
+        _in(_dC, 'Dirección (Opcional)', Icons.location_on),
         if (esHorizontal) ...[
           const SizedBox(height: 20),
           _buildFirma(esHorizontal),
