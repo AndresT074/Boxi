@@ -102,10 +102,18 @@ class _CatalogoWebState extends State<CatalogoWeb> {
     }
 
     try {
-      DatabaseReference ref = FirebaseDatabase.instance.ref("catalogos_web/${widget.adminId}");
-      debugPrint("🚀 [DIAGNOSIS] Consultando ruta en RTDB: catalogos_web/${widget.adminId}");
+      // 🔥 SANEAMIENTO DE URL PARA MESSENGER / FACEBOOK / INSTAGRAM
+      String cleanAdminId = widget.adminId.trim();
+      if (cleanAdminId.contains('?')) cleanAdminId = cleanAdminId.split('?').first;
+      if (cleanAdminId.contains('&')) cleanAdminId = cleanAdminId.split('&').first;
+      if (cleanAdminId.contains('#')) cleanAdminId = cleanAdminId.split('#').first;
+      if (cleanAdminId.contains('/')) cleanAdminId = cleanAdminId.split('/').first;
+
+      DatabaseReference ref = FirebaseDatabase.instance.ref("catalogos_web/$cleanAdminId");
+      debugPrint("🚀 [DIAGNOSIS] Consultando ruta limpia en RTDB: catalogos_web/$cleanAdminId");
       
-      final snapshot = await ref.get();
+      // Timeout de 10 segundos por si el cliente tiene internet 3G/4G muy lento en Messenger
+      final snapshot = await ref.get().timeout(const Duration(seconds: 10));
       debugPrint("🚀 [DIAGNOSIS] ¿Existe el nodo en la base de datos?: ${snapshot.exists}");
 
       if (snapshot.exists) {
@@ -354,7 +362,40 @@ class _CatalogoWebState extends State<CatalogoWeb> {
   Widget build(BuildContext context) {
     final docsFiltrados = _productos.where((p) {
       bool estaActivo = p['activo'] == null || p['activo'] == true || p['activo'] == 1;
-      return estaActivo && p['nombre'].toString().toLowerCase().contains(busqueda.toLowerCase());
+      if (!estaActivo) return false;
+
+      String query = busqueda.trim().toLowerCase();
+      if (query.isEmpty) return true;
+
+      // 1. Coincidencia en Nombre del Producto
+      String nombre = (p['nombre'] ?? '').toString().toLowerCase();
+      if (nombre.contains(query)) return true;
+
+      // 2. Coincidencia en Opciones de Variantes
+      String varStr = p['variantes']?.toString() ?? "";
+      if (varStr.length > 5) {
+        try {
+          var dec = p['variantes'];
+          if (dec is String) dec = jsonDecode(dec);
+          if (dec is List) {
+            for (var g in dec) {
+              if (g is Map) {
+                List opciones = (g['opciones'] is List) ? g['opciones'] : [];
+                for (var o in opciones) {
+                  if (o is Map) {
+                    String opcNom = (o['nombre'] ?? '').toString().trim().toLowerCase();
+                    if (opcNom.isNotEmpty && opcNom.contains(query)) {
+                      return true;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        } catch (_) {}
+      }
+
+      return false;
     }).toList();
     // 🔥 Agrupar productos
     Map<String, List<Map<String, dynamic>>> grupos = {};
@@ -440,10 +481,25 @@ class _CatalogoWebState extends State<CatalogoWeb> {
                       physics: const BouncingScrollPhysics(),
                       child: Column(
                         children: [
-                          if (docsFiltrados.isEmpty)
-                            const Padding(
-                              padding: EdgeInsets.all(50),
-                              child: Center(child: Text("No se encontraron productos")),
+                          if (docsFiltrados.isEmpty && !_estaCargando)
+                            Padding(
+                              padding: const EdgeInsets.all(40),
+                              child: Center(
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    const Icon(Icons.storefront_outlined, size: 60, color: Colors.grey),
+                                    const SizedBox(height: 15),
+                                    const Text("No se encontraron productos en este catálogo.", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold)),
+                                    const SizedBox(height: 15),
+                                    ElevatedButton.icon(
+                                      onPressed: () => _iniciarCargaProgresiva(),
+                                      icon: const Icon(Icons.refresh),
+                                      label: const Text("Reintentar cargar"),
+                                    )
+                                  ],
+                                ),
+                              ),
                             ),
                           ..._categoriasOrdenadas.map((cat) {
                             return _construirBloqueCategoria(cat, grupos[cat]!, columnas, esCelular);
@@ -455,7 +511,7 @@ class _CatalogoWebState extends State<CatalogoWeb> {
                             columnas, 
                             esCelular
                           ),
-                          _boxiFooter(),
+                          if (docsFiltrados.isNotEmpty) _boxiFooter(),
                         ],
                       ),
                     );
@@ -830,6 +886,65 @@ class _CatalogoWebState extends State<CatalogoWeb> {
                 if (tieneVariantes) 
                   _buildVariantesPills(grps, esCelular),
 
+                // 🔍 DESPLEGABLE DE VARIANTES COINCIDENTES EN BÚSQUEDA WEB
+                Builder(
+                  builder: (context) {
+                    String qBusqueda = busqueda.trim().toLowerCase();
+                    if (qBusqueda.isEmpty || !tieneVariantes) return const SizedBox.shrink();
+
+                    List<Map<String, dynamic>> variantesCoincidentes = [];
+                    for (var g in grps) {
+                      if (g is Map) {
+                        String grupoNom = (g['grupo'] ?? '').toString();
+                        List opciones = (g['opciones'] is List) ? g['opciones'] : [];
+                        for (var o in opciones) {
+                          if (o is Map) {
+                            String opcNom = (o['nombre'] ?? '').toString();
+                            if (opcNom.toLowerCase().contains(qBusqueda) || grupoNom.toLowerCase().contains(qBusqueda)) {
+                              variantesCoincidentes.add({
+                                'grupo': grupoNom,
+                                'nombre': opcNom,
+                                'stock': (o['stock'] as num?)?.toInt() ?? 0,
+                              });
+                            }
+                          }
+                        }
+                      }
+                    }
+
+                    if (variantesCoincidentes.isEmpty) return const SizedBox.shrink();
+
+                    return Container(
+                      margin: const EdgeInsets.only(top: 6, bottom: 2),
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.blue.shade50,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.blue.shade200),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: variantesCoincidentes.take(2).map((v) {
+                          int stVar = v['stock'] as int;
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 1),
+                            child: Text(
+                              "🔹 ${v['nombre']} (Stock: $stVar)",
+                              style: TextStyle(
+                                fontSize: esCelular ? 9 : 11,
+                                fontWeight: FontWeight.bold,
+                                color: stVar <= 0 ? Colors.red : const Color(0xFF0D47A1),
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                    );
+                  },
+                ),
+
                 SizedBox(height: esCelular ? 6 : 12),
                 _buildBotonesAccion(p, tieneVariantes, grps, cantTotalProd),
               ],
@@ -913,7 +1028,20 @@ class _CatalogoWebState extends State<CatalogoWeb> {
                               width: double.infinity,
                               height: 300,
                               child: p['foto_path'].toString().startsWith('http')
-                                ? Image.network(optimizarUrlCloudinary(p['foto_path'], width: 800), fit: BoxFit.contain)
+                                ? Image.network(
+                                    optimizarUrlCloudinary(p['foto_path'], width: 600), 
+                                    fit: BoxFit.contain,
+                                    gaplessPlayback: true,
+                                    // 🔥 Pinta la foto que ya está en caché en 0ms mientras carga en HD
+                                    loadingBuilder: (ctx, child, progress) {
+                                      if (progress == null) return child;
+                                      return Image.network(
+                                        optimizarUrlCloudinary(p['foto_path'], width: 400),
+                                        fit: BoxFit.contain,
+                                      );
+                                    },
+                                    errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, size: 60, color: Colors.grey),
+                                  )
                                 : Image.memory(base64Decode(p['foto_path']), fit: BoxFit.contain, gaplessPlayback: true)
                             )
                           : Container(height: 250, width: double.infinity, color: Colors.grey.shade200, child: const Icon(Icons.image, size: 60, color: Colors.grey)),
