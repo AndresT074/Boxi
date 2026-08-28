@@ -61,6 +61,15 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
   List<String> _ejeXPedidosEtiquetasCompletas = []; // 🔥 Fechas reales para tooltips
   double _maxYPedidosGrafico = 10;
 
+  // 🔥 NUEVAS VARIABLES: FIDELIDAD Y PROVEEDORES
+  List<Map<String, dynamic>> _tarjetasFidelidad = [];
+  int? _tarjetaFidelidadSeleccionada;
+  List<Map<String, dynamic>> _topClientesFidelidad = [];
+
+  String _filtroProveedores = 'Semana';
+  int _limiteProveedores = 5;
+  List<Map<String, dynamic>> _topProveedores = [];
+
   // Variables de Retención
   Map<String, Map<String, int>> _retencionClientes = {
     '15': {'activos': 0, 'inactivos': 0},
@@ -146,21 +155,21 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
     try {
       final Database db = await DBHelper.instance.database;
       final now = DateTime.now();
-      final String mesActualStr = "${now.year}-${now.month.toString().padLeft(2, '0')}";
-
-      // 🔥 0. AUTO-REPARADOR: Si hay pedidos completados sin detalles locales, restaurar de Realtime DB
-      final pedidosSinDetalle = await db.rawQuery('''
-        SELECT id FROM pedidos 
-        WHERE estado = 'Completado' AND id NOT IN (SELECT DISTINCT pedido_id FROM detalle_pedidos)
-      ''');
-
-      if (pedidosSinDetalle.isNotEmpty && _esPremiumUsuario) {
-        debugPrint("🛡️ Detectados ${pedidosSinDetalle.length} pedidos sin detalles locales. Restaurando desde RTDB...");
-        await ServicioNube.descargarDatosPrivadosRTDB();
-      }
+      final String mesActualStr =
+          "${now.year}-${now.month.toString().padLeft(2, '0')}";
 
       // 1. INVENTARIO
-      final prods = await db.query('productos', columns: ['id', 'nombre', 'stock', 'variantes', 'precio_compra', 'precio_venta']);
+      final prods = await db.query(
+        'productos',
+        columns: [
+          'id',
+          'nombre',
+          'stock',
+          'variantes',
+          'precio_compra',
+          'precio_venta',
+        ],
+      );
       List<Map<String, dynamic>> prodsProcesados = [];
       double invBodega = 0, utilProy = 0;
       for (var p in prods) {
@@ -170,9 +179,13 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
           try {
             List<dynamic> grps = jsonDecode(varStr);
             int sVar = 0;
-            for (var g in grps) { for (var o in g['opciones']) { sVar += (o['stock'] ?? 0) as int; } }
+            for (var g in grps) {
+              for (var o in g['opciones']) {
+                sVar += (o['stock'] ?? 0) as int;
+              }
+            }
             stockReal = sVar;
-          } catch(e) {}
+          } catch (e) {}
         }
         double pC = (p['precio_compra'] as num? ?? 0).toDouble();
         double pV = (p['precio_venta'] as num? ?? 0).toDouble();
@@ -183,15 +196,15 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
         prodsProcesados.add(pClon);
       }
 
-      // 2. CAPITAL GLOBAL (Rescata productos eliminados estimando su costo si ya no están en inventario)
+      // 2. CAPITAL GLOBAL DE REINVERSIÓN (Cálculo Contable Infalible: Total Venta - Ganancia = Costo Real)
       final capitalVentasRaw = await db.rawQuery('''
         SELECT COALESCE(d.nombre_snapshot, (SELECT nombre FROM productos WHERE id = d.producto_id), 'Producto') as nombre_snapshot, 
                d.cantidad as cantidad_total, 
                COALESCE(p.fecha_pago, p.fecha_hora) as fecha,
                (d.cantidad * COALESCE(
                  NULLIF((SELECT precio_compra FROM productos WHERE id = d.producto_id), 0),
-                 NULLIF(d.precio_unitario * 0.5, 0),
-                 0
+                 NULLIF(d.precio_unitario - (d.subtotal / NULLIF(d.cantidad, 0) * 0.3), 0),
+                 d.precio_unitario * 0.5
                )) as capital_recuperado
         FROM detalle_pedidos d JOIN pedidos p ON d.pedido_id = p.id
         WHERE p.estado = 'Completado' AND d.cantidad > 0
@@ -199,52 +212,69 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
         LIMIT 150
       ''');
 
-      // LÍMITE DE MEMORIA: Solo los últimos 150 ajustes manuales
-      final ajustesManuales = await db.query('ajustes_capital', columns: ['id', 'monto', 'descripcion', 'fecha'], orderBy: 'id DESC', limit: 150);
+      final ajustesManuales = await db.query(
+        'ajustes_capital',
+        columns: ['id', 'monto', 'descripcion', 'fecha'],
+        orderBy: 'id DESC',
+        limit: 150,
+      );
 
+      // Suma contable exacta del costo de todos los pedidos completados
       final totalRecuperadoVentas = await db.rawQuery('''
-        SELECT SUM(d.cantidad * COALESCE(
-                 NULLIF((SELECT precio_compra FROM productos WHERE id = d.producto_id), 0),
-                 NULLIF(d.precio_unitario * 0.5, 0),
-                 0
-               )) as total 
-        FROM detalle_pedidos d JOIN pedidos p ON d.pedido_id = p.id 
-        WHERE p.estado = 'Completado'
+        SELECT SUM(COALESCE(total_venta - ganancia_total, 0)) as total 
+        FROM pedidos 
+        WHERE estado = 'Completado'
       ''');
-      final totalGastadoQ = await db.rawQuery("SELECT SUM(monto) as total FROM ajustes_capital");
-      
-      double capRecup = (totalRecuperadoVentas.first['total'] as num? ?? 0).toDouble();
+      final totalGastadoQ = await db.rawQuery(
+        "SELECT SUM(monto) as total FROM ajustes_capital",
+      );
+
+      double capRecup = (totalRecuperadoVentas.first['total'] as num? ?? 0)
+          .toDouble();
       double capAjust = (totalGastadoQ.first['total'] as num? ?? 0).toDouble();
       double capitalDispo = capRecup - capAjust;
 
-      // 3. MÉTRICAS DEL MES (Filtradas por fecha de pago)
+      // 3. MÉTRICAS DEL MES
       final metricasMes = await db.rawQuery(
-          "SELECT SUM(total_venta) as cajaMes, SUM(ganancia_total + COALESCE(valor_domicilio, 0)) as utilMes FROM pedidos WHERE estado = 'Completado' AND substr(COALESCE(fecha_pago, fecha_hora), 1, 7) = ?", 
-          [mesActualStr]
+        '''
+        SELECT SUM(total_venta) as cajaMes, 
+               SUM(ganancia_total + COALESCE(valor_domicilio, 0)) as utilMes 
+        FROM pedidos 
+        WHERE estado = 'Completado' AND substr(COALESCE(fecha_pago, fecha_hora), 1, 7) = ?
+      ''',
+        [mesActualStr],
       );
+
       double cajaMes = (metricasMes.first['cajaMes'] as num? ?? 0).toDouble();
       double utilMes = (metricasMes.first['utilMes'] as num? ?? 0).toDouble();
 
-      // 4. DESGLOSE DETALLADO POR CLIENTE (Filtrado por fecha de pago)
-      final clientesRaw = await db.rawQuery('''
-        SELECT c.id as cliente_id, COALESCE(c.nombre_completo, 'Cliente Borrado') as nombre_completo, c.nombre_negocio,
+      // 4. DESGLOSE DETALLADO POR CLIENTE
+      final clientesRaw = await db.rawQuery(
+        '''
+        SELECT c.id as cliente_id, COALESCE(c.nombre_completo, 'Cliente General') as nombre_completo, c.nombre_negocio,
                SUM(p.total_venta) as recaudado, SUM(p.ganancia_total + COALESCE(p.valor_domicilio, 0)) as ganancia_neta, SUM(COALESCE(p.valor_domicilio, 0)) as total_domicilios
         FROM pedidos p LEFT JOIN clientes c ON p.cliente_id = c.id
-        WHERE p.estado = 'Completado' AND substr(COALESCE(p.fecha_pago, p.fecha_hora), 1, 7) = ? GROUP BY p.cliente_id
-      ''', [mesActualStr]);
+        WHERE p.estado = 'Completado' AND substr(COALESCE(p.fecha_pago, p.fecha_hora), 1, 7) = ? 
+        GROUP BY p.cliente_id
+      ''',
+        [mesActualStr],
+      );
 
       List<Map<String, dynamic>> desgloseMesDefinitivo = [];
       for (var c in clientesRaw) {
-        final itemsAgrupados = await db.rawQuery('''
+        final itemsAgrupados = await db.rawQuery(
+          '''
           SELECT d.nombre_snapshot, SUM(d.cantidad) as total_cant, d.descuento, d.precio_unitario, (SELECT precio_compra FROM productos WHERE id = d.producto_id) as p_compra
           FROM detalle_pedidos d JOIN pedidos p ON d.pedido_id = p.id
           WHERE p.cliente_id = ? AND p.estado = 'Completado' AND substr(COALESCE(p.fecha_pago, p.fecha_hora), 1, 7) = ?
           GROUP BY d.nombre_snapshot, d.descuento, d.precio_unitario, d.producto_id
-        ''', [c['cliente_id'], mesActualStr]);
+        ''',
+          [c['cliente_id'], mesActualStr],
+        );
 
         List<String> listaRecogido = [];
         List<String> listaGanancia = [];
-        
+
         for (var i in itemsAgrupados) {
           double costoU = (i['p_compra'] as num? ?? 0).toDouble();
           double pBaseV = (i['precio_unitario'] as num? ?? 0).toDouble();
@@ -254,43 +284,70 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
           double pVentaF = pBaseV - (pBaseV * (dPct / 100));
           double totalRec = pVentaF * cant;
           double gananciaL = (pVentaF - costoU) * cant;
-          
+
           String descStr = dPct > 0 ? " [-$dPct%]" : "";
-          listaRecogido.add("• ${i['nombre_snapshot']}$descStr (x$cant) - \$${totalRec.toStringAsFixed(0)}");
-          String ganTxt = gananciaL >= 0 ? "(G: +\$${gananciaL.toStringAsFixed(0)})" : "(PÉRDIDA: \$${gananciaL.toStringAsFixed(0)})";
-          listaGanancia.add("• ${i['nombre_snapshot']}$descStr (x$cant) -> $ganTxt");
+          listaRecogido.add(
+            "• ${i['nombre_snapshot']}$descStr (x$cant) - \$${totalRec.toStringAsFixed(0)}",
+          );
+          String ganTxt = gananciaL >= 0
+              ? "(G: +\$${gananciaL.toStringAsFixed(0)})"
+              : "(PÉRDIDA: \$${gananciaL.toStringAsFixed(0)})";
+          listaGanancia.add(
+            "• ${i['nombre_snapshot']}$descStr (x$cant) -> $ganTxt",
+          );
         }
 
         double doms = (c['total_domicilios'] as num? ?? 0).toDouble();
         if (doms > 0) {
-          listaRecogido.add("🛵 DOMICILIOS/ENVÍOS - \$${doms.toStringAsFixed(0)}");
-          listaGanancia.add("🛵 DOMICILIOS/ENVÍOS -> (G: +\$${doms.toStringAsFixed(0)})");
+          listaRecogido.add(
+            "🛵 DOMICILIOS/ENVÍOS - \$${doms.toStringAsFixed(0)}",
+          );
+          listaGanancia.add(
+            "🛵 DOMICILIOS/ENVÍOS -> (G: +\$${doms.toStringAsFixed(0)})",
+          );
         }
 
         desgloseMesDefinitivo.add({
-          'nombre_completo': c['nombre_completo'], 'nombre_negocio': c['nombre_negocio'],
-          'recaudado': (c['recaudado'] as num? ?? 0).toDouble(), 'ganancia': (c['ganancia_neta'] as num? ?? 0).toDouble(),
-          'articulos_recogido': listaRecogido, 'articulos_ganancia': listaGanancia,
+          'nombre_completo': c['nombre_completo'],
+          'nombre_negocio': c['nombre_negocio'],
+          'recaudado': (c['recaudado'] as num? ?? 0).toDouble(),
+          'ganancia': (c['ganancia_neta'] as num? ?? 0).toDouble(),
+          'articulos_recogido': listaRecogido,
+          'articulos_ganancia': listaGanancia,
         });
       }
 
-      // Máximo 150 reportes históricos en RAM sin la columna gigante de JSON.
       final reportes = await db.query(
-        'reportes_guardados', 
-        columns: ['id', 'titulo', 'fecha', 'caja', 'utilidad', 'reinversion', 'ultima_modificacion'],
+        'reportes_guardados',
+        columns: [
+          'id',
+          'titulo',
+          'fecha',
+          'caja',
+          'utilidad',
+          'reinversion',
+          'ultima_modificacion',
+        ],
         orderBy: "id DESC",
-        limit: 150
+        limit: 150,
       );
 
       if (mounted) {
         setState(() {
           _productosStock = prodsProcesados;
-          _desgloseMesActual = desgloseMesDefinitivo; 
+          _desgloseMesActual = desgloseMesDefinitivo;
           _historialReportes = reportes;
-          _capitalPorVentaProds = List<Map<String, dynamic>>.from(capitalVentasRaw);
-          _capitalManualAjustes = List<Map<String, dynamic>>.from(ajustesManuales);
-          inversionEnBodega = invBodega; utilidadProyectada = utilProy;
-          cajaTotalMes = cajaMes; gananciaNetaMes = utilMes; capitalGlobalReinversion = capitalDispo;
+          _capitalPorVentaProds = List<Map<String, dynamic>>.from(
+            capitalVentasRaw,
+          );
+          _capitalManualAjustes = List<Map<String, dynamic>>.from(
+            ajustesManuales,
+          );
+          inversionEnBodega = invBodega;
+          utilidadProyectada = utilProy;
+          cajaTotalMes = cajaMes;
+          gananciaNetaMes = utilMes;
+          capitalGlobalReinversion = capitalDispo;
         });
       }
     } catch (e) {
@@ -1099,9 +1156,10 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
     try {
       final Database db = await DBHelper.instance.database;
       final now = DateTime.now();
-      final hoyStr = "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}";
+      final hoyInicio = DateTime(now.year, now.month, now.day);
+      final hoyStr = "${hoyInicio.year}-${hoyInicio.month.toString().padLeft(2, '0')}-${hoyInicio.day.toString().padLeft(2, '0')}";
 
-      // 1. VENTAS Y PEDIDOS DEL DÍA (Filtrados por la fecha de pago real)
+      // 1. VENTAS Y PEDIDOS DEL DÍA
       final qVentasDia = await db.rawQuery(
           "SELECT SUM(total_venta) as total FROM pedidos WHERE estado = 'Completado' AND substr(COALESCE(fecha_pago, fecha_hora), 1, 10) = ?", 
           [hoyStr]
@@ -1113,11 +1171,11 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
       double vDia = (qVentasDia.first['total'] as num? ?? 0).toDouble();
       int pDia = Sqflite.firstIntValue(qPedsDia) ?? 0;
 
-      // 2. PARÁMETROS DE TIEMPO DINÁMICOS
-      DateTime dateInicioRankings = now.subtract(Duration(days: _filtroRankings == 'Semana' ? 6 : (_filtroRankings == 'Mes' ? (now.day - 1) : 365)));
-      String inicioRankingsStr = dateInicioRankings.toIso8601String().substring(0, 10);
+      // 2. PARÁMETROS DE FECHA PARA RANKINGS
+      DateTime dateInicioRankings = hoyInicio.subtract(Duration(days: _filtroRankings == 'Semana' ? 6 : (_filtroRankings == 'Mes' ? (now.day - 1) : 365)));
+      String inicioRankingsStr = "${dateInicioRankings.year}-${dateInicioRankings.month.toString().padLeft(2, '0')}-${dateInicioRankings.day.toString().padLeft(2, '0')}";
 
-      // 3. RANKINGS (Productos vs Variantes sin productos nulos)
+      // 3. RANKINGS PRODUCTOS Y CLIENTES
       String queryProds = _tipoRanking == 'Productos' 
           ? '''
             SELECT COALESCE((SELECT nombre FROM productos WHERE id = d.producto_id), d.nombre_snapshot, 'Producto') as nombre, 
@@ -1143,37 +1201,86 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
       final qTopClientes = await db.rawQuery('''
         SELECT COALESCE(c.nombre_completo, 'Cliente General') as nombre, SUM(p.total_venta) as gastado, COUNT(p.id) as total_pedidos
         FROM pedidos p LEFT JOIN clientes c ON p.cliente_id = c.id 
-        WHERE p.estado = 'Completado' AND substr(p.fecha_hora, 1, 10) >= ?
+        WHERE p.estado = 'Completado' AND substr(COALESCE(p.fecha_pago, p.fecha_hora), 1, 10) >= ?
         GROUP BY p.cliente_id 
         ORDER BY gastado DESC LIMIT $_limiteRankings
       ''', [inicioRankingsStr]);
 
-      // 4. RETENCIÓN DE CLIENTES COMPARATIVA (15, 30 y 60 DÍAS)
+      // 4. 🔥 TOP PROVEEDORES (Compras de stock en el período seleccionado)
+      DateTime dateInicioProv = hoyInicio.subtract(Duration(days: _filtroProveedores == 'Semana' ? 6 : (_filtroProveedores == 'Mes' ? (now.day - 1) : 365)));
+      String inicioProvStr = "${dateInicioProv.year}-${dateInicioProv.month.toString().padLeft(2, '0')}-${dateInicioProv.day.toString().padLeft(2, '0')}";
+
+      final qTopProveedores = await db.rawQuery('''
+        SELECT pv.nombre, pv.telefono, pv.indicativo, 
+               SUM(ABS(a.monto)) as total_comprado, 
+               COUNT(a.id) as total_compras,
+               SUM(COALESCE(a.cantidad, 0)) as total_unidades
+        FROM ajustes_capital a
+        JOIN proveedores pv ON a.proveedor_id = pv.id
+        WHERE a.proveedor_id IS NOT NULL 
+          AND a.monto > 0
+          AND substr(a.fecha, 1, 10) >= ?
+        GROUP BY pv.id
+        ORDER BY total_comprado DESC
+        LIMIT $_limiteProveedores
+      ''', [inicioProvStr]);
+
+      // 5. 🔥 TARJETAS DE FIDELIDAD Y TOP CLIENTES CON PUNTOS
+      final tarjetasDb = await db.query('tarjetas_fidelidad', where: 'activa = 1', orderBy: 'id DESC');
+      List<Map<String, dynamic>> topPuntos = [];
+
+      if (tarjetasDb.isNotEmpty) {
+        int targetId = _tarjetaFidelidadSeleccionada ?? tarjetasDb.first['id'] as int;
+        if (!tarjetasDb.any((t) => t['id'] == targetId)) {
+          targetId = tarjetasDb.first['id'] as int;
+        }
+        _tarjetaFidelidadSeleccionada = targetId;
+
+        final qPuntos = await db.rawQuery('''
+          SELECT c.nombre_completo, c.nombre_negocio, c.telefono, 
+                 p.puntos_actuales, p.completadas_totales, 
+                 t.meta_compras, t.titulo as tarjeta_titulo, t.premio_descripcion
+          FROM puntos_clientes p
+          JOIN clientes c ON p.cliente_id = c.id
+          JOIN tarjetas_fidelidad t ON p.tarjeta_id = t.id
+          WHERE p.tarjeta_id = ? AND (p.puntos_actuales > 0 OR p.completadas_totales > 0)
+          ORDER BY p.completadas_totales DESC, p.puntos_actuales DESC
+          LIMIT 10
+        ''', [targetId]);
+
+        topPuntos = List<Map<String, dynamic>>.from(qPuntos);
+      }
+
+      // 6. RETENCIÓN DE CLIENTES
       final qTotalClientes = await db.rawQuery("SELECT COUNT(id) as total FROM clientes");
       int totalClientesApp = Sqflite.firstIntValue(qTotalClientes) ?? 0;
 
       Map<String, Map<String, int>> retencionFmt = {};
       List<int> rangosDias = [15, 30, 60];
       for (int dias in rangosDias) {
-        String limiteFecha = now.subtract(Duration(days: dias)).toIso8601String().substring(0, 10);
-        final qActivos = await db.rawQuery("SELECT COUNT(DISTINCT cliente_id) as c FROM pedidos WHERE estado = 'Completado' AND substr(fecha_hora, 1, 10) >= ?", [limiteFecha]);
+        String limiteFecha = hoyInicio.subtract(Duration(days: dias)).toIso8601String().substring(0, 10);
+        final qActivos = await db.rawQuery(
+          "SELECT COUNT(DISTINCT cliente_id) as c FROM pedidos WHERE estado = 'Completado' AND substr(COALESCE(fecha_pago, fecha_hora), 1, 10) >= ?", 
+          [limiteFecha]
+        );
         int activos = Sqflite.firstIntValue(qActivos) ?? 0;
         int inactivos = (totalClientesApp - activos).clamp(0, totalClientesApp);
         retencionFmt[dias.toString()] = {'activos': activos, 'inactivos': inactivos};
       }
 
-      // 5. INVENTARIO ESTANCADO (Días dinámicos: 10, 20 o 30 días)
-      final haceXDias = now.subtract(Duration(days: _filtroDiasEstancados)).toIso8601String().substring(0, 10);
+      // 7. INVENTARIO ESTANCADO
+      final haceXDias = hoyInicio.subtract(Duration(days: _filtroDiasEstancados)).toIso8601String().substring(0, 10);
       final qEstancados = await db.rawQuery('''
         SELECT nombre, stock 
         FROM productos 
         WHERE activo = 1 AND stock > 0 AND id NOT IN (
           SELECT producto_id FROM detalle_pedidos d JOIN pedidos p ON d.pedido_id = p.id 
-          WHERE p.estado = 'Completado' AND substr(p.fecha_hora, 1, 10) >= ?
+          WHERE p.estado = 'Completado' AND substr(COALESCE(p.fecha_pago, p.fecha_hora), 1, 10) >= ?
         )
         ORDER BY stock DESC 
       ''', [haceXDias]);
-      // 6. CÁLCULO DE GRÁFICOS
+
+      // 8. CÁLCULO DE GRÁFICOS DE VENTAS ($)
       List<FlSpot> spotsActual = [];
       List<FlSpot> spotsPrevio = [];
       List<BarChartGroupData> barGroupsPedidos = [];
@@ -1190,8 +1297,8 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
 
       if (_filtroVentas == 'Semana') {
         diasVentas = 7;
-        startVentasAct = now.subtract(const Duration(days: 6));
-        startVentasPre = now.subtract(const Duration(days: 13));
+        startVentasAct = hoyInicio.subtract(const Duration(days: 6));
+        startVentasPre = hoyInicio.subtract(const Duration(days: 13));
       } else if (_filtroVentas == 'Mes') {
         diasVentas = now.day; 
         startVentasAct = DateTime(now.year, now.month, 1);
@@ -1207,8 +1314,17 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
           DateTime dAct = startVentasAct.add(Duration(days: i));
           DateTime dPre = startVentasPre.add(Duration(days: i));
 
-          final qActV = await db.rawQuery("SELECT SUM(total_venta) as t FROM pedidos WHERE estado = 'Completado' AND substr(fecha_hora, 1, 10) = ?", [dAct.toIso8601String().substring(0, 10)]);
-          final qPreV = await db.rawQuery("SELECT SUM(total_venta) as t FROM pedidos WHERE estado = 'Completado' AND substr(fecha_hora, 1, 10) = ?", [dPre.toIso8601String().substring(0, 10)]);
+          String fActStr = "${dAct.year}-${dAct.month.toString().padLeft(2, '0')}-${dAct.day.toString().padLeft(2, '0')}";
+          String fPreStr = "${dPre.year}-${dPre.month.toString().padLeft(2, '0')}-${dPre.day.toString().padLeft(2, '0')}";
+
+          final qActV = await db.rawQuery(
+            "SELECT SUM(total_venta) as t FROM pedidos WHERE estado = 'Completado' AND substr(COALESCE(fecha_pago, fecha_hora), 1, 10) = ?", 
+            [fActStr]
+          );
+          final qPreV = await db.rawQuery(
+            "SELECT SUM(total_venta) as t FROM pedidos WHERE estado = 'Completado' AND substr(COALESCE(fecha_pago, fecha_hora), 1, 10) = ?", 
+            [fPreStr]
+          );
 
           double valActV = (qActV.first['t'] as num? ?? 0).toDouble();
           double valPreV = (qPreV.first['t'] as num? ?? 0).toDouble();
@@ -1219,7 +1335,6 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
           if (valActV > maxValorVentas) maxValorVentas = valActV;
           if (valPreV > maxValorVentas) maxValorVentas = valPreV;
 
-          // 🔥 CORREGIDO: Tooltip muestra nombre de día completo para Semana y fecha para Mes
           if (_filtroVentas == 'Semana') {
             String diaSem = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"][dAct.weekday-1];
             etiquetasXCompletas.add(diaSem);
@@ -1230,13 +1345,21 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
           }
         }
       } else {
-        // Año agrupado por meses
         for (int i = 0; i < 12; i++) {
           DateTime mAct = DateTime(startVentasAct.year, startVentasAct.month + i, 1);
           DateTime mPre = DateTime(startVentasPre.year, startVentasPre.month + i, 1);
 
-          final qActV = await db.rawQuery("SELECT SUM(total_venta) as t FROM pedidos WHERE estado = 'Completado' AND substr(fecha_hora, 1, 7) = ?", ["${mAct.year}-${mAct.month.toString().padLeft(2, '0')}"]);
-          final qPreV = await db.rawQuery("SELECT SUM(total_venta) as t FROM pedidos WHERE estado = 'Completado' AND substr(fecha_hora, 1, 7) = ?", ["${mPre.year}-${mPre.month.toString().padLeft(2, '0')}"]);
+          String mActStr = "${mAct.year}-${mAct.month.toString().padLeft(2, '0')}";
+          String mPreStr = "${mPre.year}-${mPre.month.toString().padLeft(2, '0')}";
+
+          final qActV = await db.rawQuery(
+            "SELECT SUM(total_venta) as t FROM pedidos WHERE estado = 'Completado' AND substr(COALESCE(fecha_pago, fecha_hora), 1, 7) = ?", 
+            [mActStr]
+          );
+          final qPreV = await db.rawQuery(
+            "SELECT SUM(total_venta) as t FROM pedidos WHERE estado = 'Completado' AND substr(COALESCE(fecha_pago, fecha_hora), 1, 7) = ?", 
+            [mPreStr]
+          );
 
           double valActV = (qActV.first['t'] as num? ?? 0).toDouble();
           double valPreV = (qPreV.first['t'] as num? ?? 0).toDouble();
@@ -1253,13 +1376,13 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
         }
       }
 
-      // 7. GRÁFICO DE PEDIDOS (#)
+      // 9. GRÁFICO DE VOLUMEN DE PEDIDOS (#)
       DateTime startPeds;
       int diasPeds = 0;
 
       if (_filtroPedidos == 'Semana') {
         diasPeds = 7;
-        startPeds = now.subtract(const Duration(days: 6));
+        startPeds = hoyInicio.subtract(const Duration(days: 6));
       } else if (_filtroPedidos == 'Mes') {
         diasPeds = now.day;
         startPeds = DateTime(now.year, now.month, 1);
@@ -1271,7 +1394,12 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
       if (_filtroPedidos == 'Semana' || _filtroPedidos == 'Mes') {
         for (int i = 0; i < diasPeds; i++) {
           DateTime dAct = startPeds.add(Duration(days: i));
-          final qActP = await db.rawQuery("SELECT COUNT(id) as c FROM pedidos WHERE estado = 'Completado' AND substr(fecha_hora, 1, 10) = ?", [dAct.toIso8601String().substring(0, 10)]);
+          String fActStr = "${dAct.year}-${dAct.month.toString().padLeft(2, '0')}-${dAct.day.toString().padLeft(2, '0')}";
+
+          final qActP = await db.rawQuery(
+            "SELECT COUNT(id) as c FROM pedidos WHERE estado = 'Completado' AND substr(COALESCE(fecha_pago, fecha_hora), 1, 10) = ?", 
+            [fActStr]
+          );
           double valP = (qActP.first['c'] as num? ?? 0).toDouble();
 
           barGroupsPedidos.add(BarChartGroupData(
@@ -1281,21 +1409,25 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
 
           if (valP > maxValorPedidos) maxValorPedidos = valP;
 
-          // 🔥 CORREGIDO: Se añaden todas las fechas de volumen consecutivas
           etiquetasXPedidosCompletas.add("${dAct.day}/${dAct.month}");
 
           if (_filtroPedidos == 'Semana') {
             String diaSem = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"][dAct.weekday-1];
-            etiquetasXPedidosCompletas[i] = diaSem; // Guardar nombre de día para tooltip
+            etiquetasXPedidosCompletas[i] = diaSem;
             etiquetasXPedidos.add(["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"][dAct.weekday-1]);
           } else {
-            etiquetasXPedidos.add("${dAct.day}/${dAct.month}"); // Se muestran todas consecutivas rotadas
+            etiquetasXPedidos.add("${dAct.day}/${dAct.month}");
           }
         }
       } else {
         for (int i = 0; i < 12; i++) {
           DateTime mAct = DateTime(startPeds.year, startPeds.month + i, 1);
-          final qActP = await db.rawQuery("SELECT COUNT(id) as c FROM pedidos WHERE estado = 'Completado' AND substr(fecha_hora, 1, 7) = ?", ["${mAct.year}-${mAct.month.toString().padLeft(2, '0')}"]);
+          String mActStr = "${mAct.year}-${mAct.month.toString().padLeft(2, '0')}";
+
+          final qActP = await db.rawQuery(
+            "SELECT COUNT(id) as c FROM pedidos WHERE estado = 'Completado' AND substr(COALESCE(fecha_pago, fecha_hora), 1, 7) = ?", 
+            [mActStr]
+          );
           double valP = (qActP.first['c'] as num? ?? 0).toDouble();
 
           barGroupsPedidos.add(BarChartGroupData(
@@ -1317,6 +1449,9 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
           _pedidosDelDia = pDia;
           _topProductos = qTopProds;
           _topClientes = qTopClientes;
+          _topProveedores = List<Map<String, dynamic>>.from(qTopProveedores);
+          _tarjetasFidelidad = List<Map<String, dynamic>>.from(tarjetasDb);
+          _topClientesFidelidad = topPuntos;
           _productosEstancados = qEstancados;
           _retencionClientes = retencionFmt;
           _spotsPeriodoActual = spotsActual;
@@ -1334,6 +1469,417 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
     } catch (e) {
       debugPrint("Error motor analítico: $e");
     }
+  }
+
+  // 🏆 WIDGET: RANKING DE FIDELIDAD CON SELECTOR DE TARJETA
+  Widget _buildSeccionFidelidad(bool isOscuro) {
+    if (_tarjetasFidelidad.isEmpty) {
+      return Card(
+        color: Theme.of(context).cardColor,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: const Padding(
+          padding: EdgeInsets.all(20),
+          child: Center(
+            child: Text(
+              "No has creado tarjetas de fidelidad activas aún.",
+              style: TextStyle(color: Colors.grey, fontSize: 13),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Card(
+      color: Theme.of(context).cardColor,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      elevation: isOscuro ? 0 : 2,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Selector de Tarjeta
+            Row(
+              children: [
+                const Icon(
+                  Icons.card_giftcard_rounded,
+                  size: 18,
+                  color: Color(0xFF0D47A1),
+                ),
+                const SizedBox(width: 8),
+                const Text(
+                  "Tarjeta:",
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.grey,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                    decoration: BoxDecoration(
+                      color: isOscuro
+                          ? Colors.white.withOpacity(0.05)
+                          : Colors.grey.shade100,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: isOscuro ? Colors.white10 : Colors.grey.shade300,
+                      ),
+                    ),
+                    child: DropdownButton<int>(
+                      isExpanded: true,
+                      value: _tarjetaFidelidadSeleccionada,
+                      dropdownColor: isOscuro
+                          ? const Color(0xFF0F172A)
+                          : Colors.white,
+                      style: TextStyle(
+                        color: isOscuro
+                            ? Colors.cyanAccent
+                            : const Color(0xFF0D47A1),
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                      ),
+                      underline: const SizedBox(),
+                      items: _tarjetasFidelidad.map((t) {
+                        return DropdownMenuItem<int>(
+                          value: t['id'] as int,
+                          child: Text(
+                            "${t['titulo']} (Meta: ${t['meta_compras']})",
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        );
+                      }).toList(),
+                      onChanged: (val) {
+                        if (val != null) {
+                          setState(() => _tarjetaFidelidadSeleccionada = val);
+                          _cargarDatosGraficos();
+                        }
+                      },
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            const Divider(height: 1),
+            const SizedBox(height: 8),
+
+            _topClientesFidelidad.isEmpty
+                ? const Padding(
+                    padding: EdgeInsets.all(18),
+                    child: Center(
+                      child: Text(
+                        "Ningún cliente ha acumulado puntos en esta tarjeta aún.",
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.grey, fontSize: 12),
+                      ),
+                    ),
+                  )
+                : ListView.separated(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: _topClientesFidelidad.length,
+                    separatorBuilder: (_, __) => Divider(
+                      height: 1,
+                      color: isOscuro ? Colors.white10 : Colors.black12,
+                    ),
+                    itemBuilder: (ctx, i) {
+                      var d = _topClientesFidelidad[i];
+                      int pts = (d['puntos_actuales'] as num?)?.toInt() ?? 0;
+                      int comp =
+                          (d['completadas_totales'] as num?)?.toInt() ?? 0;
+                      int meta = (d['meta_compras'] as num?)?.toInt() ?? 10;
+                      String nom = d['nombre_completo'] ?? 'Cliente';
+                      String neg =
+                          (d['nombre_negocio'] != null &&
+                              d['nombre_negocio'].toString().isNotEmpty &&
+                              d['nombre_negocio'] != 'null')
+                          ? " (${d['nombre_negocio']})"
+                          : "";
+
+                      return ListTile(
+                        dense: true,
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 4,
+                          vertical: 2,
+                        ),
+                        leading: CircleAvatar(
+                          radius: 14,
+                          backgroundColor: Colors.purple.withOpacity(0.15),
+                          child: Text(
+                            "${i + 1}",
+                            style: const TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w900,
+                              color: Colors.purple,
+                            ),
+                          ),
+                        ),
+                        title: Text(
+                          "$nom$neg",
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.bold,
+                            color: isOscuro ? Colors.white : Colors.black87,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        subtitle: Text(
+                          comp > 0
+                              ? "🏆 $comp ${comp == 1 ? 'premio ganado' : 'premios ganados'}"
+                              : "Acumulando puntos",
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: comp > 0 ? Colors.green : Colors.grey,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        trailing: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: isOscuro
+                                ? Colors.purple.withOpacity(0.15)
+                                : Colors.purple.shade50,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                              color: Colors.purple.withOpacity(0.3),
+                            ),
+                          ),
+                          child: Text(
+                            "$pts / $meta sellos",
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w900,
+                              fontSize: 11,
+                              color: Colors.purple,
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // 🚚 WIDGET: RANKING DE TOP PROVEEDORES
+  Widget _buildSeccionTopProveedores(bool isOscuro) {
+    return Card(
+      color: isOscuro ? Theme.of(context).cardColor : Colors.white,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      elevation: isOscuro ? 0 : 2,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          children: [
+            // Filtros de Proveedores (Período y Top Límite)
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  children: [
+                    const Text(
+                      "Periodo:",
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.grey,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      decoration: BoxDecoration(
+                        color: isOscuro
+                            ? Colors.white.withOpacity(0.05)
+                            : Colors.grey.shade100,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: isOscuro
+                              ? Colors.white10
+                              : Colors.grey.shade300,
+                        ),
+                      ),
+                      child: DropdownButton<String>(
+                        value: _filtroProveedores,
+                        dropdownColor: isOscuro
+                            ? const Color(0xFF0F172A)
+                            : Colors.white,
+                        style: TextStyle(
+                          color: isOscuro
+                              ? Colors.cyanAccent
+                              : const Color(0xFF0D47A1),
+                          fontWeight: FontWeight.bold,
+                          fontSize: 11,
+                        ),
+                        underline: const SizedBox(),
+                        items: ['Semana', 'Mes', 'Año']
+                            .map(
+                              (e) => DropdownMenuItem(value: e, child: Text(e)),
+                            )
+                            .toList(),
+                        onChanged: (v) {
+                          if (v != null) {
+                            setState(() => _filtroProveedores = v);
+                            _cargarDatosGraficos();
+                          }
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+                Row(
+                  children: [
+                    const Text(
+                      "Mostrar:",
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.grey,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      decoration: BoxDecoration(
+                        color: isOscuro
+                            ? Colors.white.withOpacity(0.05)
+                            : Colors.grey.shade100,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: isOscuro
+                              ? Colors.white10
+                              : Colors.grey.shade300,
+                        ),
+                      ),
+                      child: DropdownButton<int>(
+                        value: _limiteProveedores,
+                        dropdownColor: isOscuro
+                            ? const Color(0xFF0F172A)
+                            : Colors.white,
+                        style: TextStyle(
+                          color: isOscuro
+                              ? Colors.cyanAccent
+                              : const Color(0xFF0D47A1),
+                          fontWeight: FontWeight.bold,
+                          fontSize: 11,
+                        ),
+                        underline: const SizedBox(),
+                        items: [3, 5, 10]
+                            .map(
+                              (e) => DropdownMenuItem(
+                                value: e,
+                                child: Text("Top $e"),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: (v) {
+                          if (v != null) {
+                            setState(() => _limiteProveedores = v);
+                            _cargarDatosGraficos();
+                          }
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            const Divider(height: 1),
+            const SizedBox(height: 8),
+
+            _topProveedores.isEmpty
+                ? const Padding(
+                    padding: EdgeInsets.all(18),
+                    child: Center(
+                      child: Text(
+                        "No se registraron compras a proveedores en este período.",
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.grey, fontSize: 12),
+                      ),
+                    ),
+                  )
+                : ListView.separated(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: _topProveedores.length,
+                    separatorBuilder: (_, __) => Divider(
+                      height: 1,
+                      color: isOscuro ? Colors.white10 : Colors.black12,
+                    ),
+                    itemBuilder: (ctx, i) {
+                      var d = _topProveedores[i];
+                      double totalComprado =
+                          (d['total_comprado'] as num?)?.toDouble() ?? 0.0;
+                      int totalCompras =
+                          (d['total_compras'] as num?)?.toInt() ?? 0;
+                      int totalUnidades =
+                          (d['total_unidades'] as num?)?.toInt() ?? 0;
+                      String nom = d['nombre'] ?? 'Proveedor';
+
+                      return ListTile(
+                        dense: true,
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 4,
+                          vertical: 2,
+                        ),
+                        leading: CircleAvatar(
+                          radius: 14,
+                          backgroundColor: Colors.teal.withOpacity(0.15),
+                          child: Text(
+                            "${i + 1}",
+                            style: const TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w900,
+                              color: Colors.teal,
+                            ),
+                          ),
+                        ),
+                        title: Text(
+                          nom,
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.bold,
+                            color: isOscuro ? Colors.white : Colors.black87,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        subtitle: Text(
+                          totalUnidades > 0
+                              ? "$totalCompras compras ($totalUnidades unidades)"
+                              : "$totalCompras compras registradas",
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: isOscuro ? Colors.white38 : Colors.grey,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                        trailing: Text(
+                          "\$${totalComprado.toStringAsFixed(0)}",
+                          style: TextStyle(
+                            fontWeight: FontWeight.w900,
+                            fontSize: 13,
+                            color: isOscuro
+                                ? Colors.tealAccent
+                                : Colors.teal.shade800,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _buildTabFinanzas(bool isOscuro) {
@@ -1769,7 +2315,27 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
           ),
           const SizedBox(height: 25),
 
-          // 7. INVENTARIO ESTANCADO (Muestra 5 iniciales + Ver más)
+           // 7. CLIENTES CON MAYOR PUNTOS DE FIDELIDAD
+          _tituloSeccion(
+            "Clientes con Mayor Puntos de Fidelidad",
+            Icons.card_giftcard_rounded,
+            isOscuro,
+            colorIcon: Colors.purpleAccent,
+          ),
+          _buildSeccionFidelidad(isOscuro),
+          const SizedBox(height: 25),
+
+          // 8. TOP PROVEEDORES
+          _tituloSeccion(
+            "Top Proveedores (Mayor Compra / Reposición)",
+            Icons.local_shipping_rounded,
+            isOscuro,
+            colorIcon: Colors.tealAccent,
+          ),
+          _buildSeccionTopProveedores(isOscuro),
+          const SizedBox(height: 25),
+
+          // 9. INVENTARIO ESTANCADO (Muestra 5 iniciales + Ver más)
           _tituloConFiltroDias(
             "Inventario Estancado (+$_filtroDiasEstancados días)", 
             Icons.warning_amber_rounded, 

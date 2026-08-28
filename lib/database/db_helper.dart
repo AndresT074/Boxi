@@ -20,14 +20,15 @@ class DBHelper {
     final path = join(dbPath, filePath);
     return await openDatabase(
       path,
-      version: 21,
+      version: 23,
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
     );
   }
 
   Future _createDB(Database db, int version) async {
-    await db.execute('''CREATE TABLE vendedores (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, telefono TEXT, email TEXT, ultima_modificacion TEXT)''');
+    await db.execute('''CREATE TABLE vendedores (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, telefono TEXT, email TEXT, ultima_modificacion TEXT)''',);
+    await db.execute('''CREATE TABLE proveedores (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, telefono TEXT, indicativo TEXT DEFAULT '57', email TEXT, ultima_modificacion TEXT)''',);
     await db.execute('''CREATE TABLE clientes (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre_completo TEXT NOT NULL, nombre_negocio TEXT, direccion TEXT, telefono TEXT, departamento TEXT, ciudad TEXT, firma TEXT, ultima_modificacion TEXT)''');
     await db.execute('''CREATE TABLE productos (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, foto_path TEXT, precio_compra REAL NOT NULL, precio_venta REAL NOT NULL, descuento REAL DEFAULT 0, stock INTEGER DEFAULT 0, descripcion TEXT, variantes TEXT, orden INTEGER DEFAULT 0, activo INTEGER DEFAULT 1, ultima_modificacion TEXT, categoria TEXT)''');
     await db.execute('''CREATE TABLE pedidos (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha_hora TEXT NOT NULL, fecha_pago TEXT, cliente_id INTEGER NOT NULL, vendedor_id INTEGER NOT NULL, total_venta REAL NOT NULL, ganancia_total REAL NOT NULL, estado TEXT NOT NULL, departamento TEXT, ciudad TEXT, firma BLOB, valor_domicilio REAL DEFAULT 0, cliente_nombre_snapshot TEXT, ultima_modificacion TEXT)'''); // ✅ Agregada columna fecha_pago
@@ -188,7 +189,59 @@ class DBHelper {
     }
 
     if (oldVersion < 21) {
-      try { await db.execute('ALTER TABLE tarjetas_fidelidad ADD COLUMN foto_path TEXT DEFAULT ""'); } catch (_) {}
+      try {
+        await db.execute(
+          'ALTER TABLE tarjetas_fidelidad ADD COLUMN foto_path TEXT DEFAULT ""',
+        );
+      } catch (_) {}
+    }
+
+    // 🔥 MIGRACIÓN VERSIÓN 22 (Proveedores y Stock Mínimo)
+    if (oldVersion < 22) {
+      try {
+        await db.execute('''CREATE TABLE IF NOT EXISTS proveedores (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, 
+          nombre TEXT NOT NULL, 
+          telefono TEXT, 
+          indicativo TEXT DEFAULT '57', 
+          email TEXT, 
+          ultima_modificacion TEXT
+        )''');
+      } catch (_) {}
+      try {
+        await db.execute(
+          'ALTER TABLE productos ADD COLUMN proveedor_id INTEGER DEFAULT NULL',
+        );
+      } catch (_) {}
+      try {
+        await db.execute(
+          'ALTER TABLE productos ADD COLUMN stock_minimo INTEGER DEFAULT 0',
+        );
+      } catch (_) {}
+      try {
+        await db.execute(
+          'ALTER TABLE ajustes_capital ADD COLUMN proveedor_id INTEGER DEFAULT NULL',
+        );
+      } catch (_) {}
+      try {
+        await db.execute(
+          'ALTER TABLE ajustes_capital ADD COLUMN producto_id INTEGER DEFAULT NULL',
+        );
+      } catch (_) {}
+      try {
+        await db.execute(
+          'ALTER TABLE ajustes_capital ADD COLUMN cantidad INTEGER DEFAULT 0',
+        );
+      } catch (_) {}
+    }
+
+    // 🔥 MIGRACIÓN VERSIÓN 23 (Nombre de Negocio para Clientes)
+    if (oldVersion < 23) {
+      try {
+        await db.execute(
+          'ALTER TABLE clientes ADD COLUMN nombre_negocio TEXT DEFAULT ""',
+        );
+      } catch (_) {}
     }
   }
 
@@ -203,6 +256,7 @@ class DBHelper {
     try { await db.delete('categorias'); } catch (_) {} 
     try { await db.delete('tarjetas_fidelidad'); } catch (_) {}
     try { await db.delete('puntos_clientes'); } catch (_) {}
-    try { await db.delete('tokens_qr_usados'); } catch (_) {}
+    try { await db.delete('tokens_qr_usados');} catch (_) {}
+    try { await db.delete('proveedores');} catch (_) {}
   }
 }

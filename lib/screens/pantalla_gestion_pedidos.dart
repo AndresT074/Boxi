@@ -292,15 +292,25 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
       return true;
     }).toList()
       ..sort((a, b) {
-        if (_tipoOrden == 'fecha_asc') {
-          String fA = a['fecha_hora']?.toString() ?? '';
-          String fB = b['fecha_hora']?.toString() ?? '';
-          return fA.compareTo(fB);
-        } else if (_tipoOrden == 'fecha_desc') {
-          String fA = a['fecha_hora']?.toString() ?? '';
-          String fB = b['fecha_hora']?.toString() ?? '';
-          return fB.compareTo(fA);
-        } else if (_tipoOrden == 'valor_desc') {
+      String obtenerFechaOrden(Map<String, dynamic> p) {
+        if (p['estado'] == 'Completado' &&
+            p['fecha_pago'] != null &&
+            p['fecha_pago'].toString().trim().isNotEmpty &&
+            p['fecha_pago'].toString() != "null") {
+          return p['fecha_pago'].toString();
+        }
+        return p['fecha_hora']?.toString() ?? p['fecha']?.toString() ?? '';
+      }
+
+      if (_tipoOrden == 'fecha_asc') {
+        String fA = obtenerFechaOrden(a);
+        String fB = obtenerFechaOrden(b);
+        return fA.compareTo(fB);
+      } else if (_tipoOrden == 'fecha_desc') {
+        String fA = obtenerFechaOrden(a);
+        String fB = obtenerFechaOrden(b);
+        return fB.compareTo(fA);
+      } else if (_tipoOrden == 'valor_desc') {
           double vA = (a['total_venta'] as num?)?.toDouble() ?? 0.0;
           double vB = (b['total_venta'] as num?)?.toDouble() ?? 0.0;
           return vB.compareTo(vA);
@@ -786,38 +796,57 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
   }
 
   // Consulta de SQLite rápida y estática para las imágenes
-  Future<String?> _obtenerFotoDetalleEstatico(dynamic db, int productoId, String nombreSnapshot) async {
+  Future<String?> _obtenerFotoDetalleEstatico(
+    dynamic db,
+    int productoId,
+    String nombreSnapshot,
+  ) async {
     try {
-      if (nombreSnapshot.contains(" - ")) {
-        String nombreOpcion = nombreSnapshot;
-        if (nombreSnapshot.contains(': ')) {
-          nombreOpcion = nombreSnapshot.split(': ').last.trim();
-        } else {
-          nombreOpcion = nombreSnapshot.split(' - ').last.trim();
-        }
-
-        final fotos = await db.query(
-          'fotos_variantes',
-          columns: ['foto_base64'],
-          where: 'producto_id = ? AND (variante_nombre = ? OR variante_nombre LIKE ?)',
-          whereArgs: [productoId, nombreOpcion, '%$nombreOpcion%'],
-          limit: 1,
-        );
-
-        if (fotos.isNotEmpty) {
-          return fotos.first['foto_base64'] as String?;
-        }
-      }
-
       final prod = await db.query(
         'productos',
-        columns: ['foto_path'],
+        columns: ['foto_path', 'variantes'],
         where: 'id = ?',
         whereArgs: [productoId],
         limit: 1,
       );
 
       if (prod.isNotEmpty) {
+        String varStr = prod.first['variantes']?.toString() ?? "";
+        if (varStr.length > 5 && nombreSnapshot.contains(" - ")) {
+          String nombreOpc = nombreSnapshot
+              .split(' - ')
+              .last
+              .trim()
+              .toLowerCase();
+          if (nombreOpc.contains(': '))
+            nombreOpc = nombreOpc.split(': ').last.trim();
+
+          try {
+            var dec = jsonDecode(varStr);
+            if (dec is List) {
+              for (var g in dec) {
+                if (g is Map && g['opciones'] is List) {
+                  for (var o in g['opciones']) {
+                    if (o is Map) {
+                      String opcNombre = (o['nombre'] ?? '')
+                          .toString()
+                          .trim()
+                          .toLowerCase();
+                      if (opcNombre.isNotEmpty &&
+                          (opcNombre == nombreOpc ||
+                              nombreSnapshot.toLowerCase().contains(
+                                opcNombre,
+                              ))) {
+                        String fotoVar = o['foto_path']?.toString() ?? "";
+                        if (fotoVar.isNotEmpty) return fotoVar;
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          } catch (_) {}
+        }
         return prod.first['foto_path'] as String?;
       }
     } catch (_) {}
@@ -825,31 +854,43 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
   }
 
   Future<void> _modificarStockBD(
-      int productoId, int cantidadADescontar, String? nombreSnapshot) async {
+    int productoId,
+    int cantidadADescontar,
+    String? nombreSnapshot,
+  ) async {
     final db = await DBHelper.instance.database;
-    var pRes = await db.query('productos', where: 'id = ?', whereArgs: [productoId]);
+    var pRes = await db.query(
+      'productos',
+      where: 'id = ?',
+      whereArgs: [productoId],
+    );
     if (pRes.isEmpty) return;
 
     var p = pRes.first;
-    int nuevoStockGeneral = (p['stock'] as num?)?.toInt() ?? 0;
-    nuevoStockGeneral -= cantidadADescontar;
+    int stockBase = (p['stock'] as num?)?.toInt() ?? 0;
+    int nuevoStockGeneral = stockBase - cantidadADescontar;
     String variantesStr = p['variantes']?.toString() ?? "";
 
     if (variantesStr.length > 5 && nombreSnapshot != null) {
       try {
         List<dynamic> grupos = jsonDecode(variantesStr);
         bool encontrado = false;
+        String targetSnap = nombreSnapshot.trim().toLowerCase();
 
         for (var g in grupos) {
-          if (g == null || g is! Map || g['opciones'] == null || g['opciones'] is! List) continue;
+          if (g == null ||
+              g is! Map ||
+              g['opciones'] == null ||
+              g['opciones'] is! List)
+            continue;
 
           for (var o in g['opciones']) {
             if (o == null || o is! Map) continue;
-            String nombreVar1 = "${p['nombre']} - ${g['grupo']}: ${o['nombre']}".trim();
-            String nombreVar2 = "${p['nombre']} - ${o['nombre']}".trim();
-            String targetSnap = nombreSnapshot.trim();
+            String opcNom = (o['nombre'] ?? '').toString().trim().toLowerCase();
 
-            if (targetSnap == nombreVar1 || targetSnap == nombreVar2 || targetSnap.endsWith(o['nombre'].toString().trim())) {
+            // Coincide por nombre completo o si el snapshot contiene el nombre de la variante
+            if (opcNom.isNotEmpty &&
+                (targetSnap.endsWith(opcNom) || targetSnap.contains(opcNom))) {
               int stockActual = (o['stock'] as num?)?.toInt() ?? 0;
               o['stock'] = stockActual - cantidadADescontar;
               encontrado = true;
@@ -859,37 +900,50 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
           if (encontrado) break;
         }
 
-        // Recalcular stock global acumulando únicamente variantes válidas
-        int totalPositivos = 0;
-        for (var g in grupos) {
-          if (g == null || g is! Map || g['opciones'] == null || g['opciones'] is! List) continue;
-          for (var o in g['opciones']) {
-            if (o == null || o is! Map) continue;
-            int s = (o['stock'] as num?)?.toInt() ?? 0;
-            if (s > 0) totalPositivos += s;
+        if (encontrado) {
+          int totalPositivos = 0;
+          for (var g in grupos) {
+            if (g == null ||
+                g is! Map ||
+                g['opciones'] == null ||
+                g['opciones'] is! List)
+              continue;
+            for (var o in g['opciones']) {
+              if (o is Map) {
+                int s = (o['stock'] as num?)?.toInt() ?? 0;
+                if (s > 0) totalPositivos += s;
+              }
+            }
           }
+          nuevoStockGeneral = totalPositivos;
+          variantesStr = jsonEncode(grupos);
         }
-        nuevoStockGeneral = totalPositivos;
-        variantesStr = jsonEncode(grupos);
       } catch (e) {
         debugPrint("Error modificando stock de variante: $e");
       }
     }
 
     await db.update(
-        'productos',
-        {
-          'stock': nuevoStockGeneral,
-          'variantes': variantesStr,
-          'ultima_modificacion': DateTime.now().toIso8601String()
-        },
-        where: 'id = ?',
-        whereArgs: [productoId]);
+      'productos',
+      {
+        'stock': nuevoStockGeneral,
+        'variantes': variantesStr,
+        'ultima_modificacion': DateTime.now().toIso8601String(),
+      },
+      where: 'id = ?',
+      whereArgs: [productoId],
+    );
 
     if (_esPremium) {
-      final pAct = await db.query('productos', where: 'id = ?', whereArgs: [productoId]);
+      final pAct = await db.query(
+        'productos',
+        where: 'id = ?',
+        whereArgs: [productoId],
+      );
       if (pAct.isNotEmpty) {
-        await ServicioNube.guardarProductoNube(Map<String, dynamic>.from(pAct.first));
+        await ServicioNube.guardarProductoNube(
+          Map<String, dynamic>.from(pAct.first),
+        );
         await ServicioNube.compilarYSubirCatalogoRTDB();
       }
     }
@@ -1000,14 +1054,31 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
 
       // 5. LUEGO de que la pantalla de éxito se cierra, otorgar punto y abrir la invitación de WhatsApp
       if (nuevoEstado == 'Completado') {
-        final pedDoc = await db.query('pedidos', columns: ['cliente_id', 'total_venta', 'cliente_nombre_snapshot'], where: 'id = ?', whereArgs: [pedidoId]);
+        final pedDoc = await db.query(
+          'pedidos',
+          columns: ['cliente_id', 'total_venta', 'cliente_nombre_snapshot'],
+          where: 'id = ?',
+          whereArgs: [pedidoId],
+        );
         if (pedDoc.isNotEmpty) {
-          int clienteIdPedido = (pedDoc.first['cliente_id'] as num?)?.toInt() ?? 0;
-          double totalVenta = (pedDoc.first['total_venta'] as num?)?.toDouble() ?? 0.0;
-          String nombreSnap = pedDoc.first['cliente_nombre_snapshot']?.toString() ?? 'Cliente';
+          int clienteIdPedido =
+              (pedDoc.first['cliente_id'] as num?)?.toInt() ?? 0;
+          double totalVenta =
+              (pedDoc.first['total_venta'] as num?)?.toDouble() ?? 0.0;
+          String nombreSnap =
+              pedDoc.first['cliente_nombre_snapshot']?.toString() ?? 'Cliente';
 
-          await _otorgarPuntoFidelidadAutomatico(clienteIdPedido, totalVenta, nombreSnap);
+          await _otorgarPuntoFidelidadAutomatico(
+            clienteIdPedido,
+            totalVenta,
+            nombreSnap,
+          );
         }
+      }
+
+      // 🔥 Refresca la pantalla inmediatamente tras otorgar el punto
+      if (mounted) {
+        await _cargar();
       }
     }
 
@@ -1015,6 +1086,117 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
       ServicioAnuncios.mostrarAnuncioIntersticial(() => ejecutar());
     } else {
       ejecutar();
+    }
+  }
+
+  // 🗑️ DIÁLOGO DE CONFIRMACIÓN PARA ELIMINAR PEDIDO CANCELADO
+  void _confirmarEliminarPedidoCancelado(int pedidoId, String clienteNombre) {
+    final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Theme.of(context).cardColor,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Row(
+          children: [
+            Icon(
+              Icons.delete_forever_rounded,
+              color: Colors.redAccent,
+              size: 28,
+            ),
+            SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                "¿Eliminar Pedido?",
+                style: TextStyle(
+                  color: Colors.redAccent,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Text(
+          "¿Estás seguro de que deseas eliminar permanentemente el pedido cancelado de \"$clienteNombre\"?\n\nEsta acción no se puede deshacer y limpiará el registro de tu historial.",
+          style: TextStyle(
+            color: isOscuro ? Colors.white70 : Colors.black87,
+            fontSize: 13,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text(
+              "CANCELAR",
+              style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold),
+            ),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.redAccent,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await _eliminarPedidoCancelado(pedidoId);
+            },
+            child: const Text(
+              "ELIMINAR",
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // 🗑️ EJECUCIÓN DEL BORRADO DEFINITIVO EN SQLITE Y NUBE
+  Future<void> _eliminarPedidoCancelado(int pedidoId) async {
+    try {
+      final db = await DBHelper.instance.database;
+      _invalidarCache(pedidoId);
+
+      // 1. Eliminar detalles del pedido en SQLite
+      await db.delete(
+        'detalle_pedidos',
+        where: 'pedido_id = ?',
+        whereArgs: [pedidoId],
+      );
+
+      // 2. Eliminar pedido principal en SQLite
+      await db.delete('pedidos', where: 'id = ?', whereArgs: [pedidoId]);
+
+      // 3. Sincronizar borrado con la nube si es Premium
+      if (_esPremium) {
+        try {
+          await ServicioNube.respaldarDatosPrivadosRTDB();
+        } catch (e) {
+          debugPrint("Error respaldando borrado en RTDB: $e");
+        }
+      }
+
+      // 4. Recargar listado en pantalla
+      await _cargar();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("🗑️ Pedido cancelado eliminado definitivamente."),
+            backgroundColor: Colors.redAccent,
+            behavior: SnackBarBehavior.floating,
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint("Error eliminando pedido cancelado: $e");
     }
   }
 
@@ -1442,8 +1624,14 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     TextEditingController numCtrl = TextEditingController(text: telSolo);
 
     Future<String> obtenerToken() async {
-      String tokenInv = "boxi_fidelidad_${DateTime.now().millisecondsSinceEpoch}_local".trim();
+      String tokenInv =
+          "boxi_fidelidad_${DateTime.now().millisecondsSinceEpoch}_local"
+              .trim();
       try {
+        DateTime n = DateTime.now();
+        String fechaCorta =
+            "${n.day}/${n.month} ${n.hour}:${n.minute.toString().padLeft(2, '0')}";
+
         tokenInv = await ServicioFidelidad.crearTokenUnicoNube(
           vendorUid: vendorUid,
           tarjetaId: tarjetaIdStr,
@@ -1456,6 +1644,7 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
           premioDesc: premioDesc,
           montoMinimo: montoMinimo,
           clienteTelefono: telefono,
+          origen: "Venta $fechaCorta", // 👈 Guarda el origen de la venta
         ).timeout(const Duration(seconds: 2));
       } catch (_) {}
       return tokenInv;
@@ -3594,13 +3783,46 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                 TextButton(
                   style: TextButton.styleFrom(
                     foregroundColor: Colors.redAccent,
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 8,
+                    ),
                   ),
                   onPressed: () =>
                       _confirmarCambioEstado(p['id'] as int, 'Cancelado'),
-                  child: const Text('Cancelar',
-                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                  child: const Text(
+                    'Cancelar',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                  ),
+                ),
+
+              // 🗑️ BOTÓN ELIMINAR CUANDO ESTÁ CANCELADO
+              if (estado == 'Cancelado')
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.redAccent,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    elevation: 0,
+                  ),
+                  icon: const Icon(Icons.delete_forever_rounded, size: 16),
+                  label: const Text(
+                    'Eliminar',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                  ),
+                  onPressed: () {
+                    String nombreC =
+                        p['cliente_nombre'] ??
+                        p['cliente_nombre_snapshot'] ??
+                        'Cliente';
+                    _confirmarEliminarPedidoCancelado(p['id'] as int, nombreC);
+                  },
                 ),
             ],
           ),

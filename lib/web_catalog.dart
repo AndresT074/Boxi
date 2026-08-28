@@ -1024,22 +1024,14 @@ class _CatalogoWebState extends State<CatalogoWeb> {
                     children: [
                       p['foto_path'] != null && p['foto_path'].toString().isNotEmpty
                           ? Container(
-                              color: Colors.black, 
+                              color: Colors.black12, 
                               width: double.infinity,
                               height: 300,
                               child: p['foto_path'].toString().startsWith('http')
                                 ? Image.network(
-                                    optimizarUrlCloudinary(p['foto_path'], width: 600), 
+                                    optimizarUrlCloudinary(p['foto_path'], width: 400), // 🔥 Misma URL de la tarjeta = Abre en 0ms directo de la RAM
                                     fit: BoxFit.contain,
                                     gaplessPlayback: true,
-                                    // 🔥 Pinta la foto que ya está en caché en 0ms mientras carga en HD
-                                    loadingBuilder: (ctx, child, progress) {
-                                      if (progress == null) return child;
-                                      return Image.network(
-                                        optimizarUrlCloudinary(p['foto_path'], width: 400),
-                                        fit: BoxFit.contain,
-                                      );
-                                    },
                                     errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, size: 60, color: Colors.grey),
                                   )
                                 : Image.memory(base64Decode(p['foto_path']), fit: BoxFit.contain, gaplessPlayback: true)

@@ -35,10 +35,11 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
   String _nombreNegocio = "MI NEGOCIO";
   String _logoPath = "";
   bool _cargandoDatos = true;
-  String _busquedaMisTarjetas = ""; // 👈 Filtro buscador
-  bool _mostrarTodasMisTarjetas = false; // 👈 Control "Ver más"
-  bool _procesandoPunto = false; // 👈 Bloqueo anti-doble toque
+  String _busquedaMisTarjetas = "";
+  bool _mostrarTodasMisTarjetas = false;
+  bool _procesandoPunto = false;
   String _localBoxiPathGlobal = "/storage/emulated/0/Pictures/Boxi";
+  List<Map<String, dynamic>> _invitacionesPendientes = []; // 👈 NUEVO
 
   @override
   void initState() {
@@ -176,6 +177,13 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
       }
     }
 
+    List<Map<String, dynamic>> pendientesCloud = [];
+    if (user != null) {
+      pendientesCloud = await ServicioFidelidad.obtenerInvitacionesPendientes(
+        user.uid,
+      );
+    }
+
     if (mounted) {
       setState(() {
         _esPremium = prefs.getBool('es_premium') ?? false;
@@ -183,6 +191,7 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
         _logoPath = logoP;
         _misTarjetasComoVendedor = List<Map<String, dynamic>>.from(tarjetasRes);
         _misTarjetasComoCliente = acumuladasCache;
+        _invitacionesPendientes = pendientesCloud; // 👈 Guarda las invitaciones
         _cargandoDatos = false;
       });
     }
@@ -659,7 +668,6 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
     );
   }
 
-  // 🔥 MÉTODO OPTIMIZADO: UTILIZA BATCH ATÓMICO EN FIRESTORE PARA EVITAR MÚLTIPLES MODIFICACIONES
   Future<void> _ajustarPuntosClientesPorNuevaMeta({
     required int tarjetaId,
     required int metaAntigua,
@@ -2405,6 +2413,370 @@ final user = FirebaseAuth.instance.currentUser;
     );
   }
 
+  // 📬 MODAL DE INVITACIONES Y PUNTOS PENDIENTES
+  void _mostrarModalInvitacionesPendientes() {
+    final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setModalState) {
+          return Container(
+            height: MediaQuery.of(ctx).size.height * 0.75,
+            decoration: BoxDecoration(
+              color: Theme.of(context).cardColor,
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(28),
+              ),
+            ),
+            child: Column(
+              children: [
+                const SizedBox(height: 12),
+                Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade400,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      Icons.mark_email_unread_rounded,
+                      color: isOscuro
+                          ? Colors.cyanAccent
+                          : const Color(0xFF0D47A1),
+                      size: 22,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      "Invitaciones Pendientes (${_invitacionesPendientes.length})",
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w900,
+                        color: isOscuro
+                            ? Colors.cyanAccent
+                            : const Color(0xFF0D47A1),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                const Divider(height: 1),
+                Expanded(
+                  child: _invitacionesPendientes.isEmpty
+                      ? Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                Icons.mark_email_read_outlined,
+                                size: 60,
+                                color: Colors.grey.shade400,
+                              ),
+                              const SizedBox(height: 12),
+                              const Text(
+                                "No tienes invitaciones pendientes",
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 14,
+                                  color: Colors.grey,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              const Text(
+                                "Los puntos generados y no reclamados aparecerán aquí.",
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.grey,
+                                ),
+                                textAlign: TextAlign.center,
+                              ),
+                            ],
+                          ),
+                        )
+                      : ListView.separated(
+                          padding: const EdgeInsets.all(16),
+                          itemCount: _invitacionesPendientes.length,
+                          separatorBuilder: (_, __) =>
+                              const SizedBox(height: 10),
+                          itemBuilder: (context, i) {
+                            var inv = _invitacionesPendientes[i];
+                            String cNom =
+                                inv['clienteNombre']?.toString().isNotEmpty ==
+                                    true
+                                ? inv['clienteNombre']
+                                : 'Cliente';
+                            String tel =
+                                inv['clienteTelefono']?.toString() ?? '';
+                            String tTitulo =
+                                inv['tarjetaTitulo'] ?? 'Tarjeta Fidelidad';
+                            String token = inv['token'] ?? '';
+                            String origen = inv['origen'] ?? 'Punto manual';
+                            String link =
+                                "https://boxi-catalogo.web.app/reclamar?token=$token";
+
+                            // Calcular expiración
+                            String expTxt = "24h";
+                            if (inv['expireAt'] != null &&
+                                inv['expireAt'] is Timestamp) {
+                              DateTime dt = (inv['expireAt'] as Timestamp)
+                                  .toDate();
+                              Duration diff = dt.difference(DateTime.now());
+                              if (diff.inHours > 0) {
+                                expTxt = "${diff.inHours}h";
+                              } else {
+                                expTxt = "${diff.inMinutes}m";
+                              }
+                            }
+
+                            return Card(
+                              elevation: 0,
+                              color: isOscuro
+                                  ? Colors.white.withOpacity(0.04)
+                                  : Colors.grey.shade50,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(18),
+                                side: BorderSide(
+                                  color: isOscuro
+                                      ? Colors.white12
+                                      : Colors.grey.shade200,
+                                ),
+                              ),
+                              child: Padding(
+                                padding: const EdgeInsets.all(14.0),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        CircleAvatar(
+                                          radius: 18,
+                                          backgroundColor: isOscuro
+                                              ? Colors.cyanAccent.withOpacity(
+                                                  0.15,
+                                                )
+                                              : Colors.blue.shade100,
+                                          child: Icon(
+                                            Icons.person_rounded,
+                                            color: isOscuro
+                                                ? Colors.cyanAccent
+                                                : const Color(0xFF0D47A1),
+                                            size: 20,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 10),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                cNom,
+                                                style: TextStyle(
+                                                  fontWeight: FontWeight.w900,
+                                                  fontSize: 14,
+                                                  color: isOscuro
+                                                      ? Colors.white
+                                                      : Colors.black87,
+                                                ),
+                                              ),
+                                              Text(
+                                                tTitulo,
+                                                style: const TextStyle(
+                                                  fontSize: 11,
+                                                  color: Colors.grey,
+                                                  fontWeight: FontWeight.bold,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 8,
+                                            vertical: 4,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: Colors.orange.withOpacity(
+                                              0.12,
+                                            ),
+                                            borderRadius: BorderRadius.circular(
+                                              10,
+                                            ),
+                                          ),
+                                          child: Text(
+                                            "⏳ Expira: $expTxt",
+                                            style: const TextStyle(
+                                              fontSize: 10,
+                                              fontWeight: FontWeight.bold,
+                                              color: Colors.orange,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 8),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 8,
+                                        vertical: 4,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: isOscuro
+                                            ? Colors.white10
+                                            : Colors.blue.shade50,
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                      child: Text(
+                                        "📍 Origen: $origen",
+                                        style: TextStyle(
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.bold,
+                                          color: isOscuro
+                                              ? Colors.white70
+                                              : const Color(0xFF0D47A1),
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 12),
+                                    Row(
+                                      children: [
+                                        Expanded(
+                                          child: OutlinedButton.icon(
+                                            style: OutlinedButton.styleFrom(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                    vertical: 8,
+                                                  ),
+                                              shape: RoundedRectangleBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(10),
+                                              ),
+                                            ),
+                                            icon: const Icon(
+                                              Icons.copy_rounded,
+                                              size: 14,
+                                            ),
+                                            label: const Text(
+                                              "Copiar Link",
+                                              style: TextStyle(
+                                                fontSize: 11,
+                                                fontWeight: FontWeight.bold,
+                                              ),
+                                            ),
+                                            onPressed: () {
+                                              Clipboard.setData(
+                                                ClipboardData(text: link),
+                                              );
+                                              ScaffoldMessenger.of(
+                                                context,
+                                              ).showSnackBar(
+                                                const SnackBar(
+                                                  content: Text(
+                                                    "Enlace copiado al portapapeles 📋",
+                                                  ),
+                                                  duration: Duration(
+                                                    seconds: 2,
+                                                  ),
+                                                ),
+                                              );
+                                            },
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: ElevatedButton.icon(
+                                            style: ElevatedButton.styleFrom(
+                                              backgroundColor: const Color(
+                                                0xFF25D366,
+                                              ),
+                                              foregroundColor: Colors.white,
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                    vertical: 8,
+                                                  ),
+                                              shape: RoundedRectangleBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(10),
+                                              ),
+                                              elevation: 0,
+                                            ),
+                                            icon: const Icon(
+                                              Icons.send_rounded,
+                                              size: 14,
+                                            ),
+                                            label: const Text(
+                                              "WhatsApp",
+                                              style: TextStyle(
+                                                fontSize: 11,
+                                                fontWeight: FontWeight.bold,
+                                              ),
+                                            ),
+                                            onPressed: () {
+                                              _generarQrOLinkUnico(
+                                                tokenUnico: token,
+                                                nombreCliente: cNom,
+                                                telefono: tel,
+                                                tarjetaTitulo: tTitulo,
+                                                premioDesc:
+                                                    inv['premioDesc'] ?? '',
+                                                metaCompras:
+                                                    ((inv['metaCompras'] ?? 10)
+                                                            as num)
+                                                        .toInt(),
+                                                montoMinimo:
+                                                    ((inv['montoMinimo'] ?? 0)
+                                                            as num)
+                                                        .toDouble(),
+                                              );
+                                            },
+                                          ),
+                                        ),
+                                        const SizedBox(width: 4),
+                                        IconButton(
+                                          icon: const Icon(
+                                            Icons.delete_outline_rounded,
+                                            color: Colors.redAccent,
+                                            size: 20,
+                                          ),
+                                          tooltip: "Eliminar invitación",
+                                          onPressed: () async {
+                                            await ServicioFidelidad.eliminarTokenInvitacion(
+                                              token,
+                                            );
+                                            setModalState(() {
+                                              _invitacionesPendientes
+                                                  .removeWhere(
+                                                    (item) =>
+                                                        item['token'] == token,
+                                                  );
+                                            });
+                                            setState(() {});
+                                          },
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   // GENERADOR DE QR / LINK Y ENVÍO POR WHATSAPP
   void _generarQrOLinkUnico({
     required String tokenUnico,
@@ -2701,8 +3073,47 @@ final user = FirebaseAuth.instance.currentUser;
         foregroundColor: Colors.white,
         elevation: 0,
         actions: [
+          // 📬 BOTÓN CON INSIGNIA DE INVITACIONES PENDIENTES
+          Stack(
+            alignment: Alignment.center,
+            children: [
+              IconButton(
+                icon: const Icon(
+                  Icons.mark_email_unread_rounded,
+                  color: Colors.white,
+                  size: 22,
+                ),
+                tooltip: "Invitaciones Pendientes",
+                onPressed: _mostrarModalInvitacionesPendientes,
+              ),
+              if (_invitacionesPendientes.isNotEmpty)
+                Positioned(
+                  top: 8,
+                  right: 8,
+                  child: Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: const BoxDecoration(
+                      color: Colors.amberAccent,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Text(
+                      '${_invitacionesPendientes.length}',
+                      style: const TextStyle(
+                        color: Colors.black,
+                        fontSize: 9,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
           IconButton(
-            icon: const Icon(Icons.help_outline_rounded, color: Colors.white, size: 22),
+            icon: const Icon(
+              Icons.help_outline_rounded,
+              color: Colors.white,
+              size: 22,
+            ),
             tooltip: "Preguntas Frecuentes y Guía",
             onPressed: _mostrarModalAyudaFidelidad,
           ),

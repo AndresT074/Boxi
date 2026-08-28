@@ -17,7 +17,7 @@ class ServicioFidelidad {
     required String tarjetaId,
     required String nombreNegocio,
     required String logoPath,
-    String? fotoPath, // 👈 AÑADIDO: Foto del premio
+    String? fotoPath,
     required String tarjetaTitulo,
     required int metaCompras,
     required String premioDesc,
@@ -26,6 +26,7 @@ class ServicioFidelidad {
     String? clientUid,
     String? clienteNombre,
     double? montoMinimo,
+    String? origen, // 👈 NUEVO: 'Punto manual' o 'Pedido #15'
   }) async {
     String vendorHash = vendorUid.length > 4 ? vendorUid.substring(0, 4) : vendorUid;
     String token = "boxi_fidelidad_${DateTime.now().millisecondsSinceEpoch}_$vendorHash".trim();
@@ -43,9 +44,10 @@ class ServicioFidelidad {
       'tarjetaTitulo': tarjetaTitulo,
       'metaCompras': metaCompras,
       'premioDesc': premioDesc,
-      'montoMinimo': montoMinimo ?? 0.0, // 👈 Se guarda en el token
+      'montoMinimo': montoMinimo ?? 0.0,
       'clienteTelefono': clienteTelefono,
       'clienteNombre': clienteNombre ?? '',
+      'origen': origen ?? 'Punto manual', // 👈 Se guarda el origen
       'usado': false,
       'fechaCreacion': FieldValue.serverTimestamp(),
       'expireAt': Timestamp.fromDate(fechaExpiracion),
@@ -664,6 +666,59 @@ class ServicioFidelidad {
 
     } catch (e) {
       debugPrint("Error eliminando tarjeta acumulada: $e");
+    }
+  }
+
+  // 📥 Obtener lista de invitaciones pendientes no reclamadas
+  static Future<List<Map<String, dynamic>>> obtenerInvitacionesPendientes(
+    String vendorUid,
+  ) async {
+    if (vendorUid.isEmpty) return [];
+    try {
+      final snap = await _db
+          .collection('tokens_fidelidad')
+          .where('vendorUid', isEqualTo: vendorUid)
+          .where('usado', isEqualTo: false)
+          .get();
+
+      final ahora = DateTime.now();
+      List<Map<String, dynamic>> validos = [];
+
+      for (var doc in snap.docs) {
+        var data = doc.data();
+        if (data.containsKey('expireAt') && data['expireAt'] != null) {
+          Timestamp exp = data['expireAt'];
+          if (exp.toDate().isAfter(ahora)) {
+            validos.add(data);
+          } else {
+            doc.reference.delete().catchError((_) {});
+          }
+        } else {
+          validos.add(data);
+        }
+      }
+
+      validos.sort((a, b) {
+        var fA = a['fechaCreacion'];
+        var fB = b['fechaCreacion'];
+        if (fA is Timestamp && fB is Timestamp) return fB.compareTo(fA);
+        return 0;
+      });
+
+      return validos;
+    } catch (e) {
+      debugPrint("Error obteniendo invitaciones pendientes: $e");
+      return [];
+    }
+  }
+
+  // 🗑️ Eliminar/Cancelar invitación pendiente
+  static Future<void> eliminarTokenInvitacion(String token) async {
+    if (token.isEmpty) return;
+    try {
+      await _db.collection('tokens_fidelidad').doc(token).delete();
+    } catch (e) {
+      debugPrint("Error eliminando token: $e");
     }
   }
   

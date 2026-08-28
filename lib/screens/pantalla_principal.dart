@@ -17,7 +17,9 @@ import 'package:share_plus/share_plus.dart';
 import 'package:reorderable_grid_view/reorderable_grid_view.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import '../database/db_helper.dart';
+import 'pantalla_proveedores.dart';
 import 'pantalla_inventario.dart';
+import 'servicio_fidelidad.dart';
 import 'pantalla_registrar_pedido.dart';
 import 'pantalla_gestion_pedidos.dart';
 import 'pantalla_vendedores.dart';
@@ -86,7 +88,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   bool _procesandoImagen = false;
   bool _mostrarAvisoReorganizar = true;
   Timer? _timerReorden;
-  Map<String, bool> _categoriasExpandidasBackup = {}; // 🔥 Almacena el estado de expansión previo
+  Map<String, bool> _categoriasExpandidasBackup = {}; 
   double _alturaCarrito = 150.0;
   bool _isDraggingCarrito = false;
   final double _minAltura = 0;
@@ -94,6 +96,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   double _descuentoGlobalPct = 0.0;
   int _badgeInventario = 0;
   int _badgePedidos = 0;
+  int _badgeFidelidad = 0; 
   int _columnasIndex = 2;
   final List<int> _colsVertical = [4, 3, 2, 1];
   final List<int> _colsHorizontal = [8, 5, 3, 1];
@@ -303,8 +306,21 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       }
     }
     var pedData = await db.rawQuery(
-        "SELECT COUNT(*) as c FROM pedidos WHERE estado IN ('Pendiente', 'Entregado sin Pago')");
+      "SELECT COUNT(*) as c FROM pedidos WHERE estado IN ('Pendiente', 'Entregado sin Pago')",
+    );
     int pedidosAtascados = Sqflite.firstIntValue(pedData) ?? 0;
+
+    int pendientesFidelidad = 0;
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      try {
+        final invs = await ServicioFidelidad.obtenerInvitacionesPendientes(
+          user.uid,
+        );
+        pendientesFidelidad = invs.length;
+      } catch (_) {}
+    }
+
     if (!mounted) return;
     setState(() {
       categorias = catData.map((e) => Map<String, dynamic>.from(e)).toList();
@@ -312,6 +328,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       filtrados = List.from(datosEditables);
       _badgeInventario = productosAgotados;
       _badgePedidos = pedidosAtascados;
+      _badgeFidelidad = pendientesFidelidad; // 👈 Asigna el conteo
       _aplicarFiltro();
     });
   }
@@ -3556,11 +3573,18 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
             child: ListView(
               padding: EdgeInsets.zero, 
               children:[
-                _tile(Icons.inventory, 'Inventario', const PantallaInventario(), badgeCount: _badgeInventario, badgeColor: Colors.red),
+                _tile(
+                  Icons.inventory,
+                  'Inventario',
+                  const PantallaInventario(),
+                  badgeCount: _badgeInventario,
+                  badgeColor: Colors.red,
+                ),
                 _tile(Icons.people, 'Vendedores', const PantallaVendedores()),
-                _tile(Icons.person_search, 'Clientes', const PantallaClientes()),
-                _tile(Icons.card_giftcard_rounded, 'Tarjetas de Regalo', const PantallaFidelidad()),
-                _tile(Icons.receipt_long, 'Gestión Pedidos', const PantallaGestionPedidos(), badgeCount: _badgePedidos, badgeColor: Colors.blue),
+                _tile(Icons.local_shipping_rounded, 'Proveedores', const PantallaProveedores()),
+                _tile(Icons.person_search, 'Clientes', const PantallaClientes(),),
+                _tile(Icons.card_giftcard_rounded, 'Tarjetas de Regalo', const PantallaFidelidad(), badgeCount: _badgeFidelidad, badgeColor: Colors.amber.shade800,), // 👈 Insignia activa
+                _tile(Icons.receipt_long,'Gestión Pedidos', const PantallaGestionPedidos(), badgeCount: _badgePedidos, badgeColor: Colors.blue,),
                 _tile(Icons.bar_chart, 'Finanzas y Estadisticas', const PantallaPresupuestos()),             
                 ValueListenableBuilder<ThemeMode>(
                   valueListenable: ServicioTema.modoTema,
@@ -4172,6 +4196,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
 
   Widget _construirVistaProductos(int columnas, bool esHorizontal) {
     final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
+    bool buscandoActivo = _estaBuscando && _searchCtrl.text.trim().isNotEmpty;
 
     // 🔥 El cartel morado se renderiza siempre arriba, exista o no inventario
     return Column(
@@ -4186,149 +4211,358 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Icon(Icons.inventory_2_rounded, size: 75, color: isOscuro ? Colors.white24 : Colors.blueGrey.withOpacity(0.3)),
+                      Icon(
+                        Icons.inventory_2_rounded,
+                        size: 75,
+                        color: isOscuro
+                            ? Colors.white24
+                            : Colors.blueGrey.withOpacity(0.3),
+                      ),
                       const SizedBox(height: 20),
-                      Text("¡Hola! Empieza a crear tus productos desde la sección de inventario", textAlign: TextAlign.center, style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: isOscuro ? Colors.white70 : Colors.black54)),
+                      Text(
+                        "¡Hola! Empieza a crear tus productos desde la sección de inventario",
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                          color: isOscuro ? Colors.white70 : Colors.black54,
+                        ),
+                      ),
                       const SizedBox(height: 20),
                       ElevatedButton.icon(
-                        style: ElevatedButton.styleFrom(backgroundColor: isOscuro ? Colors.cyanAccent.shade700 : const Color(0xFF0D47A1), foregroundColor: isOscuro ? Colors.black : Colors.white, padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 14)),
-                        onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PantallaInventario())).then((_) => _cargar()),
-                        icon: const Icon(Icons.add_shopping_cart_rounded), label: const Text("IR A INVENTARIO", style: TextStyle(fontWeight: FontWeight.w900)),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: isOscuro
+                              ? Colors.cyanAccent.shade700
+                              : const Color(0xFF0D47A1),
+                          foregroundColor: isOscuro
+                              ? Colors.black
+                              : Colors.white,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 22,
+                            vertical: 14,
+                          ),
+                        ),
+                        onPressed: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => const PantallaInventario(),
+                          ),
+                        ).then((_) => _cargar()),
+                        icon: const Icon(Icons.add_shopping_cart_rounded),
+                        label: const Text(
+                          "IR A INVENTARIO",
+                          style: TextStyle(fontWeight: FontWeight.w900),
+                        ),
                       ),
                       const SizedBox(height: 25),
                       if (!_esPremium && widget.esAdmin)
-                        const AnuncioNativoWidget(key: ValueKey('admob_native_empty_key')),
+                        const AnuncioNativoWidget(
+                          key: ValueKey('admob_native_empty_key'),
+                        ),
                     ],
                   ),
                 ),
               );
             }
-            if (filtrados.isEmpty) return const Center(child: Text('Sin productos'));
 
-            Map<String, List<Map<String, dynamic>>> grupos = {'_sin_categoria': []};
-            for (var cat in categorias) grupos[cat['nombre']] = [];
-            
-            for (var p in filtrados) {
-              String? cat = p['categoria'];
-              if (cat != null && grupos.containsKey(cat)) grupos[cat]!.add(p);
-              else grupos['_sin_categoria']!.add(p);
+            // 🔥 Si está buscando y no hay resultados coincidentes
+            if (filtrados.isEmpty) {
+              return Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      Icons.search_off_rounded,
+                      size: 65,
+                      color: Colors.grey.shade400,
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'No se encontraron coincidencias para "${_searchCtrl.text}"',
+                      style: TextStyle(
+                        color: isOscuro ? Colors.white60 : Colors.black54,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 14,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                ),
+              );
             }
 
-            Widget construirTarjeta(BuildContext context, Map<String, dynamic> p) {
+            Map<String, List<Map<String, dynamic>>> grupos = {
+              '_sin_categoria': [],
+            };
+            for (var cat in categorias) grupos[cat['nombre']] = [];
+
+            for (var p in filtrados) {
+              String? cat = p['categoria'];
+              if (cat != null && grupos.containsKey(cat))
+                grupos[cat]!.add(p);
+              else
+                grupos['_sin_categoria']!.add(p);
+            }
+
+            Widget construirTarjeta(
+              BuildContext context,
+              Map<String, dynamic> p,
+            ) {
               bool select = carrito.any((item) => item['id'] == p['id']);
               double precioOriginal = (p['precio_venta'] as num).toDouble();
               double desc = (p['descuento'] ?? 0).toDouble();
-              double precioFinal = precioOriginal - (precioOriginal * (desc / 100));
-              bool modoSacarActivo = p['categoria'] != null && _categoriasEnModoEliminacion.contains(p['categoria']);
+              double precioFinal =
+                  precioOriginal - (precioOriginal * (desc / 100));
+              bool modoSacarActivo =
+                  p['categoria'] != null &&
+                  _categoriasEnModoEliminacion.contains(p['categoria']);
 
               return Card(
                 key: ValueKey(p['id']),
                 elevation: select ? 8 : 2,
                 clipBehavior: Clip.antiAlias,
                 color: Theme.of(context).cardColor,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: select ? (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)) : Colors.transparent, width: 1.5)),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: BorderSide(
+                    color: select
+                        ? (isOscuro
+                              ? Colors.cyanAccent
+                              : const Color(0xFF0D47A1))
+                        : Colors.transparent,
+                    width: 1.5,
+                  ),
+                ),
                 child: Stack(
                   children: [
                     InkWell(
                       onTap: () {
                         List<dynamic> gruposVariantes = [];
-                        if (p['variantes'] != null && p['variantes'].toString().length > 5) {
+                        if (p['variantes'] != null &&
+                            p['variantes'].toString().length > 5) {
                           try {
                             var dec = jsonDecode(p['variantes']);
-                            if (dec.isNotEmpty && !dec[0].containsKey('grupo')) gruposVariantes = [{'grupo': 'Opciones', 'opciones': dec}];
-                            else gruposVariantes = dec;
+                            if (dec.isNotEmpty && !dec[0].containsKey('grupo'))
+                              gruposVariantes = [
+                                {'grupo': 'Opciones', 'opciones': dec},
+                              ];
+                            else
+                              gruposVariantes = dec;
                           } catch (e) {}
                         }
                         if (gruposVariantes.isNotEmpty) {
-                          showModalBottomSheet(context: context, isScrollControlled: true, backgroundColor: Colors.transparent, builder: (_) => _DialogoVariantes(
-                              producto: p, gruposVariantes: gruposVariantes,
-                              onAceptar: (cantidades) { cantidades.forEach((key, qty) { if (qty > 0) {
-                                  List<String> partes = key.split('_'); int gIdx = int.parse(partes[0]); int oIdx = int.parse(partes[1]);
-                                  var o = gruposVariantes[gIdx]['opciones'][oIdx];
-                                  _actualizarCarrito(p, qty, cartId: "${p['id']}_$key", variantData: {'nombre': "${p['nombre']} - ${o['nombre']}", 'es_variante': true, 'g_index': gIdx, 'o_index': oIdx, 'stock_real': o['stock']});
-                              }});}));
-                        } else _actualizarCarrito(p, 1, cartId: p['id'].toString());
+                          showModalBottomSheet(
+                            context: context,
+                            isScrollControlled: true,
+                            backgroundColor: Colors.transparent,
+                            builder: (_) => _DialogoVariantes(
+                              producto: p,
+                              gruposVariantes: gruposVariantes,
+                              onAceptar: (cantidades) {
+                                cantidades.forEach((key, qty) {
+                                  if (qty > 0) {
+                                    List<String> partes = key.split('_');
+                                    int gIdx = int.parse(partes[0]);
+                                    int oIdx = int.parse(partes[1]);
+                                    var o =
+                                        gruposVariantes[gIdx]['opciones'][oIdx];
+                                    _actualizarCarrito(
+                                      p,
+                                      qty,
+                                      cartId: "${p['id']}_$key",
+                                      variantData: {
+                                        'nombre':
+                                            "${p['nombre']} - ${o['nombre']}",
+                                        'es_variante': true,
+                                        'g_index': gIdx,
+                                        'o_index': oIdx,
+                                        'stock_real': o['stock'],
+                                      },
+                                    );
+                                  }
+                                });
+                              },
+                            ),
+                          );
+                        } else
+                          _actualizarCarrito(p, 1, cartId: p['id'].toString());
                       },
                       child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch, 
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          Expanded(child: _construirFotoConEtiqueta(p, columnas)), 
-                          Padding(padding: const EdgeInsets.all(4.0), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                              Text(p['nombre'], style: TextStyle(fontWeight: FontWeight.bold, fontSize: columnas >= 5 ? 9 : 12), maxLines: 3, overflow: TextOverflow.ellipsis),
-                              if (desc > 0) Text('\$$precioOriginal', style: TextStyle(color: isOscuro ? Colors.redAccent.shade100 : Colors.red, fontSize: 10, decoration: TextDecoration.lineThrough)),
-                              Text('\$${precioFinal.toStringAsFixed(0)}', style: TextStyle(color: desc > 0 ? (isOscuro ? Colors.greenAccent : Colors.green) : (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)), fontWeight: FontWeight.bold, fontSize: columnas >= 5 ? 9 : 13)),
+                          Expanded(
+                            child: _construirFotoConEtiqueta(p, columnas),
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.all(4.0),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                Text(
+                                  p['nombre'],
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: columnas >= 5 ? 9 : 12,
+                                  ),
+                                  maxLines: 3,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                if (desc > 0)
+                                  Text(
+                                    '\$$precioOriginal',
+                                    style: TextStyle(
+                                      color: isOscuro
+                                          ? Colors.redAccent.shade100
+                                          : Colors.red,
+                                      fontSize: 10,
+                                      decoration: TextDecoration.lineThrough,
+                                    ),
+                                  ),
+                                Text(
+                                  '\$${precioFinal.toStringAsFixed(0)}',
+                                  style: TextStyle(
+                                    color: desc > 0
+                                        ? (isOscuro
+                                              ? Colors.greenAccent
+                                              : Colors.green)
+                                        : (isOscuro
+                                              ? Colors.cyanAccent
+                                              : const Color(0xFF0D47A1)),
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: columnas >= 5 ? 9 : 13,
+                                  ),
+                                ),
 
-                              // 🔍 DESPLEGABLE DE VARIANTES COINCIDENTES EN LA BÚSQUEDA
-                              Builder(
-                                builder: (context) {
-                                  String qBusqueda = _searchCtrl.text.trim().toLowerCase();
-                                  if (!_estaBuscando || qBusqueda.isEmpty || p['variantes'] == null || p['variantes'].toString().length <= 5) {
-                                    return const SizedBox.shrink();
-                                  }
+                                // 🔍 DESPLEGABLE DE VARIANTES COINCIDENTES EN LA BÚSQUEDA
+                                Builder(
+                                  builder: (context) {
+                                    String qBusqueda = _searchCtrl.text
+                                        .trim()
+                                        .toLowerCase();
+                                    if (!_estaBuscando ||
+                                        qBusqueda.isEmpty ||
+                                        p['variantes'] == null ||
+                                        p['variantes'].toString().length <= 5) {
+                                      return const SizedBox.shrink();
+                                    }
 
-                                  List<Map<String, dynamic>> variantesCoincidentes = [];
-                                  try {
-                                    var dec = jsonDecode(p['variantes'].toString());
-                                    if (dec is List) {
-                                      for (var g in dec) {
-                                        if (g is Map) {
-                                          String grupoNom = (g['grupo'] ?? '').toString();
-                                          List opciones = (g['opciones'] is List) ? g['opciones'] : [];
-                                          for (var o in opciones) {
-                                            if (o is Map) {
-                                              String opcNom = (o['nombre'] ?? '').toString();
-                                              if (opcNom.toLowerCase().contains(qBusqueda) || grupoNom.toLowerCase().contains(qBusqueda)) {
-                                                variantesCoincidentes.add({
-                                                  'grupo': grupoNom,
-                                                  'nombre': opcNom,
-                                                  'stock': (o['stock'] as num?)?.toInt() ?? 0,
-                                                });
+                                    List<Map<String, dynamic>>
+                                    variantesCoincidentes = [];
+                                    try {
+                                      var dec = jsonDecode(
+                                        p['variantes'].toString(),
+                                      );
+                                      if (dec is List) {
+                                        for (var g in dec) {
+                                          if (g is Map) {
+                                            String grupoNom = (g['grupo'] ?? '')
+                                                .toString();
+                                            List opciones =
+                                                (g['opciones'] is List)
+                                                ? g['opciones']
+                                                : [];
+                                            for (var o in opciones) {
+                                              if (o is Map) {
+                                                String opcNom =
+                                                    (o['nombre'] ?? '')
+                                                        .toString();
+                                                if (opcNom
+                                                        .toLowerCase()
+                                                        .contains(qBusqueda) ||
+                                                    grupoNom
+                                                        .toLowerCase()
+                                                        .contains(qBusqueda)) {
+                                                  variantesCoincidentes.add({
+                                                    'grupo': grupoNom,
+                                                    'nombre': opcNom,
+                                                    'stock':
+                                                        (o['stock'] as num?)
+                                                            ?.toInt() ??
+                                                        0,
+                                                  });
+                                                }
                                               }
                                             }
                                           }
                                         }
                                       }
-                                    }
-                                  } catch (_) {}
+                                    } catch (_) {}
 
-                                  if (variantesCoincidentes.isEmpty) return const SizedBox.shrink();
+                                    if (variantesCoincidentes.isEmpty)
+                                      return const SizedBox.shrink();
 
-                                  return Container(
-                                    margin: const EdgeInsets.only(top: 4, bottom: 2),
-                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-                                    decoration: BoxDecoration(
-                                      color: isOscuro ? Colors.cyanAccent.withOpacity(0.12) : Colors.blue.shade50,
-                                      borderRadius: BorderRadius.circular(8),
-                                      border: Border.all(color: isOscuro ? Colors.cyanAccent.withOpacity(0.3) : Colors.blue.shade200),
-                                    ),
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: variantesCoincidentes.take(2).map((v) {
-                                        int stVar = v['stock'] as int;
-                                        return Padding(
-                                          padding: const EdgeInsets.symmetric(vertical: 1),
-                                          child: Text(
-                                            "🔹 ${v['nombre']} (Stock: $stVar)",
-                                            style: TextStyle(
-                                              fontSize: (columnas >= 5 ? 8 : 10).toDouble(),
-                                              fontWeight: FontWeight.bold,
-                                              color: stVar <= 0 ? Colors.redAccent : (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)),
-                                            ),
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                          ),
-                                        );
-                                      }).toList(),
-                                    ),
-                                  );
-                                },
-                              ),
-                          ])),
+                                    return Container(
+                                      margin: const EdgeInsets.only(
+                                        top: 4,
+                                        bottom: 2,
+                                      ),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 6,
+                                        vertical: 3,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: isOscuro
+                                            ? Colors.cyanAccent.withOpacity(
+                                                0.12,
+                                              )
+                                            : Colors.blue.shade50,
+                                        borderRadius: BorderRadius.circular(8),
+                                        border: Border.all(
+                                          color: isOscuro
+                                              ? Colors.cyanAccent.withOpacity(
+                                                  0.3,
+                                                )
+                                              : Colors.blue.shade200,
+                                        ),
+                                      ),
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: variantesCoincidentes
+                                            .take(2)
+                                            .map((v) {
+                                              int stVar = v['stock'] as int;
+                                              return Padding(
+                                                padding:
+                                                    const EdgeInsets.symmetric(
+                                                      vertical: 1,
+                                                    ),
+                                                child: Text(
+                                                  "🔹 ${v['nombre']} (Stock: $stVar)",
+                                                  style: TextStyle(
+                                                    fontSize:
+                                                        (columnas >= 5 ? 8 : 10)
+                                                            .toDouble(),
+                                                    fontWeight: FontWeight.bold,
+                                                    color: stVar <= 0
+                                                        ? Colors.redAccent
+                                                        : (isOscuro
+                                                              ? Colors
+                                                                    .cyanAccent
+                                                              : const Color(
+                                                                  0xFF0D47A1,
+                                                                )),
+                                                  ),
+                                                  maxLines: 1,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                ),
+                                              );
+                                            })
+                                            .toList(),
+                                      ),
+                                    );
+                                  },
+                                ),
+                              ],
+                            ),
+                          ),
                         ],
                       ),
                     ),
                     Positioned(
-                      top: 5, right: 5,
+                      top: 5,
+                      right: 5,
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
@@ -4338,16 +4572,30 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                               child: Container(
                                 margin: const EdgeInsets.only(right: 5),
                                 padding: const EdgeInsets.all(6),
-                                decoration: const BoxDecoration(color: Colors.redAccent, shape: BoxShape.circle),
-                                child: const Icon(Icons.close_rounded, color: Colors.white, size: 16),
+                                decoration: const BoxDecoration(
+                                  color: Colors.redAccent,
+                                  shape: BoxShape.circle,
+                                ),
+                                child: const Icon(
+                                  Icons.close_rounded,
+                                  color: Colors.white,
+                                  size: 16,
+                                ),
                               ),
                             ),
                           InkWell(
                             onTap: () => _mostrarDetalleProducto(p),
                             child: Container(
                               padding: const EdgeInsets.all(6),
-                              decoration: BoxDecoration(color: Colors.black.withOpacity(0.6), shape: BoxShape.circle),
-                              child: const Icon(Icons.remove_red_eye, color: Colors.white, size: 16),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withOpacity(0.6),
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(
+                                Icons.remove_red_eye,
+                                color: Colors.white,
+                                size: 16,
+                              ),
                             ),
                           ),
                         ],
@@ -4358,40 +4606,63 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
               );
             }
 
-            bool mostrarBanner = widget.esAdmin && _mostrarAvisoReorganizar;
+            bool mostrarBanner =
+                widget.esAdmin && _mostrarAvisoReorganizar && !buscandoActivo;
             int offsetTopItems = 0;
             if (mostrarBanner) offsetTopItems++;
-            if (widget.esAdmin) offsetTopItems++;
+            if (widget.esAdmin && !buscandoActivo) offsetTopItems++;
 
             return Listener(
               onPointerDown: (e) {
                 _startPos = e.position;
-                _dragTimer = Timer(const Duration(milliseconds: 350), () => _isDragging = true);
+                _dragTimer = Timer(
+                  const Duration(milliseconds: 350),
+                  () => _isDragging = true,
+                );
               },
               onPointerMove: (e) {
                 if (!_isDragging && _startPos != null) {
-                  if ((e.position - _startPos!).distance > 15) _dragTimer?.cancel();
+                  if ((e.position - _startPos!).distance > 15)
+                    _dragTimer?.cancel();
                 }
                 if (_isDragging) {
                   double y = e.position.dy;
                   double h = MediaQuery.of(context).size.height;
                   double edge = 150.0;
-                  
+
                   if (y < edge) {
-                    if (_autoScrollTimer == null || !_autoScrollTimer!.isActive) {
-                      _autoScrollTimer = Timer.periodic(const Duration(milliseconds: 20), (_) {
-                        if (_mainScroll.hasClients) {
-                          _mainScroll.jumpTo((_mainScroll.offset - 10).clamp(0.0, _mainScroll.position.maxScrollExtent));
-                        }
-                      });
+                    if (_autoScrollTimer == null ||
+                        !_autoScrollTimer!.isActive) {
+                      _autoScrollTimer = Timer.periodic(
+                        const Duration(milliseconds: 20),
+                        (_) {
+                          if (_mainScroll.hasClients) {
+                            _mainScroll.jumpTo(
+                              (_mainScroll.offset - 10).clamp(
+                                0.0,
+                                _mainScroll.position.maxScrollExtent,
+                              ),
+                            );
+                          }
+                        },
+                      );
                     }
                   } else if (y > h - edge) {
-                    if (_autoScrollTimer == null || !_autoScrollTimer!.isActive) {
-                      _autoScrollTimer = Timer.periodic(const Duration(milliseconds: 20), (_) {
-                        if (_mainScroll.hasClients) {
-                          _mainScroll.jumpTo((_mainScroll.offset + 10).clamp(0.0, _mainScroll.position.maxScrollExtent));
-                        }
-                      });
+                    if (_autoScrollTimer == null ||
+                        !_autoScrollTimer!.isActive) {
+                      _autoScrollTimer = Timer.periodic(
+                        const Duration(milliseconds: 20),
+                        (_) {
+                          if (_mainScroll.hasClients) {
+                            _mainScroll.jumpTo(
+                              (_mainScroll.offset + 10).clamp(
+                                0.0,
+                                _mainScroll.position.maxScrollExtent,
+                              ),
+                            );
+                          }
+                        },
+                      );
                     }
                   } else {
                     _autoScrollTimer?.cancel();
@@ -4402,313 +4673,773 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
               onPointerCancel: (e) => _detenerArrastreGlobal(),
               child: RawScrollbar(
                 controller: _mainScroll,
-                thumbVisibility: true, // Muestra la barra al deslizar
-                thickness: 7, // Grosor cómodo para el tacto
+                thumbVisibility: true,
+                thickness: 7,
                 radius: const Radius.circular(10),
-                thumbColor: isOscuro 
-                    ? Colors.cyanAccent.withOpacity(0.7) 
+                thumbColor: isOscuro
+                    ? Colors.cyanAccent.withOpacity(0.7)
                     : const Color(0xFF0D47A1).withOpacity(0.7),
-                interactive: true, // 🔥 PERMITE TOCAR Y ARRASTRAR LA BARRA SUPER RÁPIDO
+                interactive: true,
                 child: ReorderableListView(
                   scrollController: _mainScroll,
                   physics: const BouncingScrollPhysics(),
                   buildDefaultDragHandles: false,
-                proxyDecorator: (Widget child, int index, Animation<double> animation) {
-                  return AnimatedBuilder(
-                    animation: animation,
-                    builder: (BuildContext context, Widget? childWidget) {
-                      final double animValue = Curves.easeInOut.transform(animation.value);
-                      final double elevation = ui.lerpDouble(0, 8, animValue)!;
-                      return Material(
-                        elevation: elevation,
-                        color: Colors.transparent,
-                        shadowColor: Colors.black.withOpacity(0.35),
-                        child: childWidget ?? child,
+                  proxyDecorator:
+                      (Widget child, int index, Animation<double> animation) {
+                        return AnimatedBuilder(
+                          animation: animation,
+                          builder: (BuildContext context, Widget? childWidget) {
+                            final double animValue = Curves.easeInOut.transform(
+                              animation.value,
+                            );
+                            final double elevation = ui.lerpDouble(
+                              0,
+                              8,
+                              animValue,
+                            )!;
+                            return Material(
+                              elevation: elevation,
+                              color: Colors.transparent,
+                              shadowColor: Colors.black.withOpacity(0.35),
+                              child: childWidget ?? child,
+                            );
+                          },
+                          child: child,
+                        );
+                      },
+                  onReorderStart: (int index) {
+                    setState(() {
+                      for (var c in categorias) {
+                        categoriasExpandidas[c['nombre']] = false;
+                      }
+                    });
+                  },
+                  onReorderEnd: (int index) {
+                    setState(() {
+                      categoriasExpandidas = Map<String, bool>.from(
+                        _categoriasExpandidasBackup,
                       );
-                    },
-                    child: child,
-                  );
-                },
-                onReorderStart: (int index) {
-                  setState(() {
-                    for (var c in categorias) {
-                      categoriasExpandidas[c['nombre']] = false;
-                    }
-                  });
-                },
-                onReorderEnd: (int index) {
-                  setState(() {
-                    categoriasExpandidas = Map<String, bool>.from(_categoriasExpandidasBackup);
-                  });
-                },
-                onReorder: (oldIndex, newIndex) {
-                  if (oldIndex < offsetTopItems || newIndex < offsetTopItems) return;
-                  if (oldIndex >= offsetTopItems + categorias.length) return;
-                  
-                  if (newIndex > oldIndex) newIndex -= 1;
+                    });
+                  },
+                  onReorder: (oldIndex, newIndex) {
+                    if (oldIndex < offsetTopItems || newIndex < offsetTopItems)
+                      return;
+                    if (oldIndex >= offsetTopItems + categorias.length) return;
 
-                  int oldCatIdx = oldIndex - offsetTopItems;
-                  int newCatIdx = newIndex - offsetTopItems;
+                    if (newIndex > oldIndex) newIndex -= 1;
 
-                  if (newCatIdx >= categorias.length) newCatIdx = categorias.length - 1;
+                    int oldCatIdx = oldIndex - offsetTopItems;
+                    int newCatIdx = newIndex - offsetTopItems;
 
-                  setState(() {
-                    final cat = categorias.removeAt(oldCatIdx);
-                    categorias.insert(newCatIdx, cat);
-                    categoriasExpandidas = Map<String, bool>.from(_categoriasExpandidasBackup);
-                  });
-                  _guardarOrdenCategorias();
-                },
-                children: [
-                  if (mostrarBanner)
-                    Container(
-                      key: const ValueKey('banner_info'),
-                      width: double.infinity, padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 10),
-                      color: isOscuro ? Colors.white.withOpacity(0.05) : Colors.blueGrey.shade50,
-                      child: Row(
-                        children: [
-                          const Icon(Icons.touch_app, size: 14, color: Colors.blueGrey), const SizedBox(width: 8),
-                          const Expanded(child: Text("Mantén presionado para reordenar productos", style: TextStyle(fontSize: 11, color: Colors.blueGrey))),
-                          InkWell(onTap: () => setState(() => _mostrarAvisoReorganizar = false), child: const Icon(Icons.close, size: 16, color: Colors.grey))
-                        ],
-                      ),
-                    ),
+                    if (newCatIdx >= categorias.length)
+                      newCatIdx = categorias.length - 1;
 
-                  if (widget.esAdmin)
-                    Padding(
-                      key: const ValueKey('btn_crear_cat'),
-                      padding: const EdgeInsets.fromLTRB(10, 10, 10, 0),
-                      child: ElevatedButton.icon(
-                        style: ElevatedButton.styleFrom(backgroundColor: isOscuro ? Colors.white10 : Colors.blue.shade50, foregroundColor: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1), elevation: 0, side: BorderSide(color: isOscuro ? Colors.white24 : Colors.blue.shade200)),
-                        onPressed: () => _mostrarModalCrearCategoria(),
-                        icon: const Icon(Icons.create_new_folder), label: const Text("Crear Nueva Categoría", style: TextStyle(fontWeight: FontWeight.bold)),
-                      ),
-                    ),
-
-                  // BLOQUES DE CATEGORÍAS
-                  ...categorias.asMap().entries.map((entry) {
-                    int idx = entry.key;
-                    var cat = entry.value;
-                    String nombre = cat['nombre'];
-                    bool isExpanded = categoriasExpandidas[nombre] ?? true;
-                    bool isActivo = cat['activo'] == 1;
-                    int globalIndex = offsetTopItems + idx;
-                    bool removalMode = _categoriasEnModoEliminacion.contains(nombre);
-
-                    if (!widget.esAdmin && !isActivo) return SizedBox.shrink(key: ValueKey('cat_hide_${cat['id']}'));
-
-                    return Container(
-                      key: ValueKey('cat_${cat['id']}'),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          GestureDetector(
-                            onTap: () => setState(() => categoriasExpandidas[nombre] = !isExpanded),
-                            child: Container(
-                              margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                              decoration: BoxDecoration(
-                                color: isOscuro ? const Color.fromARGB(255, 33, 40, 63) : const Color.fromARGB(84, 168, 209, 251), 
-                                borderRadius: BorderRadius.circular(16),
-                                boxShadow: [if (!isOscuro) BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 8, offset: const Offset(0, 3))],
-                                border: Border.all(color: isOscuro ? const Color.fromARGB(213, 49, 162, 227) : const Color.fromARGB(255, 103, 153, 234)), 
-                              ),
-                              child: Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-                                child: Row(
-                                  children: [
-                                    Icon(isExpanded ? Icons.folder_open_rounded : Icons.folder_rounded, color: isActivo ? (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)) : Colors.grey, size: 26),
-                                    const SizedBox(width: 8),
-                                    Expanded(child: Text(nombre, style: TextStyle(fontWeight: FontWeight.w900, fontSize: 15, color: isActivo ? (isOscuro ? Colors.white : Colors.black87) : Colors.grey), maxLines: 2, overflow: TextOverflow.ellipsis)),
-                                    const SizedBox(width: 4),
-                                    Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        if (widget.esAdmin) ...[
-                                          SizedBox(
-                                            height: 24, width: 38,
-                                            child: Transform.scale(
-                                              scale: 0.7,
-                                              child: Switch(value: isActivo, activeColor: Colors.green, materialTapTargetSize: MaterialTapTargetSize.shrinkWrap, onChanged: (v) => _cambiarEstadoCategoria(cat['id'], v)),
-                                            ),
-                                          ),
-                                          const SizedBox(width: 6),
-                                          SizedBox(
-                                            width: 24,
-                                            child: PopupMenuButton<String>(
-                                              icon: const Icon(Icons.more_vert, color: Colors.grey, size: 22),
-                                              padding: EdgeInsets.zero, constraints: const BoxConstraints(),
-                                              onSelected: (val) {
-                                                if (val == 'edit') _mostrarModalCrearCategoria(categoriaAEditar: cat);
-                                                else if (val == 'delete') _confirmarEliminarCategoria(cat['id'], nombre);
-                                                else if (val == 'share') _mostrarDialogoCompartirCategoria(nombre, grupos[nombre] ?? []);
-                                              },
-                                              itemBuilder: (ctx) => [
-                                                const PopupMenuItem(value: 'edit', child: Row(children: [Icon(Icons.edit, size: 16, color: Colors.orangeAccent), SizedBox(width: 8), Text("Editar", style: TextStyle(fontSize: 13))])),
-                                                const PopupMenuItem(value: 'delete', child: Row(children: [Icon(Icons.delete_outline, size: 16, color: Colors.redAccent), SizedBox(width: 8), Text("Eliminar", style: TextStyle(fontSize: 13))])),
-                                                const PopupMenuItem(value: 'share', child: Row(children: [Icon(Icons.share, size: 16, color: Colors.blueAccent), SizedBox(width: 8), Text("Compartir", style: TextStyle(fontSize: 13))])),
-                                              ],
-                                            ),
-                                          ),
-                                        ],
-                                        const SizedBox(width: 4),
-                                        if (widget.esAdmin) ...[
-                                          const SizedBox(width: 2),
-                                          StatefulBuilder(
-                                            builder: (context, setInnerState) {
-                                              Timer? preDragTimer;
-                                              return Listener(
-                                                onPointerDown: (_) {
-                                                  preDragTimer = Timer(const Duration(milliseconds: 250), () {
-                                                    if (mounted) {
-                                                      setState(() {
-                                                        _categoriasExpandidasBackup = Map<String, bool>.from(categoriasExpandidas);
-                                                        categoriasExpandidas[nombre] = false;
-                                                      });
-                                                    }
-                                                  });
-                                                },
-                                                onPointerUp: (_) {
-                                                  if (preDragTimer != null && preDragTimer!.isActive) {
-                                                    preDragTimer!.cancel();
-                                                    setState(() => categoriasExpandidas[nombre] = !isExpanded);
-                                                  }
-                                                },
-                                                onPointerCancel: (_) {
-                                                  if (preDragTimer != null && preDragTimer!.isActive) preDragTimer!.cancel();
-                                                },
-                                                child: Tooltip(
-                                                  message: "Mantén presionado para arrastrar",
-                                                  triggerMode: TooltipTriggerMode.tap, preferBelow: true,
-                                                  decoration: BoxDecoration(color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1), borderRadius: BorderRadius.circular(8), boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(0, 2))]),
-                                                  textStyle: TextStyle(color: isOscuro ? Colors.black : Colors.white, fontWeight: FontWeight.w900, fontSize: 12),
-                                                  showDuration: const Duration(seconds: 2),
-                                                  child: ReorderableDelayedDragStartListener(
-                                                    index: globalIndex,
-                                                    child: const Padding(padding: EdgeInsets.only(left: 4.0, right: 2.0, top: 6.0, bottom: 6.0), child: Icon(Icons.swap_vert_rounded, color: Colors.grey, size: 24)),
-                                                  ),
-                                                ),
-                                              );
-                                            }
-                                          ),
-                                        ],
-                                      ],
-                                    ),
-                                  ],
+                    setState(() {
+                      final cat = categorias.removeAt(oldCatIdx);
+                      categorias.insert(newCatIdx, cat);
+                      categoriasExpandidas = Map<String, bool>.from(
+                        _categoriasExpandidasBackup,
+                      );
+                    });
+                    _guardarOrdenCategorias();
+                  },
+                  children: [
+                    if (mostrarBanner)
+                      Container(
+                        key: const ValueKey('banner_info'),
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(
+                          vertical: 6,
+                          horizontal: 10,
+                        ),
+                        color: isOscuro
+                            ? Colors.white.withOpacity(0.05)
+                            : Colors.blueGrey.shade50,
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.touch_app,
+                              size: 14,
+                              color: Colors.blueGrey,
+                            ),
+                            const SizedBox(width: 8),
+                            const Expanded(
+                              child: Text(
+                                "Mantén presionado para reordenar productos",
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.blueGrey,
                                 ),
                               ),
                             ),
-                          ),
-                          if (isExpanded) ...[
-                            if (grupos[nombre]!.isEmpty)
-                              const Padding(padding: EdgeInsets.all(20), child: Center(child: Text("Sin productos", style: TextStyle(color: Colors.grey, fontSize: 12))))
-                            else widget.esAdmin 
-                              ? ReorderableGridView.builder(
-                                  key: PageStorageKey('grid_$nombre'),
-                                  physics: const NeverScrollableScrollPhysics(), shrinkWrap: true, padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: columnas, childAspectRatio: columnas == 1 ? 1.0 : 0.72, crossAxisSpacing: 8, mainAxisSpacing: 8),
-                                  itemCount: grupos[nombre]!.length,
-                                  onReorder: (oldIdx, newIdx) => _onReorderCategoria(grupos[nombre]!, oldIdx, newIdx),
-                                  itemBuilder: (ctx, i) => construirTarjeta(ctx, grupos[nombre]![i]),
-                                )
-                              : GridView.builder(
-                                  physics: const NeverScrollableScrollPhysics(), shrinkWrap: true, padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: columnas, childAspectRatio: columnas == 1 ? 1.0 : 0.72, crossAxisSpacing: 8, mainAxisSpacing: 8),
-                                  itemCount: grupos[nombre]!.length,
-                                  itemBuilder: (ctx, i) => construirTarjeta(ctx, grupos[nombre]![i]),
-                                ),
-                            if (widget.esAdmin)
-                              Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                                child: Row(
-                                  children: [
-                                    Expanded(
-                                      child: OutlinedButton.icon(
-                                        style: OutlinedButton.styleFrom(
-                                          foregroundColor: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1),
-                                          side: BorderSide(color: isOscuro ? Colors.white10 : Colors.grey.shade300),
-                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                                          padding: const EdgeInsets.symmetric(vertical: 10),
-                                        ),
-                                        onPressed: () => _mostrarDialogoAnadirProductosExistentes(nombre),
-                                        icon: const Icon(Icons.add_circle_outline_rounded, size: 18),
-                                        label: const Text("AÑADIR PRODUCTO", style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-                                      ),
-                                    ),
-                                    const SizedBox(width: 10),
-                                    Expanded(
-                                      child: OutlinedButton.icon(
-                                        style: OutlinedButton.styleFrom(
-                                          foregroundColor: removalMode ? Colors.redAccent : Colors.grey,
-                                          side: BorderSide(color: removalMode ? Colors.redAccent.withOpacity(0.5) : Colors.grey.shade300),
-                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                                          padding: const EdgeInsets.symmetric(vertical: 10),
-                                        ),
-                                        onPressed: () {
-                                          setState(() {
-                                            if (removalMode) _categoriasEnModoEliminacion.remove(nombre);
-                                            else _categoriasEnModoEliminacion.add(nombre);
-                                          });
-                                        },
-                                        icon: Icon(removalMode ? Icons.cancel_outlined : Icons.remove_circle_outline_rounded, size: 18),
-                                        label: Text(removalMode ? "CANCELAR" : "SACAR PRODUCTO", style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-                                      ),
-                                    ),
-                                  ],
-                                ),
+                            InkWell(
+                              onTap: () => setState(
+                                () => _mostrarAvisoReorganizar = false,
                               ),
+                              child: const Icon(
+                                Icons.close,
+                                size: 16,
+                                color: Colors.grey,
+                              ),
+                            ),
                           ],
-                          const SizedBox(height: 15),
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 14),
-                            child: Divider(height: 1, thickness: 1.5, color: isOscuro ? Colors.white24 : Colors.grey.shade400),
-                          ),
-                          const SizedBox(height: 15),
-                        ],
+                        ),
                       ),
-                    );
-                  }).toList(),
-                  if (grupos['_sin_categoria']!.isNotEmpty)
-                    Container(
-                      key: const ValueKey('grid_sin_cat'),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                            child: Text("OTROS PRODUCTOS", style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900, letterSpacing: 0.5, color: isOscuro ? Colors.white70 : const Color(0xFF0D47A1))),
-                          ),
-                          widget.esAdmin 
-                            ? ReorderableGridView.builder(
-                                key: const PageStorageKey('rsincat'),
-                                physics: const NeverScrollableScrollPhysics(), shrinkWrap: true, padding: const EdgeInsets.all(10),
-                                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: columnas, childAspectRatio: columnas == 1 ? 1.0 : 0.72, crossAxisSpacing: 8, mainAxisSpacing: 8),
-                                itemCount: grupos['_sin_categoria']!.length,
-                                onReorder: (oldIdx, newIdx) => _onReorderCategoria(grupos['_sin_categoria']!, oldIdx, newIdx),
-                                itemBuilder: (ctx, i) => construirTarjeta(ctx, grupos['_sin_categoria']![i]),
-                              )
-                            : GridView.builder(
-                                physics: const NeverScrollableScrollPhysics(), shrinkWrap: true, padding: const EdgeInsets.all(10),
-                                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: columnas, childAspectRatio: columnas == 1 ? 1.0 : 0.72, crossAxisSpacing: 8, mainAxisSpacing: 8),
-                                itemCount: grupos['_sin_categoria']!.length,
-                                itemBuilder: (ctx, i) => construirTarjeta(ctx, grupos['_sin_categoria']![i]),
-                              ),
-                          const SizedBox(height: 15),
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 14),
-                            child: Divider(height: 1, thickness: 1, color: isOscuro ? Colors.white.withOpacity(0.08) : Colors.grey.shade200),
-                          ),
-                          const SizedBox(height: 15),
-                        ],
-                      ),
-                    ),
-                  if (!_esPremium && widget.esAdmin)
-                    const AnuncioNativoWidget(key: ValueKey('admob_native_ad_key')),
 
-                  const SizedBox(key: ValueKey('spacer_end'), height: 100),
-                ],
+                    if (widget.esAdmin && !buscandoActivo)
+                      Padding(
+                        key: const ValueKey('btn_crear_cat'),
+                        padding: const EdgeInsets.fromLTRB(10, 10, 10, 0),
+                        child: ElevatedButton.icon(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: isOscuro
+                                ? Colors.white10
+                                : Colors.blue.shade50,
+                            foregroundColor: isOscuro
+                                ? Colors.cyanAccent
+                                : const Color(0xFF0D47A1),
+                            elevation: 0,
+                            side: BorderSide(
+                              color: isOscuro
+                                  ? Colors.white24
+                                  : Colors.blue.shade200,
+                            ),
+                          ),
+                          onPressed: () => _mostrarModalCrearCategoria(),
+                          icon: const Icon(Icons.create_new_folder),
+                          label: const Text(
+                            "Crear Nueva Categoría",
+                            style: TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                      ),
+
+                    // BLOQUES DE CATEGORÍAS
+                    ...categorias.asMap().entries.map((entry) {
+                      int idx = entry.key;
+                      var cat = entry.value;
+                      String nombre = cat['nombre'];
+
+                      // 🔥 AL BUSCAR: Se expanden automáticamente las que tienen productos
+                      bool isExpanded = buscandoActivo
+                          ? true
+                          : (categoriasExpandidas[nombre] ?? true);
+                      bool isActivo = cat['activo'] == 1;
+                      int globalIndex = offsetTopItems + idx;
+                      bool removalMode = _categoriasEnModoEliminacion.contains(
+                        nombre,
+                      );
+                      List<Map<String, dynamic>> prodsEnCat =
+                          grupos[nombre] ?? [];
+
+                      if (!widget.esAdmin && !isActivo)
+                        return SizedBox.shrink(
+                          key: ValueKey('cat_hide_${cat['id']}'),
+                        );
+
+                      // 🔥 SI ESTAMOS BUSCANDO Y LA CATEGORÍA NO TIENE COINCIDENCIAS, SE OCULTA COMPLETAMENTE
+                      if (buscandoActivo && prodsEnCat.isEmpty) {
+                        return SizedBox.shrink(
+                          key: ValueKey('cat_empty_search_${cat['id']}'),
+                        );
+                      }
+
+                      return Container(
+                        key: ValueKey('cat_${cat['id']}'),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            GestureDetector(
+                              onTap: () => setState(
+                                () =>
+                                    categoriasExpandidas[nombre] = !isExpanded,
+                              ),
+                              child: Container(
+                                margin: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                  vertical: 8,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: isOscuro
+                                      ? const Color.fromARGB(255, 33, 40, 63)
+                                      : const Color.fromARGB(84, 168, 209, 251),
+                                  borderRadius: BorderRadius.circular(16),
+                                  boxShadow: [
+                                    if (!isOscuro)
+                                      BoxShadow(
+                                        color: Colors.black.withOpacity(0.08),
+                                        blurRadius: 8,
+                                        offset: const Offset(0, 3),
+                                      ),
+                                  ],
+                                  border: Border.all(
+                                    color: isOscuro
+                                        ? const Color.fromARGB(
+                                            213,
+                                            49,
+                                            162,
+                                            227,
+                                          )
+                                        : const Color.fromARGB(
+                                            255,
+                                            103,
+                                            153,
+                                            234,
+                                          ),
+                                  ),
+                                ),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 12,
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Icon(
+                                        isExpanded
+                                            ? Icons.folder_open_rounded
+                                            : Icons.folder_rounded,
+                                        color: isActivo
+                                            ? (isOscuro
+                                                  ? Colors.cyanAccent
+                                                  : const Color(0xFF0D47A1))
+                                            : Colors.grey,
+                                        size: 26,
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: Text(
+                                          nombre,
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.w900,
+                                            fontSize: 15,
+                                            color: isActivo
+                                                ? (isOscuro
+                                                      ? Colors.white
+                                                      : Colors.black87)
+                                                : Colors.grey,
+                                          ),
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 4),
+                                      Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          if (widget.esAdmin &&
+                                              !buscandoActivo) ...[
+                                            SizedBox(
+                                              height: 24,
+                                              width: 38,
+                                              child: Transform.scale(
+                                                scale: 0.7,
+                                                child: Switch(
+                                                  value: isActivo,
+                                                  activeColor: Colors.green,
+                                                  materialTapTargetSize:
+                                                      MaterialTapTargetSize
+                                                          .shrinkWrap,
+                                                  onChanged: (v) =>
+                                                      _cambiarEstadoCategoria(
+                                                        cat['id'],
+                                                        v,
+                                                      ),
+                                                ),
+                                              ),
+                                            ),
+                                            const SizedBox(width: 6),
+                                            SizedBox(
+                                              width: 24,
+                                              child: PopupMenuButton<String>(
+                                                icon: const Icon(
+                                                  Icons.more_vert,
+                                                  color: Colors.grey,
+                                                  size: 22,
+                                                ),
+                                                padding: EdgeInsets.zero,
+                                                constraints:
+                                                    const BoxConstraints(),
+                                                onSelected: (val) {
+                                                  if (val == 'edit')
+                                                    _mostrarModalCrearCategoria(
+                                                      categoriaAEditar: cat,
+                                                    );
+                                                  else if (val == 'delete')
+                                                    _confirmarEliminarCategoria(
+                                                      cat['id'],
+                                                      nombre,
+                                                    );
+                                                  else if (val == 'share')
+                                                    _mostrarDialogoCompartirCategoria(
+                                                      nombre,
+                                                      grupos[nombre] ?? [],
+                                                    );
+                                                },
+                                                itemBuilder: (ctx) => [
+                                                  const PopupMenuItem(
+                                                    value: 'edit',
+                                                    child: Row(
+                                                      children: [
+                                                        Icon(
+                                                          Icons.edit,
+                                                          size: 16,
+                                                          color: Colors
+                                                              .orangeAccent,
+                                                        ),
+                                                        SizedBox(width: 8),
+                                                        Text(
+                                                          "Editar",
+                                                          style: TextStyle(
+                                                            fontSize: 13,
+                                                          ),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                  const PopupMenuItem(
+                                                    value: 'delete',
+                                                    child: Row(
+                                                      children: [
+                                                        Icon(
+                                                          Icons.delete_outline,
+                                                          size: 16,
+                                                          color:
+                                                              Colors.redAccent,
+                                                        ),
+                                                        SizedBox(width: 8),
+                                                        Text(
+                                                          "Eliminar",
+                                                          style: TextStyle(
+                                                            fontSize: 13,
+                                                          ),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                  const PopupMenuItem(
+                                                    value: 'share',
+                                                    child: Row(
+                                                      children: [
+                                                        Icon(
+                                                          Icons.share,
+                                                          size: 16,
+                                                          color:
+                                                              Colors.blueAccent,
+                                                        ),
+                                                        SizedBox(width: 8),
+                                                        Text(
+                                                          "Compartir",
+                                                          style: TextStyle(
+                                                            fontSize: 13,
+                                                          ),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          ],
+                                          const SizedBox(width: 4),
+                                          if (widget.esAdmin &&
+                                              !buscandoActivo) ...[
+                                            const SizedBox(width: 2),
+                                            StatefulBuilder(
+                                              builder: (context, setInnerState) {
+                                                Timer? preDragTimer;
+                                                return Listener(
+                                                  onPointerDown: (_) {
+                                                    preDragTimer = Timer(
+                                                      const Duration(
+                                                        milliseconds: 250,
+                                                      ),
+                                                      () {
+                                                        if (mounted) {
+                                                          setState(() {
+                                                            _categoriasExpandidasBackup =
+                                                                Map<
+                                                                  String,
+                                                                  bool
+                                                                >.from(
+                                                                  categoriasExpandidas,
+                                                                );
+                                                            categoriasExpandidas[nombre] =
+                                                                false;
+                                                          });
+                                                        }
+                                                      },
+                                                    );
+                                                  },
+                                                  onPointerUp: (_) {
+                                                    if (preDragTimer != null &&
+                                                        preDragTimer!
+                                                            .isActive) {
+                                                      preDragTimer!.cancel();
+                                                      setState(
+                                                        () =>
+                                                            categoriasExpandidas[nombre] =
+                                                                !isExpanded,
+                                                      );
+                                                    }
+                                                  },
+                                                  onPointerCancel: (_) {
+                                                    if (preDragTimer != null &&
+                                                        preDragTimer!.isActive)
+                                                      preDragTimer!.cancel();
+                                                  },
+                                                  child: Tooltip(
+                                                    message:
+                                                        "Mantén presionado para arrastrar",
+                                                    triggerMode:
+                                                        TooltipTriggerMode.tap,
+                                                    preferBelow: true,
+                                                    decoration: BoxDecoration(
+                                                      color: isOscuro
+                                                          ? Colors.cyanAccent
+                                                          : const Color(
+                                                              0xFF0D47A1,
+                                                            ),
+                                                      borderRadius:
+                                                          BorderRadius.circular(
+                                                            8,
+                                                          ),
+                                                      boxShadow: const [
+                                                        BoxShadow(
+                                                          color: Colors.black26,
+                                                          blurRadius: 4,
+                                                          offset: Offset(0, 2),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                    textStyle: TextStyle(
+                                                      color: isOscuro
+                                                          ? Colors.black
+                                                          : Colors.white,
+                                                      fontWeight:
+                                                          FontWeight.w900,
+                                                      fontSize: 12,
+                                                    ),
+                                                    showDuration:
+                                                        const Duration(
+                                                          seconds: 2,
+                                                        ),
+                                                    child: ReorderableDelayedDragStartListener(
+                                                      index: globalIndex,
+                                                      child: const Padding(
+                                                        padding:
+                                                            EdgeInsets.only(
+                                                              left: 4.0,
+                                                              right: 2.0,
+                                                              top: 6.0,
+                                                              bottom: 6.0,
+                                                            ),
+                                                        child: Icon(
+                                                          Icons
+                                                              .swap_vert_rounded,
+                                                          color: Colors.grey,
+                                                          size: 24,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                  ),
+                                                );
+                                              },
+                                            ),
+                                          ],
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                            if (isExpanded) ...[
+                              if (prodsEnCat.isEmpty)
+                                const Padding(
+                                  padding: EdgeInsets.all(20),
+                                  child: Center(
+                                    child: Text(
+                                      "Sin productos",
+                                      style: TextStyle(
+                                        color: Colors.grey,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                  ),
+                                )
+                              else
+                                widget.esAdmin && !buscandoActivo
+                                    ? ReorderableGridView.builder(
+                                        key: PageStorageKey('grid_$nombre'),
+                                        physics:
+                                            const NeverScrollableScrollPhysics(),
+                                        shrinkWrap: true,
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 8,
+                                        ),
+                                        gridDelegate:
+                                            SliverGridDelegateWithFixedCrossAxisCount(
+                                              crossAxisCount: columnas,
+                                              childAspectRatio: columnas == 1
+                                                  ? 1.0
+                                                  : 0.72,
+                                              crossAxisSpacing: 8,
+                                              mainAxisSpacing: 8,
+                                            ),
+                                        itemCount: prodsEnCat.length,
+                                        onReorder: (oldIdx, newIdx) =>
+                                            _onReorderCategoria(
+                                              grupos[nombre]!,
+                                              oldIdx,
+                                              newIdx,
+                                            ),
+                                        itemBuilder: (ctx, i) =>
+                                            construirTarjeta(
+                                              ctx,
+                                              prodsEnCat[i],
+                                            ),
+                                      )
+                                    : GridView.builder(
+                                        physics:
+                                            const NeverScrollableScrollPhysics(),
+                                        shrinkWrap: true,
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 8,
+                                        ),
+                                        gridDelegate:
+                                            SliverGridDelegateWithFixedCrossAxisCount(
+                                              crossAxisCount: columnas,
+                                              childAspectRatio: columnas == 1
+                                                  ? 1.0
+                                                  : 0.72,
+                                              crossAxisSpacing: 8,
+                                              mainAxisSpacing: 8,
+                                            ),
+                                        itemCount: prodsEnCat.length,
+                                        itemBuilder: (ctx, i) =>
+                                            construirTarjeta(
+                                              ctx,
+                                              prodsEnCat[i],
+                                            ),
+                                      ),
+                              if (widget.esAdmin && !buscandoActivo)
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 14,
+                                    vertical: 6,
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Expanded(
+                                        child: OutlinedButton.icon(
+                                          style: OutlinedButton.styleFrom(
+                                            foregroundColor: isOscuro
+                                                ? Colors.cyanAccent
+                                                : const Color(0xFF0D47A1),
+                                            side: BorderSide(
+                                              color: isOscuro
+                                                  ? Colors.white10
+                                                  : Colors.grey.shade300,
+                                            ),
+                                            shape: RoundedRectangleBorder(
+                                              borderRadius:
+                                                  BorderRadius.circular(10),
+                                            ),
+                                            padding: const EdgeInsets.symmetric(
+                                              vertical: 10,
+                                            ),
+                                          ),
+                                          onPressed: () =>
+                                              _mostrarDialogoAnadirProductosExistentes(
+                                                nombre,
+                                              ),
+                                          icon: const Icon(
+                                            Icons.add_circle_outline_rounded,
+                                            size: 18,
+                                          ),
+                                          label: const Text(
+                                            "AÑADIR PRODUCTO",
+                                            style: TextStyle(
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 10),
+                                      Expanded(
+                                        child: OutlinedButton.icon(
+                                          style: OutlinedButton.styleFrom(
+                                            foregroundColor: removalMode
+                                                ? Colors.redAccent
+                                                : Colors.grey,
+                                            side: BorderSide(
+                                              color: removalMode
+                                                  ? Colors.redAccent
+                                                        .withOpacity(0.5)
+                                                  : Colors.grey.shade300,
+                                            ),
+                                            shape: RoundedRectangleBorder(
+                                              borderRadius:
+                                                  BorderRadius.circular(10),
+                                            ),
+                                            padding: const EdgeInsets.symmetric(
+                                              vertical: 10,
+                                            ),
+                                          ),
+                                          onPressed: () {
+                                            setState(() {
+                                              if (removalMode)
+                                                _categoriasEnModoEliminacion
+                                                    .remove(nombre);
+                                              else
+                                                _categoriasEnModoEliminacion
+                                                    .add(nombre);
+                                            });
+                                          },
+                                          icon: Icon(
+                                            removalMode
+                                                ? Icons.cancel_outlined
+                                                : Icons
+                                                      .remove_circle_outline_rounded,
+                                            size: 18,
+                                          ),
+                                          label: Text(
+                                            removalMode
+                                                ? "CANCELAR"
+                                                : "SACAR PRODUCTO",
+                                            style: const TextStyle(
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                            ],
+                            const SizedBox(height: 15),
+                            Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                              ),
+                              child: Divider(
+                                height: 1,
+                                thickness: 1.5,
+                                color: isOscuro
+                                    ? Colors.white24
+                                    : Colors.grey.shade400,
+                              ),
+                            ),
+                            const SizedBox(height: 15),
+                          ],
+                        ),
+                      );
+                    }).toList(),
+
+                    // OTROS PRODUCTOS (Solo se muestra si tiene productos)
+                    if (grupos['_sin_categoria']!.isNotEmpty)
+                      Container(
+                        key: const ValueKey('grid_sin_cat'),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 12,
+                              ),
+                              child: Text(
+                                "OTROS PRODUCTOS",
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: 0.5,
+                                  color: isOscuro
+                                      ? Colors.white70
+                                      : const Color(0xFF0D47A1),
+                                ),
+                              ),
+                            ),
+                            widget.esAdmin && !buscandoActivo
+                                ? ReorderableGridView.builder(
+                                    key: const PageStorageKey('rsincat'),
+                                    physics:
+                                        const NeverScrollableScrollPhysics(),
+                                    shrinkWrap: true,
+                                    padding: const EdgeInsets.all(10),
+                                    gridDelegate:
+                                        SliverGridDelegateWithFixedCrossAxisCount(
+                                          crossAxisCount: columnas,
+                                          childAspectRatio: columnas == 1
+                                              ? 1.0
+                                              : 0.72,
+                                          crossAxisSpacing: 8,
+                                          mainAxisSpacing: 8,
+                                        ),
+                                    itemCount: grupos['_sin_categoria']!.length,
+                                    onReorder: (oldIdx, newIdx) =>
+                                        _onReorderCategoria(
+                                          grupos['_sin_categoria']!,
+                                          oldIdx,
+                                          newIdx,
+                                        ),
+                                    itemBuilder: (ctx, i) => construirTarjeta(
+                                      ctx,
+                                      grupos['_sin_categoria']![i],
+                                    ),
+                                  )
+                                : GridView.builder(
+                                    physics:
+                                        const NeverScrollableScrollPhysics(),
+                                    shrinkWrap: true,
+                                    padding: const EdgeInsets.all(10),
+                                    gridDelegate:
+                                        SliverGridDelegateWithFixedCrossAxisCount(
+                                          crossAxisCount: columnas,
+                                          childAspectRatio: columnas == 1
+                                              ? 1.0
+                                              : 0.72,
+                                          crossAxisSpacing: 8,
+                                          mainAxisSpacing: 8,
+                                        ),
+                                    itemCount: grupos['_sin_categoria']!.length,
+                                    itemBuilder: (ctx, i) => construirTarjeta(
+                                      ctx,
+                                      grupos['_sin_categoria']![i],
+                                    ),
+                                  ),
+                            const SizedBox(height: 15),
+                            Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                              ),
+                              child: Divider(
+                                height: 1,
+                                thickness: 1,
+                                color: isOscuro
+                                    ? Colors.white.withOpacity(0.08)
+                                    : Colors.grey.shade200,
+                              ),
+                            ),
+                            const SizedBox(height: 15),
+                          ],
+                        ),
+                      ),
+                    if (!_esPremium && widget.esAdmin)
+                      const AnuncioNativoWidget(
+                        key: ValueKey('admob_native_ad_key'),
+                      ),
+
+                    const SizedBox(key: ValueKey('spacer_end'), height: 100),
+                  ],
+                ),
               ),
-            ),
-          );
+            );
           }(),
         ),
       ],

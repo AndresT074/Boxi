@@ -138,7 +138,7 @@ class _PantallaInventarioState extends State<PantallaInventario> {
     
     // Consulta SQL uniendo categorías, dándole prioridad absoluta (salen de primeras) a los productos sin categoría
     final data = await db.rawQuery('''
-      SELECT p.id, p.nombre, p.precio_compra, p.precio_venta, p.descuento, p.stock, p.descripcion, p.orden, p.activo, p.ultima_modificacion, p.variantes, p.categoria
+      SELECT p.id, p.nombre, p.precio_compra, p.precio_venta, p.descuento, p.stock, p.stock_minimo, p.proveedor_id, p.descripcion, p.orden, p.activo, p.ultima_modificacion, p.variantes, p.categoria
       FROM productos p
       LEFT JOIN categorias c ON p.categoria = c.nombre
       ORDER BY 
@@ -346,10 +346,14 @@ class _PantallaInventarioState extends State<PantallaInventario> {
             }
           } catch (_) {}
         }
-
-        bool sinStockGlobal = (int.tryParse(p['stock']?.toString() ?? '0') ?? 0) <= 0;
-        bool mostrarAlerta = tieneVariantes ? tieneNegativoOCero : sinStockGlobal;
-
+        int stockNum = int.tryParse(p['stock']?.toString() ?? '0') ?? 0;
+        int stockMinNum = (p['stock_minimo'] as num?)?.toInt() ?? 0;
+        bool sinStockGlobal = stockNum <= 0;
+        bool necesitaReponer =
+            !sinStockGlobal && (stockMinNum > 0 && stockNum <= stockMinNum);
+        bool mostrarAlerta = tieneVariantes
+            ? tieneNegativoOCero
+            : (sinStockGlobal || necesitaReponer);
         double descuentoPct = (p['descuento'] ?? 0).toDouble();
         double precioCompra = (p['precio_compra'] ?? 0).toDouble();
         double precioBase = (p['precio_venta'] ?? 0).toDouble();
@@ -514,12 +518,27 @@ class _PantallaInventarioState extends State<PantallaInventario> {
                             
                             if (!esCompacto) const SizedBox(height: 2),
                             
-                            Text('Stock: ${p['stock']}',
-                                style: TextStyle(
-                                    fontSize: (esCompacto ? 9 : 11) * factorTexto,
-                                    height: esCompacto ? 1.1 : null, // 🔥 Elimina el margen invisible
-                                    color: mostrarAlerta ? const Color.fromARGB(255, 247, 85, 85) : (isOscuro ? Colors.white70 : Colors.black54))),
-                            
+                            Text(
+                              sinStockGlobal
+                                  ? 'Agotado (0 u.)'
+                                  : (necesitaReponer
+                                        ? '⚠️ Reponer (${p['stock']} u.)'
+                                        : 'Stock: ${p['stock']}'),
+                              style: TextStyle(
+                                fontSize: (esCompacto ? 9 : 11) * factorTexto,
+                                height: esCompacto ? 1.1 : null,
+                                fontWeight: (sinStockGlobal || necesitaReponer)
+                                    ? FontWeight.bold
+                                    : FontWeight.normal,
+                                color: sinStockGlobal
+                                    ? const Color.fromARGB(255, 247, 85, 85)
+                                    : (necesitaReponer
+                                          ? Colors.orange
+                                          : (isOscuro
+                                                ? Colors.white70
+                                                : Colors.black54)),
+                              ),
+                            ),
                             Text('Costo: \$${precioCompra.toStringAsFixed(0)}', 
                                 style: TextStyle(
                                     fontSize: (esCompacto ? 9 : 11) * factorTexto,
@@ -807,12 +826,19 @@ class PantallaFormularioProducto extends StatefulWidget {
   State<PantallaFormularioProducto> createState() => _PantallaFormularioProductoState();
 }
 
-class _PantallaFormularioProductoState extends State<PantallaFormularioProducto> {
-  final _nC = TextEditingController(), _pCC = TextEditingController(), _pVC = TextEditingController(), _sC = TextEditingController();
-  final _descC = TextEditingController(); 
-  final _descPctC = TextEditingController(); 
+class _PantallaFormularioProductoState
+    extends State<PantallaFormularioProducto> {
+  final _nC = TextEditingController(),
+      _pCC = TextEditingController(),
+      _pVC = TextEditingController(),
+      _sC = TextEditingController();
+  final _descC = TextEditingController();
+  final _descPctC = TextEditingController();
+  final _stockMinCtrl = TextEditingController(); 
+  int? _proveedorIdSeleccionado; 
+  List<Map<String, dynamic>> _listaProveedores = []; 
 
-  String _imgData = ""; 
+  String _imgData = "";
   bool _esReinversion = false;
   bool _estaGuardando = false; 
   bool _estaActivo = true; 
@@ -836,7 +862,9 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
       _descC.text = widget.producto!['descripcion'] ?? '';
       double pct = widget.producto!['descuento']?.toDouble() ?? 0.0;
       _descPctC.text = pct > 0 ? pct.toString() : '';
-
+      int sMin = (widget.producto!['stock_minimo'] as num?)?.toInt() ?? 0;
+      _stockMinCtrl.text = sMin > 0 ? sMin.toString() : '';
+      _proveedorIdSeleccionado = widget.producto!['proveedor_id'] as int?;
       if (widget.producto!['variantes'] != null && widget.producto!['variantes'].toString().length > 5) {
         try {
           // 1. Decodificamos el JSON
@@ -863,6 +891,7 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
         }
       }
       _cargarFotosVariantes(); 
+      _cargarProveedores(); // 👈 NUEVO
     } else {
       _sC.text = "0"; _pCC.text = ""; _pVC.text = ""; _descPctC.text = "";
     }
@@ -872,6 +901,140 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
   void dispose() {
     for (var c in _stockCtrls.values) c.dispose();
     super.dispose(); 
+  }
+
+  Future<void> _cargarProveedores() async {
+    final db = await DBHelper.instance.database;
+    final provs = await db.query('proveedores', orderBy: 'nombre ASC');
+    if (mounted) {
+      setState(() {
+        _listaProveedores = provs;
+      });
+    }
+  }
+
+  void _mostrarSelectorProveedorConBuscador() {
+    String busqProv = "";
+    final isOscuro = Theme.of(context).brightness == Brightness.dark;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setStDialog) {
+          final provsFiltrados = _listaProveedores.where((prov) {
+            return prov['nombre'].toString().toLowerCase().contains(
+              busqProv.toLowerCase(),
+            );
+          }).toList();
+
+          return AlertDialog(
+            backgroundColor: Theme.of(context).cardColor,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            title: const Text(
+              "Seleccionar Proveedor",
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+            ),
+            content: SizedBox(
+              width: double.maxFinite,
+              height: MediaQuery.of(context).size.height * 0.45,
+              child: Column(
+                children: [
+                  TextField(
+                    onChanged: (v) => setStDialog(() => busqProv = v),
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: isOscuro ? Colors.white : Colors.black,
+                    ),
+                    decoration: InputDecoration(
+                      hintText: "Buscar proveedor...",
+                      prefixIcon: const Icon(Icons.search, size: 20),
+                      isDense: true,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  ListTile(
+                    leading: const Icon(Icons.block, color: Colors.grey),
+                    title: const Text(
+                      "Sin Proveedor Asignado",
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    onTap: () {
+                      setState(() => _proveedorIdSeleccionado = null);
+                      Navigator.pop(ctx);
+                    },
+                  ),
+                  const Divider(height: 1),
+                  Expanded(
+                    child: provsFiltrados.isEmpty
+                        ? const Center(
+                            child: Text(
+                              "No se encontraron proveedores.",
+                              style: TextStyle(
+                                color: Colors.grey,
+                                fontSize: 12,
+                              ),
+                            ),
+                          )
+                        : ListView.separated(
+                            itemCount: provsFiltrados.length,
+                            separatorBuilder: (_, __) =>
+                                const Divider(height: 1),
+                            itemBuilder: (context, i) {
+                              final prov = provsFiltrados[i];
+                              bool esSeleccionado =
+                                  _proveedorIdSeleccionado == prov['id'];
+                              return ListTile(
+                                leading: Icon(
+                                  Icons.local_shipping_rounded,
+                                  color: esSeleccionado
+                                      ? Colors.green
+                                      : (isOscuro
+                                            ? Colors.cyanAccent
+                                            : const Color(0xFF0D47A1)),
+                                ),
+                                title: Text(
+                                  prov['nombre'].toString(),
+                                  style: TextStyle(
+                                    fontWeight: esSeleccionado
+                                        ? FontWeight.bold
+                                        : FontWeight.normal,
+                                  ),
+                                ),
+                                trailing: esSeleccionado
+                                    ? const Icon(
+                                        Icons.check,
+                                        color: Colors.green,
+                                      )
+                                    : null,
+                                onTap: () {
+                                  setState(
+                                    () => _proveedorIdSeleccionado =
+                                        prov['id'] as int,
+                                  );
+                                  Navigator.pop(ctx);
+                                },
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text("CANCELAR"),
+              ),
+            ],
+          );
+        },
+      ),
+    );
   }
 
   Future<void> _procesarFotoPrincipal() async {
@@ -1006,10 +1169,19 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
         Map<String, dynamic> ajusteData = {
           'monto': dineroGastado,
           'fecha': DateTime.now().toIso8601String(),
-          'descripcion': 'Compra de $unidadesCompradas x ${_nC.text.trim()} (Reinversión)',
+          'descripcion':
+              'Compra de $unidadesCompradas x ${_nC.text.trim()} (Reinversión)',
+          'proveedor_id':
+              _proveedorIdSeleccionado, // 👈 Se vincula al proveedor
+          'producto_id': widget.producto?['id'],
+          'cantidad': unidadesCompradas,
         };
         int idAjuste = await db.insert('ajustes_capital', ajusteData);
-        if (esPremium) ServicioNube.guardarAjusteCapitalNube({...ajusteData, 'id': idAjuste});
+        if (esPremium)
+          ServicioNube.guardarAjusteCapitalNube({
+            ...ajusteData,
+            'id': idAjuste,
+          });
       }
 
       String pathFinal = _imgData;
@@ -1043,16 +1215,19 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
       }
 
       int ordenActual = widget.producto != null ? (widget.producto!['orden'] ?? 0) : 0;
+      int sMinVal = int.tryParse(_stockMinCtrl.text.trim()) ?? 0;
 
       final map = {
         'nombre': _nC.text.trim(),
         'activo': _estaActivo ? 1 : 0,
         'descripcion': _descC.text.trim(),
-        'variantes': variantesJson, 
+        'variantes': variantesJson,
         'precio_compra': pCompra,
         'precio_venta': pVenta,
         'stock': nuevoStock,
-        'foto_path': pathFinal, 
+        'stock_minimo': sMinVal, // 👈 NUEVO
+        'proveedor_id': _proveedorIdSeleccionado, // 👈 NUEVO
+        'foto_path': pathFinal,
         'orden': ordenActual,
         'descuento': descPct,
       };
@@ -1433,20 +1608,125 @@ class _PantallaFormularioProductoState extends State<PantallaFormularioProducto>
                 ],
               ),
             ),
-            
             const SizedBox(height: 15),
-            Card(
-              elevation: 0,
-              color: isOscuro ? Colors.white.withOpacity(0.05) : Colors.grey.shade100,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-              child: CheckboxListTile(
-                title: Text("¿Es compra de reinversión?", style: TextStyle(fontWeight: FontWeight.bold, color: isOscuro ? Colors.white : Colors.black87, fontSize: 14)),
-                subtitle: Text("Descuenta el dinero del capital", style: TextStyle(color: isOscuro ? Colors.white54 : Colors.black54, fontSize: 12)),
-                value: _esReinversion, 
-                activeColor: Colors.blueAccent,
-                onChanged: (v) => setState(() => _esReinversion = v!)
-              ),
-            ),
+
+                  // 💰 1. CASILLA DE REINVERSIÓN (DESCUENTA DE FINANZAS Y ASOCIA AL PROVEEDOR)
+                  Card(
+                    elevation: 0,
+                    color: isOscuro
+                        ? Colors.white.withOpacity(0.05)
+                        : Colors.grey.shade100,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(15),
+                    ),
+                    child: CheckboxListTile(
+                      title: Text(
+                        "¿Es compra de reinversión?",
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: isOscuro ? Colors.white : Colors.black87,
+                          fontSize: 14,
+                        ),
+                      ),
+                      subtitle: Text(
+                        "Descuenta el dinero del capital financiero y lo asocia al proveedor",
+                        style: TextStyle(
+                          color: isOscuro ? Colors.white54 : Colors.black54,
+                          fontSize: 12,
+                        ),
+                      ),
+                      value: _esReinversion,
+                      activeColor: Colors.blueAccent,
+                      onChanged: (v) =>
+                          setState(() => _esReinversion = v ?? false),
+                    ),
+                  ),
+
+                  const SizedBox(height: 15),
+
+                  // 🏢 2. SELECTOR DE PROVEEDOR CON BUSCADOR
+                  Builder(
+                    builder: (context) {
+                      String nombreProvActual = "Sin Proveedor Asignado";
+                      if (_proveedorIdSeleccionado != null) {
+                        var provMatch = _listaProveedores.where(
+                          (p) => p['id'] == _proveedorIdSeleccionado,
+                        );
+                        if (provMatch.isNotEmpty) {
+                          nombreProvActual = "🏭 ${provMatch.first['nombre']}";
+                        }
+                      }
+
+                      return InkWell(
+                        onTap: _mostrarSelectorProveedorConBuscador,
+                        borderRadius: BorderRadius.circular(15),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 14,
+                          ),
+                          decoration: BoxDecoration(
+                            color: isOscuro
+                                ? Colors.white.withOpacity(0.05)
+                                : Colors.grey.shade50,
+                            borderRadius: BorderRadius.circular(15),
+                            border: Border.all(
+                              color: isOscuro
+                                  ? Colors.white10
+                                  : Colors.grey.shade300,
+                            ),
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(
+                                Icons.local_shipping_outlined,
+                                color: isOscuro
+                                    ? Colors.cyanAccent
+                                    : Colors.blueAccent,
+                                size: 20,
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  nombreProvActual,
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: _proveedorIdSeleccionado != null
+                                        ? FontWeight.bold
+                                        : FontWeight.normal,
+                                    color: _proveedorIdSeleccionado != null
+                                        ? (isOscuro
+                                              ? Colors.white
+                                              : Colors.black87)
+                                        : Colors.grey,
+                                  ),
+                                ),
+                              ),
+                              const Icon(
+                                Icons.arrow_drop_down,
+                                color: Colors.grey,
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+
+                  const SizedBox(height: 15),
+
+                  // ⚠️ 3. STOCK MÍNIMO DE REPOSICIÓN
+                  TextField(
+                    controller: _stockMinCtrl,
+                    keyboardType: TextInputType.number,
+                    style: TextStyle(
+                      color: isOscuro ? Colors.white : Colors.black87,
+                    ),
+                    decoration: _decoModerno(
+                      'Stock Mínimo para Alerta de Reposición (Opcional)',
+                      Icons.warning_amber_rounded,
+                    ),
+                  ),
             const SizedBox(height: 25),
 
             // VARIANTES

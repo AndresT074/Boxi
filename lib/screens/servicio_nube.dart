@@ -475,11 +475,12 @@ class ServicioNube {
       bool huboBorradosFirestore = false;
 
       const tablasPrivadas = [
-        'vendedores', 
-        'clientes', 
-        'pedidos', 
-        'detalle_pedidos', 
-        'reportes_guardados', 
+        'vendedores',
+        'proveedores',
+        'clientes',
+        'pedidos',
+        'detalle_pedidos',
+        'reportes_guardados',
         'ajustes_capital',
       ];
 
@@ -2022,9 +2023,11 @@ class ServicioNube {
   static Future<void> eliminarCategoriaNube(int id) async =>
       _eliminar(tabla: 'categorias', docId: id.toString());
 
-  // ─────────────────────────────────────────────────────────────
-  // RESPALDO EN RTDB (SISTEMA DE EMERGENCIA ANTI-CUOTAS FIRESTORE)
-  // ─────────────────────────────────────────────────────────────
+  static Future<void> guardarProveedorNube(Map<String, dynamic> p) async =>
+      _escribir(tabla: 'proveedores', docId: p['id'].toString(), datos: p);
+
+  static Future<void> eliminarProveedorNube(int id) async =>
+      _eliminar(tabla: 'proveedores', docId: id.toString());
   // ─────────────────────────────────────────────────────────────
   // RESPALDO EN RTDB (NATIVO EN MAPS SIN BLOQUEAR EL HILO DE DART)
   // ─────────────────────────────────────────────────────────────
@@ -2038,11 +2041,12 @@ class ServicioNube {
       };
       
       const tablasPrivadas = [
-        'vendedores', 
-        'clientes', 
-        'pedidos', 
-        'detalle_pedidos', 
-        'reportes_guardados', 
+        'vendedores',
+        'proveedores',
+        'clientes',
+        'pedidos',
+        'detalle_pedidos',
+        'reportes_guardados',
         'ajustes_capital',
       ];
       
