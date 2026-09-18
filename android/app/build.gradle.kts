@@ -68,13 +68,8 @@ flutter {
     source = "../.."
 }
 
-// ⬇️ REGLA PARA ML KIT LIVIANO Y BIBLIOTECA DE FACTURACIÓN GOOGLE PLAY V8 ⬇️
 configurations.all {
     resolutionStrategy {
-        substitute(module("com.google.mlkit:barcode-scanning"))
-            .using(module("com.google.android.gms:play-services-mlkit-barcode-scanning:18.3.1"))
-            
-        // 💳 Forzar la biblioteca de facturación v8 exigida por Google Play
         force("com.android.billingclient:billing:8.0.0")
         force("com.android.billingclient:billing-ktx:8.0.0")
     }
@@ -82,4 +77,6 @@ configurations.all {
 
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+    implementation("com.android.billingclient:billing:8.0.0")
+    implementation("com.android.billingclient:billing-ktx:8.0.0")
 }
