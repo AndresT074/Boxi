@@ -14,6 +14,7 @@ import 'package:sqflite/sqflite.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'servicio_fidelidad.dart';
+import 'servicio_respaldo.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 final Map<String, Uint8List> _imageCache = {};
@@ -218,7 +219,8 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
       FROM pedidos
       LEFT JOIN clientes ON pedidos.cliente_id = clientes.id
       LEFT JOIN vendedores ON pedidos.vendedor_id = vendedores.id
-      ORDER BY pedidos.id DESC
+      -- 📅 Ordena por la fecha real del pedido (los más recientes primero)
+      ORDER BY COALESCE(NULLIF(pedidos.fecha_pago, ''), pedidos.fecha_hora) DESC
     ''');
 
     Map<int, bool> bloqueos = {};
@@ -3173,6 +3175,64 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                   _queryBusqueda = "";
                 }
               });
+            },
+          ),
+          IconButton(
+            icon: const Icon(
+              Icons.auto_fix_high_rounded,
+              color: Colors.amberAccent,
+            ),
+            tooltip: 'Reparar pedidos duplicados',
+            onPressed: () async {
+              bool confirm =
+                  await showDialog(
+                    context: context,
+                    builder: (ctx) => AlertDialog(
+                      title: const Text("¿Limpiar pedidos clonados?"),
+                      content: const Text(
+                        "Se eliminarán los productos y pedidos duplicados en tu teléfono y se actualizará Realtime Database para limpiar la nube.",
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(ctx, false),
+                          child: const Text("CANCELAR"),
+                        ),
+                        ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.amber.shade800,
+                          ),
+                          onPressed: () => Navigator.pop(ctx, true),
+                          child: const Text(
+                            "REPARAR AHORA",
+                            style: TextStyle(color: Colors.white),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ) ??
+                  false;
+
+              if (confirm && context.mounted) {
+                // Muestra un indicador mientras limpia y sube a Realtime DB
+                showDialog(
+                  context: context,
+                  barrierDismissible: false,
+                  builder: (_) => const Center(
+                    child: CircularProgressIndicator(color: Colors.amberAccent),
+                  ),
+                );
+
+                await ServicioRespaldo.repararYDesduplicarPedidos(context);
+
+                if (context.mounted) {
+                  Navigator.pop(context); // Cierra el indicador de carga
+                  setState(() {
+                    _detallesCache
+                        .clear(); // 👈 Limpia la memoria de la pantalla
+                  });
+                  await _cargar(); // 👈 Vuelve a leer la base limpia
+                }
+              }
             },
           ),
           IconButton(

@@ -2212,7 +2212,9 @@ class ServicioNube {
       ];
       
       for (String t in tablasPrivadas) {
-        final data = await dbLocal.query(t);
+        // 📅 Ordena los pedidos por fecha de creación original (fecha_hora)
+        String? orden = (t == 'pedidos') ? 'fecha_hora ASC' : 'id ASC';
+        final data = await dbLocal.query(t, orderBy: orden);
         List<Map<String, dynamic>> listaLimpia = [];
         for(var row in data) {
            Map<String, dynamic> map = Map.from(row);

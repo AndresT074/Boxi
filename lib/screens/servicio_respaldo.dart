@@ -329,60 +329,77 @@ class ServicioRespaldo {
       }
 
       // ==========================================
-      // 6. PEDIDOS
+      // 6. PEDIDOS (Conserva IDs originales si no colisionan para evitar clonación)
       // ==========================================
       if (await _tablaExiste(dbRespaldo, 'pedidos')) {
         List<Map<String, dynamic>> pedRes = await dbRespaldo.query('pedidos');
         for (var ped in pedRes) {
-          int? newClienteId = cMap[ped['cliente_id']];
-          if (newClienteId == null) continue;
+          int? newClienteId = cMap[ped['cliente_id']] ?? ped['cliente_id'];
+          int idOriginal = ped['id'] as int;
 
           var existe = await dbActual.query(
             'pedidos',
-            where: 'cliente_id = ? AND fecha_hora = ?',
-            whereArgs: [newClienteId, ped['fecha_hora']],
+            where: 'id = ? OR (cliente_id = ? AND fecha_hora = ?)',
+            whereArgs: [idOriginal, newClienteId, ped['fecha_hora']],
           );
 
           if (existe.isEmpty) {
-            Map<String, dynamic> pedNueva = Map.from(ped)..remove('id');
+            Map<String, dynamic> pedNueva = Map.from(ped);
             pedNueva['cliente_id'] = newClienteId;
             pedNueva['vendedor_id'] =
                 vMap[ped['vendedor_id']] ?? ped['vendedor_id'] ?? 1;
             pedNueva['ultima_modificacion'] = ahora;
-            int newPedId = await dbActual.insert('pedidos', pedNueva);
-            if (ped['id'] != null) pedMap[ped['id']] = newPedId;
+            int newPedId = await dbActual.insert(
+              'pedidos',
+              pedNueva,
+              conflictAlgorithm: ConflictAlgorithm.replace,
+            );
+            pedMap[idOriginal] = newPedId;
             contadorNuevos++;
           } else {
-            if (ped['id'] != null)
-              pedMap[ped['id']] = existe.first['id'] as int;
+            pedMap[idOriginal] = existe.first['id'] as int;
           }
         }
       }
 
       // ==========================================
-      // 7. DETALLE DE PEDIDOS
+      // 7. DETALLE DE PEDIDOS (Conserva IDs y evita duplicar productos)
       // ==========================================
       if (await _tablaExiste(dbRespaldo, 'detalle_pedidos')) {
         List<Map<String, dynamic>> detRes = await dbRespaldo.query(
           'detalle_pedidos',
         );
         for (var d in detRes) {
-          int? idPedidoActual = pedMap[d['pedido_id']];
-          int? idProductoActual = pMap[d['producto_id']];
+          int idOriginal = d['id'] as int;
+          int? idPedidoActual = pedMap[d['pedido_id']] ?? d['pedido_id'];
+          int? idProductoActual = pMap[d['producto_id']] ?? d['producto_id'];
+          String nombreSnap = (d['nombre_snapshot'] ?? '').toString();
 
-          if (idPedidoActual != null && idProductoActual != null) {
+          if (idPedidoActual != null) {
+            // Evita duplicar si ya existe el ID o el mismo producto en el pedido
             var existe = await dbActual.query(
               'detalle_pedidos',
-              where: 'pedido_id = ? AND producto_id = ? AND cantidad = ?',
-              whereArgs: [idPedidoActual, idProductoActual, d['cantidad']],
+              where:
+                  'id = ? OR (pedido_id = ? AND producto_id = ? AND COALESCE(nombre_snapshot, "") = ?)',
+              whereArgs: [
+                idOriginal,
+                idPedidoActual,
+                idProductoActual,
+                nombreSnap,
+              ],
             );
 
             if (existe.isEmpty) {
-              Map<String, dynamic> dNueva = Map.from(d)..remove('id');
+              Map<String, dynamic> dNueva = Map.from(d);
               dNueva['pedido_id'] = idPedidoActual;
-              dNueva['producto_id'] = idProductoActual;
+              if (idProductoActual != null)
+                dNueva['producto_id'] = idProductoActual;
               dNueva['ultima_modificacion'] = ahora;
-              await dbActual.insert('detalle_pedidos', dNueva);
+              await dbActual.insert(
+                'detalle_pedidos',
+                dNueva,
+                conflictAlgorithm: ConflictAlgorithm.replace,
+              );
             }
           }
         }
@@ -520,5 +537,117 @@ class ServicioRespaldo {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text("❌ $msg"), backgroundColor: Colors.red),
     );
+  }
+  // 🧹 LIMPIEZA PROFUNDA DE CLONES EN CELULAR Y EN REALTIME DATABASE
+  static Future<void> repararYDesduplicarPedidos(BuildContext context) async {
+    try {
+      final db = await DBHelper.instance.database;
+
+      // ==========================================
+      // 1. DESDUPLICAR DETALLES DE PRODUCTOS (Elimina los clones de Sandy Vargas, etc.)
+      // ==========================================
+      final todosDetalles = await db.query(
+        'detalle_pedidos',
+        orderBy: 'id ASC',
+      );
+      Set<String> detallesVistos = {};
+      List<int> detallesABorrar = [];
+
+      for (var d in todosDetalles) {
+        int id = d['id'] as int;
+        int pedId = (d['pedido_id'] as num?)?.toInt() ?? 0;
+        String nom = (d['nombre_snapshot'] ?? d['producto_id'] ?? '')
+            .toString()
+            .trim()
+            .toLowerCase();
+        int cant = (d['cantidad'] as num?)?.toInt() ?? 1;
+        double pUnit = (d['precio_unitario'] as num?)?.toDouble() ?? 0.0;
+
+        // Clave única por producto dentro del mismo pedido
+        String clave = "${pedId}_${nom}_${cant}_$pUnit";
+
+        if (detallesVistos.contains(clave)) {
+          detallesABorrar.add(id); // Es un clon, se marca para borrar
+        } else {
+          detallesVistos.add(clave); // Es el original, se conserva
+        }
+      }
+
+      // ==========================================
+      // 2. DESDUPLICAR PEDIDOS CLONADOS
+      // ==========================================
+      final todosPedidos = await db.query('pedidos', orderBy: 'id ASC');
+      Set<String> pedidosVistos = {};
+      List<int> pedidosABorrar = [];
+
+      for (var p in todosPedidos) {
+        int id = p['id'] as int;
+        String fecha = (p['fecha_hora'] ?? '').toString().trim();
+        double total = (p['total_venta'] as num?)?.toDouble() ?? 0.0;
+        int cliente = (p['cliente_id'] as num?)?.toInt() ?? 0;
+
+        String clave = "${fecha}_${total}_$cliente";
+
+        if (pedidosVistos.contains(clave)) {
+          pedidosABorrar.add(id);
+        } else {
+          pedidosVistos.add(clave);
+        }
+      }
+
+      // ==========================================
+      // 3. EJECUTAR EL BORRADO EN SQLITE LOCAL
+      // ==========================================
+      Batch batch = db.batch();
+      for (int detId in detallesABorrar) {
+        batch.delete('detalle_pedidos', where: 'id = ?', whereArgs: [detId]);
+      }
+      for (int pedId in pedidosABorrar) {
+        batch.delete('pedidos', where: 'id = ?', whereArgs: [pedId]);
+        batch.delete(
+          'detalle_pedidos',
+          where: 'pedido_id = ?',
+          whereArgs: [pedId],
+        );
+      }
+      await batch.commit(noResult: true);
+
+      // Limpiar huérfanos residuales
+      await db.rawDelete(
+        'DELETE FROM detalle_pedidos WHERE pedido_id NOT IN (SELECT id FROM pedidos)',
+      );
+
+      // ==========================================
+      // 4. 🔥 SOBREESCRIBIR REALTIME DATABASE CON LA LISTA LIMPIA
+      // ==========================================
+      final prefs = await SharedPreferences.getInstance();
+      if (prefs.getBool('es_premium') ?? false) {
+        await ServicioNube.respaldarDatosPrivadosRTDB();
+      }
+
+      int totalBorrados = detallesABorrar.length;
+      int pedidosTotalBorrados = pedidosABorrar.length;
+
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              "✅ Éxito: Se eliminaron $pedidosTotalBorrados pedidos repetidos y $totalBorrados productos clonados. Nube de Realtime actualizada.",
+            ),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("Error al reparar: $e"),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 }
