@@ -1052,6 +1052,13 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
       // 4. Mostrar pantalla de éxito y ESPERAR a que termine de cerrarse
       await _mostrarPantallaExito(nuevoEstado);
 
+      // 🚀 Cambiar automáticamente a la pestaña del nuevo estado ('Entregado sin Pago', 'Completado' o 'Cancelado')
+      if (mounted) {
+        setState(() {
+          _estadoActual = nuevoEstado;
+        });
+      }
+
       // 5. LUEGO de que la pantalla de éxito se cierra, otorgar punto y abrir la invitación de WhatsApp
       if (nuevoEstado == 'Completado') {
         final pedDoc = await db.query(

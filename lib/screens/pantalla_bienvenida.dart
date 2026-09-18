@@ -292,13 +292,25 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
       if (!yaDescargoTodo) {
         debugPrint("☁️ Descargando negocio completo antes de entrar...");
         await _sincronizacionSilenciosa(user).timeout(
-          const Duration(seconds: 5),
+          const Duration(seconds: 25),
           onTimeout: () => debugPrint("⏰ Timeout en descarga inicial silenciosa."),
         ); 
       } else {
-        // Modo Offline-First: Chequeo rápido de 2.5s si ya tiene los datos locales
         await _sincronizacionSilenciosa(user).timeout(
-          const Duration(milliseconds: 2500),
+          const Duration(seconds: 5),
+          onTimeout: () => debugPrint("⏰ Verificación de nube lista."),
+        );
+      }
+      if (!yaDescargoTodo) {
+        debugPrint("☁️ Descargando negocio completo antes de entrar...");
+        await _sincronizacionSilenciosa(user).timeout(
+          const Duration(seconds: 25),
+          onTimeout: () =>
+              debugPrint("⏰ Timeout en descarga inicial silenciosa."),
+        );
+      } else {
+        await _sincronizacionSilenciosa(user).timeout(
+          const Duration(seconds: 5),
           onTimeout: () => debugPrint("⏰ Verificación de nube lista."),
         );
       }
@@ -320,11 +332,14 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
 
       final SharedPreferences prefs = await SharedPreferences.getInstance();
       String hoy = DateTime.now().toIso8601String().substring(0, 10);
-      String nombreActual = prefs.getString('nombre_negocio') ?? "NOMBREDETUNEGOCIOAQUI";
-      
-      bool necesitaPerfil = prefs.getString('ultima_val_nube') != hoy ||
+      String nombreActual =
+          prefs.getString('nombre_negocio') ?? "NOMBREDETUNEGOCIOAQUI";
+
+      bool necesitaPerfil =
+          prefs.getString('ultima_val_nube') != hoy ||
           nombreActual == "NOMBREDETUNEGOCIOAQUI" ||
-          nombreActual == "nombredenegocioaqui";
+          nombreActual == "nombredenegocioaqui" ||
+          !prefs.containsKey('es_premium');
 
       if (necesitaPerfil) {
         await ServicioNube.descargarPerfilNube(user.uid);
@@ -340,12 +355,17 @@ class _PantallaBienvenidaState extends State<PantallaBienvenida>
         bool yaDescargoTodo = prefs.getBool(llaveDescarga) ?? false;
 
         final dbLocal = await DBHelper.instance.database;
+        final prodsLocales = await dbLocal.query('productos', limit: 1);
         final clientesLocales = await dbLocal.query('clientes', limit: 1);
         final pedidosLocales = await dbLocal.query('pedidos', limit: 1);
 
-        // ⚡ SOLO IMPORTAR DESDE REALTIME DB SI NUNCA HA DESCARGADO O LA BD LOCAL ESTÁ VACÍA
-        if (!yaDescargoTodo || (clientesLocales.isEmpty && pedidosLocales.isEmpty)) {
-          debugPrint("☁️ Primer inicio o BD vacía: Descargando desde Realtime DB...");
+        // ⚡ IMPORTAR SI NUNCA HA DESCARGADO O CUALQUIERA DE LAS TABLAS ESTÁ VACÍA
+        if (!yaDescargoTodo ||
+            prodsLocales.isEmpty ||
+            (clientesLocales.isEmpty && pedidosLocales.isEmpty)) {
+          debugPrint(
+            "☁️ Primer inicio o BD vacía: Descargando desde Realtime DB...",
+          );
           await ServicioNube.importarCatalogoDesdeRTDB(user.uid);
           await ServicioNube.descargarDatosPrivadosRTDB();
           await prefs.setBool(llaveDescarga, true);

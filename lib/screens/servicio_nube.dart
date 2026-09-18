@@ -435,6 +435,30 @@ class ServicioNube {
     }
   }
 
+  static List<dynamic> _extraerLista(dynamic obj) {
+    if (obj == null) return [];
+    if (obj is List) return obj;
+    if (obj is Map) {
+      var keys = obj.keys.toList();
+      try {
+        keys.sort(
+          (a, b) => int.parse(a.toString()).compareTo(int.parse(b.toString())),
+        );
+      } catch (_) {}
+      return keys.map((k) => obj[k]).toList();
+    }
+    return [];
+  }
+
+  static Map<String, dynamic> _extraerMapa(dynamic obj) {
+    if (obj == null || obj is! Map) return {};
+    Map<String, dynamic> res = {};
+    obj.forEach((k, v) {
+      res[k.toString()] = v;
+    });
+    return res;
+  }
+
   static Future<void> descargarDatosPrivadosRTDB() async {
     if (_uid == null || !await tieneInternet()) return;
     try {
@@ -446,15 +470,13 @@ class ServicioNube {
       Map<String, dynamic> datos = {};
 
       if (rawValue != null) {
-        if (rawValue is Map) {
-          datos = Map<String, dynamic>.from(rawValue);
-        } else if (rawValue is String) {
+        if (rawValue is String) {
           try {
             final decoded = jsonDecode(rawValue);
-            if (decoded is Map) {
-              datos = Map<String, dynamic>.from(decoded);
-            }
+            if (decoded is Map) datos = _extraerMapa(decoded);
           } catch (_) {}
+        } else if (rawValue is Map) {
+          datos = _extraerMapa(rawValue);
         }
       }
 
@@ -462,13 +484,29 @@ class ServicioNube {
 
       final dbLocal = await DBHelper.instance.database;
 
-      try {
-        final cols = await dbLocal.rawQuery("PRAGMA table_info(puntos_clientes);");
-        bool existeColumna = cols.any((c) => c['name'].toString().toLowerCase() == 'client_uid');
-        if (!existeColumna) {
-          await dbLocal.execute("ALTER TABLE puntos_clientes ADD COLUMN client_uid TEXT;");
-        }
-      } catch (_) {}
+      // 🛡️ CREA AUTOMÁTICAMENTE LAS COLUMNAS FALTANTES SI NO EXISTEN
+      Future<void> asegurarColumna(
+        String tabla,
+        String columna,
+        String tipoDef,
+      ) async {
+        try {
+          final cols = await dbLocal.rawQuery("PRAGMA table_info($tabla);");
+          bool existe = cols.any(
+            (c) => c['name'].toString().toLowerCase() == columna.toLowerCase(),
+          );
+          if (!existe) {
+            await dbLocal.execute(
+              "ALTER TABLE $tabla ADD COLUMN $columna $tipoDef;",
+            );
+          }
+        } catch (_) {}
+      }
+
+      await asegurarColumna('productos', 'stock_minimo', 'INTEGER DEFAULT 0');
+      await asegurarColumna('ajustes_capital', 'cantidad', 'INTEGER DEFAULT 0');
+      await asegurarColumna('ajustes_capital', 'proveedor_id', 'INTEGER');
+      await asegurarColumna('puntos_clientes', 'client_uid', 'TEXT');
 
       final Batch batch = dbLocal.batch();
       final WriteBatch batchFirestore = _db.batch();
@@ -486,33 +524,56 @@ class ServicioNube {
 
       for (String t in tablasPrivadas) {
         if (datos[t] != null) {
-          final lista = List<dynamic>.from(datos[t]);
+          final lista = _extraerLista(datos[t]);
           Set<int> idsNube = {};
 
+          // 🛡️ Obtiene las columnas reales de SQLite para filtrar cualquier campo desconocido
+          final List<Map<String, dynamic>> columnasTabla = await dbLocal
+              .rawQuery('PRAGMA table_info($t)');
+          final Set<String> columnasValidas = columnasTabla
+              .map((c) => c['name'].toString())
+              .toSet();
+
           for (var item in lista) {
-             if (item == null) continue;
-             Map<String, dynamic> mapLocal = Map<String, dynamic>.from(item);
-             
-             if (mapLocal['id'] != null) {
-               idsNube.add((mapLocal['id'] as num).toInt());
-             }
+            if (item == null || item is! Map) continue;
+            Map<String, dynamic> mapBruto = _extraerMapa(item);
 
-             if (t == 'pedidos') {
-                if (mapLocal['estado'] == null || mapLocal['estado'].toString().trim().isEmpty) {
-                  mapLocal['estado'] = 'Pendiente';
-                }
-             }
+            if (mapBruto['id'] != null) {
+              idsNube.add((mapBruto['id'] as num).toInt());
+            }
 
-             if (t == 'pedidos' && mapLocal['firma'] != null) {
-                if (mapLocal['firma'] is String) {
-                  try {
-                    mapLocal['firma'] = base64Decode(mapLocal['firma']);
-                  } catch (_) {}
-                } else if (mapLocal['firma'] is List) {
-                  mapLocal['firma'] = Uint8List.fromList(List<int>.from(mapLocal['firma']));
-                }
-             }
-             batch.insert(t, mapLocal, conflictAlgorithm: ConflictAlgorithm.replace);
+            if (t == 'pedidos') {
+              if (mapBruto['estado'] == null ||
+                  mapBruto['estado'].toString().trim().isEmpty) {
+                mapBruto['estado'] = 'Pendiente';
+              }
+            }
+
+            if (t == 'pedidos' && mapBruto['firma'] != null) {
+              if (mapBruto['firma'] is String) {
+                try {
+                  mapBruto['firma'] = base64Decode(mapBruto['firma']);
+                } catch (_) {}
+              } else if (mapBruto['firma'] is List) {
+                mapBruto['firma'] = Uint8List.fromList(
+                  List<int>.from(mapBruto['firma']),
+                );
+              }
+            }
+
+            // 🛡️ Solo incluye en la inserción las columnas que SQLite reconoce
+            Map<String, dynamic> mapLocal = {};
+            mapBruto.forEach((key, val) {
+              if (columnasValidas.contains(key)) {
+                mapLocal[key] = val;
+              }
+            });
+
+            batch.insert(
+              t,
+              mapLocal,
+              conflictAlgorithm: ConflictAlgorithm.replace,
+            );
           }
 
           // 🧹 BORRADO SINCRO: Si borraste en Realtime DB, se elimina en SQLite Y TAMBIÉN en Firestore
@@ -522,8 +583,7 @@ class ServicioNube {
               int idLoc = row['id'] as int;
               if (!idsNube.contains(idLoc) && idLoc != -1) {
                 batch.delete(t, where: 'id = ?', whereArgs: [idLoc]);
-                
-                // Borrado en Firestore
+
                 DocumentReference docRef = _db
                     .collection('usuarios')
                     .doc(_uid)
@@ -538,24 +598,41 @@ class ServicioNube {
       }
 
       await batch.commit(noResult: true);
-      
+
       if (huboBorradosFirestore) {
-        try { await batchFirestore.commit(); } catch (_) {}
+        try {
+          await batchFirestore.commit();
+        } catch (_) {}
       }
 
       final prefs = await SharedPreferences.getInstance();
       if (datos['timestamp_privado'] != null) {
-        await prefs.setInt('rt_timestamp_privado_$_uid', datos['timestamp_privado']);
+        int ts = (datos['timestamp_privado'] as num).toInt();
+        await prefs.setInt('rt_timestamp_privado_$_uid', ts);
       }
-      debugPrint("✅ Datos sincronizados entre SQLite, Realtime DB y Firestore.");
-    } catch(e) {
-       debugPrint("Error bajando datos privados de RTDB: $e");
+      debugPrint("✅ Datos privados sincronizados en SQLite.");
+    } catch (e) {
+      debugPrint("Error bajando datos privados de RTDB: $e");
     }
   }
 
+  static DateTime? _ultimoBorradosCheck;
+
   static Future<void> sincronizarBorradosFisicos(
-      String uid, String tabla, {bool force = false}) async {
+    String uid,
+    String tabla, {
+    bool force = false,
+  }) async {
     if (!await tieneInternet()) return;
+
+    // 💡 Evita ráfagas repetidas en menos de 5 segundos
+    if (!force &&
+        _ultimoBorradosCheck != null &&
+        DateTime.now().difference(_ultimoBorradosCheck!).inSeconds < 5) {
+      return;
+    }
+    _ultimoBorradosCheck = DateTime.now();
+
     try {
       final dbLocal = await DBHelper.instance.database;
       List<int> idsNube = [];
@@ -802,78 +879,152 @@ class ServicioNube {
       if (!snap.exists) return;
 
       final dbLocal = await DBHelper.instance.database;
+
+      // 🛡️ Asegura la columna antes de insertar productos
+      try {
+        final cols = await dbLocal.rawQuery("PRAGMA table_info(productos);");
+        bool existe = cols.any(
+          (c) => c['name'].toString().toLowerCase() == 'stock_minimo',
+        );
+        if (!existe) {
+          await dbLocal.execute(
+            "ALTER TABLE productos ADD COLUMN stock_minimo INTEGER DEFAULT 0;",
+          );
+        }
+      } catch (_) {}
       Map<String, dynamic> datos = {};
       final rawValue = snap.value;
       if (rawValue is String) {
-        datos = jsonDecode(rawValue);
+        try {
+          datos = _extraerMapa(jsonDecode(rawValue));
+        } catch (_) {}
       } else if (rawValue is Map) {
-        datos = Map<String, dynamic>.from(rawValue);
+        datos = _extraerMapa(rawValue);
       }
 
       final prefs = await SharedPreferences.getInstance();
-      String pathBoxi = prefs.getString('local_boxi_path') ?? "/storage/emulated/0/Pictures/Boxi";
+      String pathBoxi =
+          prefs.getString('local_boxi_path') ??
+          "/storage/emulated/0/Pictures/Boxi";
 
       // 1. Restaurar perfil comercial en SharedPreferences
-      if (datos['negocio'] != null) {
-        final neg = Map<String, dynamic>.from(datos['negocio']);
-        if (neg['nombre_negocio'] != null) await prefs.setString('nombre_negocio', neg['nombre_negocio']);
-        if (neg['logo_base64'] != null) await prefs.setString('logo_path', neg['logo_base64']);
-        if (neg['whatsapp_admin'] != null) await prefs.setString('whatsapp_admin', neg['whatsapp_admin']);
+      if (datos['negocio'] != null && datos['negocio'] is Map) {
+        final neg = _extraerMapa(datos['negocio']);
+        if (neg['nombre_negocio'] != null)
+          await prefs.setString(
+            'nombre_negocio',
+            neg['nombre_negocio'].toString(),
+          );
+        if (neg['logo_base64'] != null)
+          await prefs.setString('logo_path', neg['logo_base64'].toString());
+        if (neg['whatsapp_admin'] != null)
+          await prefs.setString(
+            'whatsapp_admin',
+            neg['whatsapp_admin'].toString(),
+          );
       }
 
       final Batch batch = dbLocal.batch();
 
+      // 🛡️ Leer columnas válidas de SQLite para filtrar cualquier campo incompatible
+      final List<Map<String, dynamic>> colsCatInfo = await dbLocal.rawQuery(
+        'PRAGMA table_info(categorias)',
+      );
+      final Set<String> colsCats = colsCatInfo
+          .map((c) => c['name'].toString())
+          .toSet();
+
+      final List<Map<String, dynamic>> colsProdInfo = await dbLocal.rawQuery(
+        'PRAGMA table_info(productos)',
+      );
+      final Set<String> colsProds = colsProdInfo
+          .map((c) => c['name'].toString())
+          .toSet();
+
       // 2. Encolar Categorías Activas e Inactivas
       if (datos['categorias'] != null) {
-        final cats = List<dynamic>.from(datos['categorias']);
+        final cats = _extraerLista(datos['categorias']);
         for (var c in cats) {
-          if (c != null) {
-            batch.insert('categorias', Map<String, dynamic>.from(c), conflictAlgorithm: ConflictAlgorithm.replace);
+          if (c != null && c is Map) {
+            Map<String, dynamic> catLimpia = {};
+            _extraerMapa(c).forEach((k, v) {
+              if (colsCats.contains(k)) catLimpia[k] = v;
+            });
+            batch.insert(
+              'categorias',
+              catLimpia,
+              conflictAlgorithm: ConflictAlgorithm.replace,
+            );
           }
         }
       }
 
       if (datos['categorias_inactivas'] != null) {
-        final catsInactivas = List<dynamic>.from(datos['categorias_inactivas']);
+        final catsInactivas = _extraerLista(datos['categorias_inactivas']);
         for (var c in catsInactivas) {
-          if (c != null) {
-            batch.insert('categorias', Map<String, dynamic>.from(c), conflictAlgorithm: ConflictAlgorithm.replace);
+          if (c != null && c is Map) {
+            Map<String, dynamic> catLimpia = {};
+            _extraerMapa(c).forEach((k, v) {
+              if (colsCats.contains(k)) catLimpia[k] = v;
+            });
+            batch.insert(
+              'categorias',
+              catLimpia,
+              conflictAlgorithm: ConflictAlgorithm.replace,
+            );
           }
         }
       }
 
-      // 3. Obtener lista de eliminaciones pendientes para no resucitar productos borrados offline
+      // 3. Evitar resucitar productos borrados offline
       final pendientesEliminar = await dbLocal.query(
         'operaciones_pendientes',
         columns: ['doc_id'],
-        where: "tabla = 'productos' AND operacion = 'delete'"
+        where: "tabla = 'productos' AND operacion = 'delete'",
       );
-      final Set<String> idsEliminadosOffline = pendientesEliminar.map((e) => e['doc_id'].toString()).toSet();
+      final Set<String> idsEliminadosOffline = pendientesEliminar
+          .map((e) => e['doc_id'].toString())
+          .toSet();
 
       // 3b. Encolar y Descargar Productos Activos
       if (datos['productos'] != null) {
-        final prods = List<dynamic>.from(datos['productos']);
+        final prods = _extraerLista(datos['productos']);
         for (var p in prods) {
-          if (p != null && !idsEliminadosOffline.contains(p['id']?.toString())) {
-            final Map<String, dynamic> map = Map<String, dynamic>.from(p);
-            if (map['variantes'] != null && map['variantes'] is! String) {
-              map['variantes'] = jsonEncode(map['variantes']);
+          if (p != null &&
+              p is Map &&
+              !idsEliminadosOffline.contains(p['id']?.toString())) {
+            final Map<String, dynamic> mapBruto = _extraerMapa(p);
+            if (mapBruto['variantes'] != null &&
+                mapBruto['variantes'] is! String) {
+              mapBruto['variantes'] = jsonEncode(mapBruto['variantes']);
             }
-            batch.insert('productos', map, conflictAlgorithm: ConflictAlgorithm.replace);
 
-            // A. Encola la descarga controlada de 3 en 3
-            String mainFoto = map['foto_path']?.toString() ?? "";
+            Map<String, dynamic> mapLimpio = {};
+            mapBruto.forEach((k, v) {
+              if (colsProds.contains(k)) mapLimpio[k] = v;
+            });
+
+            batch.insert(
+              'productos',
+              mapLimpio,
+              conflictAlgorithm: ConflictAlgorithm.replace,
+            );
+
+            String mainFoto = mapBruto['foto_path']?.toString() ?? "";
             if (mainFoto.isNotEmpty && mainFoto.startsWith('http')) {
               encolarDescargaFoto(mainFoto, pathBoxi);
             }
 
-            // B. Encola la descarga controlada de variantes
-            if (map['variantes'] != null) {
+            if (mapBruto['variantes'] != null) {
               try {
-                List<dynamic> dec = map['variantes'] is String 
-                    ? jsonDecode(map['variantes']) 
-                    : map['variantes'];
-                var grupos = (dec.isNotEmpty && !dec[0].containsKey('grupo')) ? [{'opciones': dec}] : dec;
+                List<dynamic> dec = mapBruto['variantes'] is String
+                    ? jsonDecode(mapBruto['variantes'])
+                    : mapBruto['variantes'];
+                var grupos = (dec.isNotEmpty && !dec[0].containsKey('grupo'))
+                    ? [
+                        {'opciones': dec},
+                      ]
+                    : dec;
                 for (var g in grupos) {
                   for (var o in g['opciones']) {
                     String varFoto = o['foto_path']?.toString() ?? "";
@@ -888,35 +1039,51 @@ class ServicioNube {
         }
       }
 
-      // 3b. Encolar y Descargar Productos Inactivos (ORDEN SECUENCIAL RIGUROSO)
+      // 3c. Encolar y Descargar Productos Inactivos
       if (datos['productos_inactivos'] != null) {
-        final prodsInactivos = List<dynamic>.from(datos['productos_inactivos']);
+        final prodsInactivos = _extraerLista(datos['productos_inactivos']);
         for (var p in prodsInactivos) {
-          if (p != null) {
-            final Map<String, dynamic> map = Map<String, dynamic>.from(p);
-            if (map['variantes'] != null && map['variantes'] is! String) {
-              map['variantes'] = jsonEncode(map['variantes']);
+          if (p != null && p is Map) {
+            final Map<String, dynamic> mapBruto = _extraerMapa(p);
+            if (mapBruto['variantes'] != null &&
+                mapBruto['variantes'] is! String) {
+              mapBruto['variantes'] = jsonEncode(mapBruto['variantes']);
             }
-            batch.insert('productos', map, conflictAlgorithm: ConflictAlgorithm.replace);
 
-            // A. Primero descarga la foto principal del producto inactivo
-            String mainFoto = map['foto_path']?.toString() ?? "";
+            Map<String, dynamic> mapLimpio = {};
+            mapBruto.forEach((k, v) {
+              if (colsProds.contains(k)) mapLimpio[k] = v;
+            });
+
+            batch.insert(
+              'productos',
+              mapLimpio,
+              conflictAlgorithm: ConflictAlgorithm.replace,
+            );
+
+            String mainFoto = mapBruto['foto_path']?.toString() ?? "";
             if (mainFoto.isNotEmpty && mainFoto.startsWith('http')) {
               descargarFotoIndividualEnSegundoPlano(mainFoto, pathBoxi);
             }
 
-            // B. Inmediatamente después descarga las fotos de sus variantes en orden
-            if (map['variantes'] != null) {
+            if (mapBruto['variantes'] != null) {
               try {
-                List<dynamic> dec = map['variantes'] is String 
-                    ? jsonDecode(map['variantes']) 
-                    : map['variantes'];
-                var grupos = (dec.isNotEmpty && !dec[0].containsKey('grupo')) ? [{'opciones': dec}] : dec;
+                List<dynamic> dec = mapBruto['variantes'] is String
+                    ? jsonDecode(mapBruto['variantes'])
+                    : mapBruto['variantes'];
+                var grupos = (dec.isNotEmpty && !dec[0].containsKey('grupo'))
+                    ? [
+                        {'opciones': dec},
+                      ]
+                    : dec;
                 for (var g in grupos) {
                   for (var o in g['opciones']) {
                     String varFoto = o['foto_path']?.toString() ?? "";
                     if (varFoto.isNotEmpty && varFoto.startsWith('http')) {
-                      descargarFotoIndividualEnSegundoPlano(varFoto, "$pathBoxi/Variantes");
+                      descargarFotoIndividualEnSegundoPlano(
+                        varFoto,
+                        "$pathBoxi/Variantes",
+                      );
                     }
                   }
                 }
@@ -926,26 +1093,10 @@ class ServicioNube {
         }
       }
 
-      // 4. Encolar fotos de variantes antiguas
-      if (datos['fotosVariantesCache'] != null) {
-        final fotosCache = Map<String, String>.from(datos['fotosVariantesCache']);
-        for (var entry in fotosCache.entries) {
-          List<String> partes = entry.key.split('_');
-          if (partes.length == 3) {
-            batch.insert('fotos_variantes', {
-              'producto_id': int.tryParse(partes[0]) ?? 0,
-              'grupo_index': int.tryParse(partes[1]) ?? 0,
-              'opcion_index': int.tryParse(partes[2]) ?? 0,
-              'foto_base64': entry.value.toString(),
-              'ultima_modificacion': DateTime.now().toIso8601String(),
-            }, conflictAlgorithm: ConflictAlgorithm.replace);
-          }
-        }
-      }
-
       await batch.commit(noResult: true);
-      
-      debugPrint("✅ Catálogo e imágenes descargadas en orden secuencial estricto.");
+      debugPrint(
+        "✅ Catálogo e inventario descargados e insertados en SQLite con éxito.",
+      );
     } catch (e) {
       debugPrint("Error importando desde RTDB con Batch: $e");
     }
@@ -1014,21 +1165,26 @@ class ServicioNube {
   }
 
   static Future<void> actualizarPerfilNegocioNube(
-      String nombre, String logo) async {
+    String nombre,
+    String logo,
+  ) async {
     if (_uid == null) return;
     try {
       if (!await tieneInternet()) return;
+
+      // Actualiza ÚNICAMENTE el nodo de negocio en RTDB sin tocar ni arriesgar productos
+      DatabaseReference refNegocio = FirebaseDatabase.instance.ref(
+        "catalogos_web/$_uid/negocio",
+      );
+      await refNegocio.update({'nombre_negocio': nombre, 'logo_base64': logo});
+
       await _db.collection('usuarios').doc(_uid).set({
         'nombre_negocio': nombre,
         'logo_base64': logo,
         'ultima_modificacion': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
-      await compilarYSubirCatalogoRTDB();
     } catch (e) {
-      if (_esErrorCuota(e)) {
-        debugPrint('🚨 CUOTA EXCEDIDA al actualizar perfil. Actualizado en RTDB...');
-        await compilarYSubirCatalogoRTDB();
-      }
+      debugPrint("Error actualizando perfil: $e");
     }
   }
 
@@ -1107,12 +1263,21 @@ class ServicioNube {
     bool yaMigrado = prefs.getBool('migracion_cloudinary_completada_$uid') ?? false;
     if (yaMigrado) return;
 
-    _migrandoACloudinary = true; 
+    _migrandoACloudinary = true;
 
     try {
-      debugPrint("🚀 Iniciando migración de imágenes locales/Base64 a Cloudinary...");
-
       final prods = await db.query('productos');
+      if (prods.isEmpty) {
+        debugPrint(
+          "🛡️ Sin productos locales para migrar. Cancelada llamada a Cloudinary.",
+        );
+        _migrandoACloudinary = false;
+        return;
+      }
+
+      debugPrint(
+        "🚀 Iniciando migración de imágenes locales/Base64 a Cloudinary...",
+      );
 
       // 1. Migrar Fotos Principales de Productos
       for (var p in prods) {
@@ -1218,22 +1383,18 @@ class ServicioNube {
       if (user == null) return;
 
       final db = await DBHelper.instance.database;
+
+      // 🛑 ESCUDO ANTI-BORRADO DESTRUCTIVO:
+      // Si la base de datos local SQLite está vacía, NUNCA sobreescribir la nube.
       final prodCheck = await db.query('productos', limit: 1);
-      if (prodCheck.isEmpty) {
-        try {
-          final fsCheck = await _db.collection('usuarios').doc(user.uid).collection('productos').limit(1).get();
-          if (fsCheck.docs.isNotEmpty) {
-            debugPrint("🛡️ Catálogo local vacío pero Firestore tiene productos. Migrando primero...");
-            await migrarYRecuperarDesdeFirestore(user.uid);
-            return;
-          }
-        } catch (e) {
-          if (_esErrorCuota(e)) {
-            debugPrint("🚨 CUOTA EXCEDIDA al verificar Firestore. Cargando desde RTDB...");
-            await importarCatalogoDesdeRTDB(user.uid);
-          }
-        }
+      final catCheck = await db.query('categorias', limit: 1);
+      if (prodCheck.isEmpty && catCheck.isEmpty) {
+        debugPrint(
+          "🛑 ESCUDO ACTIVO: SQLite está vacío. Prohibido sobreescribir Realtime Database.",
+        );
+        return;
       }
+
       final prefs = await SharedPreferences.getInstance();
       
       bool esPremium = prefs.getBool('es_premium') ?? false;
@@ -2083,7 +2244,7 @@ class ServicioNube {
   static StreamSubscription? escucharCambiosNubeRTDB(Function() onUpdate) {
     final uid = _auth.currentUser?.uid;
     if (uid == null) return null;
-    
+
     DatabaseReference ref = FirebaseDatabase.instance.ref("catalogos_web/$uid");
     return ref.onValue.listen((event) {
       if (event.snapshot.exists) {

@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:async';
 import 'package:http/http.dart' as http;
 import 'package:sqflite/sqflite.dart';
 import 'package:flutter/material.dart';
@@ -39,18 +40,57 @@ class _PantallaFidelidadState extends State<PantallaFidelidad> {
   bool _mostrarTodasMisTarjetas = false;
   bool _procesandoPunto = false;
   String _localBoxiPathGlobal = "/storage/emulated/0/Pictures/Boxi";
-  List<Map<String, dynamic>> _invitacionesPendientes = []; // 👈 NUEVO
+  List<Map<String, dynamic>> _invitacionesPendientes = [];
+  StreamSubscription? _subInvitaciones; // 👈 Escuchador en tiempo real
 
   @override
   void initState() {
     super.initState();
     _cargarDatosBD();
+    _escucharInvitacionesEnTiempoReal(); // 👈 Activado en tiempo real
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (widget.tokenParaReclamarDirecto != null && widget.tokenParaReclamarDirecto!.isNotEmpty) {
+      if (widget.tokenParaReclamarDirecto != null &&
+          widget.tokenParaReclamarDirecto!.isNotEmpty) {
         _ejecutarReclamoDirecto(widget.tokenParaReclamarDirecto!);
       }
     });
+  }
+
+  @override
+  void dispose() {
+    _subInvitaciones?.cancel();
+    super.dispose();
+  }
+
+  void _escucharInvitacionesEnTiempoReal() {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null || _subInvitaciones != null) return;
+
+    _subInvitaciones = FirebaseFirestore.instance
+        .collection('tokens_fidelidad')
+        .where('vendorUid', isEqualTo: user.uid)
+        .snapshots()
+        .listen((snap) {
+          final ahora = DateTime.now();
+          List<Map<String, dynamic>> lista = [];
+          for (var doc in snap.docs) {
+            var data = doc.data();
+            data['id'] = doc.id;
+            data['token'] = doc.id;
+
+            if (data.containsKey('expireAt') && data['expireAt'] != null) {
+              Timestamp exp = data['expireAt'];
+              if (exp.toDate().isBefore(ahora)) continue;
+            }
+            lista.add(data);
+          }
+          if (mounted) {
+            setState(() {
+              _invitacionesPendientes = lista;
+            });
+          }
+        }, onError: (e) => debugPrint("Error escuchando invitaciones: $e"));
   }
 
   Future<void> _cargarDatosBD() async {
@@ -2167,23 +2207,45 @@ final user = FirebaseAuth.instance.currentUser;
                               fotoPremioEnviar = _logoPath;
                             }
 
-                            String token = await ServicioFidelidad.crearTokenUnicoNube(
-                              vendorUid: user?.uid ?? 'anon',
-                              tarjetaId: tarjetaData['id'].toString(),
-                              clienteLocalId: c['id'],
-                              clienteNombre: c['nombre_completo'],
-                              nombreNegocio: _nombreNegocio,
-                              logoPath: _logoPath,
-                              fotoPath: fotoPremioEnviar,
-                              tarjetaTitulo: tarjetaData['titulo'] ?? 'Tarjeta Fidelidad',
-                              metaCompras: tarjetaData['meta_compras'],
-                              premioDesc: tarjetaData['premio_descripcion'] ?? '',
-                              montoMinimo: (tarjetaData['monto_minimo'] as num?)?.toDouble(),
-                              clienteTelefono: c['telefono']?.toString() ?? '',
-                            );
+                            String token =
+                                      await ServicioFidelidad.crearTokenUnicoNube(
+                                        vendorUid: user?.uid ?? 'anon',
+                                        tarjetaId: tarjetaData['id'].toString(),
+                                        clienteLocalId: c['id'],
+                                        clienteNombre: c['nombre_completo'],
+                                        nombreNegocio: _nombreNegocio,
+                                        logoPath: _logoPath,
+                                        fotoPath: fotoPremioEnviar,
+                                        tarjetaTitulo:
+                                            tarjetaData['titulo'] ??
+                                            'Tarjeta Fidelidad',
+                                        metaCompras:
+                                            tarjetaData['meta_compras'],
+                                        premioDesc:
+                                            tarjetaData['premio_descripcion'] ??
+                                            '',
+                                        montoMinimo:
+                                            (tarjetaData['monto_minimo']
+                                                    as num?)
+                                                ?.toDouble(),
+                                        clienteTelefono:
+                                            c['telefono']?.toString() ?? '',
+                                      );
 
-                            if (mounted) {
-                              _generarQrOLinkUnico(
+                                  // ⚡ Refresca la lista local de inmediato para que aparezca ya en la campana
+                                  if (user != null) {
+                                    ServicioFidelidad.obtenerInvitacionesPendientes(
+                                      user.uid,
+                                    ).then((invs) {
+                                      if (mounted)
+                                        setState(
+                                          () => _invitacionesPendientes = invs,
+                                        );
+                                    });
+                                  }
+
+                                  if (mounted) {
+                                    _generarQrOLinkUnico(
                                 tokenUnico: token,
                                 nombreCliente: c['nombre_completo'] ?? 'Cliente',
                                 telefono: c['telefono']?.toString() ?? '',

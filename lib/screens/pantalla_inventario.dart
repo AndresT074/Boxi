@@ -54,56 +54,76 @@ class _PantallaInventarioState extends State<PantallaInventario> {
   @override
   void initState() {
     super.initState();
-    _iniciarYMigrar(); 
-    _repararFotosPesadas(); // 🔥 Inicia la migración global silenciosa
+    _cargar(); // 👈 1. Carga SQLite DE INMEDIATO (0 ms) para quitar la ruleta de carga
+    _iniciarYMigrar();
   }
 
   Future<void> _iniciarYMigrar() async {
-    final prefs = await SharedPreferences.getInstance();
-    bool migracionRealizada = prefs.getBool('migracion_variantes_completada') ?? false;
-    if (!migracionRealizada) {
-      await prefs.setBool('migracion_variantes_completada', true);
-    }
-    await ServicioNube.migrarVariantesAlJSONyCarpetas();
-    _cargar();
     _activarTiempoReal();
-    _escucharCambiosRTDB(); 
+    _escucharCambiosRTDB();
 
-    // 🔥 NUEVA COMPROBACIÓN: Si es Premium, migrar imágenes locales/base64 a Cloudinary silenciosamente
-    bool esPremium = prefs.getBool('es_premium') ?? false;
-    if (esPremium) {
-      ServicioNube.migrarTodoACloudinary().then((_) {
-        if (mounted) _cargar(); // Recargamos el inventario una vez migrado
-      });
-    }
+    // 🔥 Tareas pesadas en segundo plano SIN congelar la interfaz
+    Future.microtask(() async {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        bool migracionRealizada =
+            prefs.getBool('migracion_variantes_completada') ?? false;
+        if (!migracionRealizada) {
+          await prefs.setBool('migracion_variantes_completada', true);
+        }
+        await ServicioNube.migrarVariantesAlJSONyCarpetas();
+        await _repararFotosPesadas();
+
+        bool esPremium = prefs.getBool('es_premium') ?? false;
+        if (esPremium) {
+          await ServicioNube.migrarTodoACloudinary();
+        }
+      } catch (e) {
+        debugPrint("Error en tareas de fondo de inventario: $e");
+      } finally {
+        if (mounted) _cargar();
+      }
+    });
   }
 
   Future<void> _repararFotosPesadas() async {
-    final db = await DBHelper.instance.database;
-    // Buscamos productos donde la foto sea un String gigante
-    final List<Map<String, dynamic>> pesados = await db.rawQuery(
-      "SELECT id, nombre, foto_path FROM productos WHERE length(foto_path) > 1000000"
-    );
+    try {
+      final db = await DBHelper.instance.database;
+      final List<Map<String, dynamic>> pesados = await db.rawQuery(
+        "SELECT id, nombre, foto_path FROM productos WHERE length(foto_path) > 1000000",
+      );
 
-    if (pesados.isEmpty) return;
+      if (pesados.isEmpty) return;
 
-    for (var p in pesados) {
-      debugPrint("Reparando producto pesado: ${p['nombre']}");
-      try {
-        Uint8List bytes = base64Decode(p['foto_path']);
-        ui.Codec codec = await ui.instantiateImageCodec(bytes, targetWidth: 600);
-        ui.FrameInfo fi = await codec.getNextFrame();
-        final ByteData? data = await fi.image.toByteData(format: ui.ImageByteFormat.png);
-        String nuevaFoto = base64Encode(data!.buffer.asUint8List());
-        
-        await db.update('productos', {'foto_path': nuevaFoto}, where: 'id = ?', whereArgs: [p['id']]);
-      } catch (e) {
-        // 🔥 Un solo catch es suficiente en Dart para atrapar tanto excepciones
-        // de formato como errores OutOfMemory (OOM) de memoria.
-        await db.update('productos', {'foto_path': ''}, where: 'id = ?', whereArgs: [p['id']]);
+      for (var p in pesados) {
+        try {
+          Uint8List bytes = base64Decode(p['foto_path']);
+          ui.Codec codec = await ui.instantiateImageCodec(
+            bytes,
+            targetWidth: 600,
+          );
+          ui.FrameInfo fi = await codec.getNextFrame();
+          final ByteData? data = await fi.image.toByteData(
+            format: ui.ImageByteFormat.png,
+          );
+          String nuevaFoto = base64Encode(data!.buffer.asUint8List());
+
+          await db.update(
+            'productos',
+            {'foto_path': nuevaFoto},
+            where: 'id = ?',
+            whereArgs: [p['id']],
+          );
+        } catch (e) {
+          await db.update(
+            'productos',
+            {'foto_path': ''},
+            where: 'id = ?',
+            whereArgs: [p['id']],
+          );
+        }
       }
-    }
-    _cargar(); // Recargamos la lista ya limpia
+    } catch (_) {}
   }
 
   @override
@@ -115,7 +135,8 @@ class _PantallaInventarioState extends State<PantallaInventario> {
 
   Future<void> _activarTiempoReal() async {
     final prefs = await SharedPreferences.getInstance();
-    if (mounted) setState(() => _esPremium = prefs.getBool('es_premium') ?? false);
+    if (mounted)
+      setState(() => _esPremium = prefs.getBool('es_premium') ?? false);
   }
 
   void _escucharCambiosRTDB() {
@@ -123,70 +144,85 @@ class _PantallaInventarioState extends State<PantallaInventario> {
     _subSyncTriggers = ServicioNube.escucharCambiosNubeRTDB(() async {
       final user = FirebaseAuth.instance.currentUser;
       if (user != null) {
-        debugPrint("🔔 Inventario: Cambio detectado en RTDB. Sincronizando y recargando...");
+        debugPrint(
+          "🔔 Inventario: Cambio detectado en RTDB. Sincronizando y recargando...",
+        );
         await ServicioNube.sincronizarBorradosFisicos(user.uid, 'productos');
         if (mounted) {
-          await _cargar(); // 🔥 Desaparece el producto borrado al instante en inventario
+          await _cargar();
         }
       }
     });
   }
 
   Future<void> _cargar() async {
-    final db = await DBHelper.instance.database;
-    final prefs = await SharedPreferences.getInstance();
-    
-    // Consulta SQL uniendo categorías, dándole prioridad absoluta (salen de primeras) a los productos sin categoría
-    final data = await db.rawQuery('''
-      SELECT p.id, p.nombre, p.precio_compra, p.precio_venta, p.descuento, p.stock, p.stock_minimo, p.proveedor_id, p.descripcion, p.orden, p.activo, p.ultima_modificacion, p.variantes, p.categoria
-      FROM productos p
-      LEFT JOIN categorias c ON p.categoria = c.nombre
-      ORDER BY 
-        p.activo DESC, 
-        CASE WHEN p.categoria IS NULL OR p.categoria = '' THEN 0 ELSE 1 END ASC, -- 🔥 Los productos sin categoría se marcan con 0 (salen de primeras)
-        c.orden ASC, 
-        p.orden ASC, 
-        p.id DESC
-    ''');
-    
-    if (!mounted) return;
-    setState(() {
-      _prods = data;
-      _esPremium = prefs.getBool('es_premium') ?? false;
-      _estaCargando = false;
-      if (_searchCtrl.text.trim().isNotEmpty) {
-        String query = _searchCtrl.text.trim().toLowerCase();
-        _filtrados = _prods.where((p) {
-          String nombre = (p['nombre'] ?? '').toString().toLowerCase();
-          if (nombre.contains(query)) return true;
+    try {
+      final db = await DBHelper.instance.database;
+      final prefs = await SharedPreferences.getInstance();
 
-          String varStr = p['variantes']?.toString() ?? "";
-          if (varStr.length > 5) {
-            try {
-              var dec = jsonDecode(varStr);
-              if (dec is List) {
-                for (var g in dec) {
-                  if (g is Map) {
-                    List opciones = (g['opciones'] is List) ? g['opciones'] : [];
-                    for (var o in opciones) {
-                      if (o is Map) {
-                        String opcNom = (o['nombre'] ?? '').toString().trim().toLowerCase();
-                        if (opcNom.isNotEmpty && opcNom.contains(query)) {
-                          return true;
+      final data = await db.rawQuery('''
+        SELECT p.id, p.nombre, p.precio_compra, p.precio_venta, p.descuento, p.stock, p.stock_minimo, p.proveedor_id, p.descripcion, p.orden, p.activo, p.ultima_modificacion, p.variantes, p.categoria
+        FROM productos p
+        LEFT JOIN categorias c ON p.categoria = c.nombre
+        ORDER BY 
+          p.activo DESC, 
+          CASE WHEN p.categoria IS NULL OR p.categoria = '' THEN 0 ELSE 1 END ASC,
+          c.orden ASC, 
+          p.orden ASC, 
+          p.id DESC
+      ''');
+
+      if (!mounted) return;
+      setState(() {
+        _prods = data;
+        _esPremium = prefs.getBool('es_premium') ?? false;
+        _estaCargando = false; // 👈 Desbloquea la interfaz de inmediato
+        if (_searchCtrl.text.trim().isNotEmpty) {
+          String query = _searchCtrl.text.trim().toLowerCase();
+          _filtrados = _prods.where((p) {
+            String nombre = (p['nombre'] ?? '').toString().toLowerCase();
+            if (nombre.contains(query)) return true;
+
+            String varStr = p['variantes']?.toString() ?? "";
+            if (varStr.length > 5) {
+              try {
+                var dec = jsonDecode(varStr);
+                if (dec is List) {
+                  for (var g in dec) {
+                    if (g is Map) {
+                      List opciones = (g['opciones'] is List)
+                          ? g['opciones']
+                          : [];
+                      for (var o in opciones) {
+                        if (o is Map) {
+                          String opcNom = (o['nombre'] ?? '')
+                              .toString()
+                              .trim()
+                              .toLowerCase();
+                          if (opcNom.isNotEmpty && opcNom.contains(query)) {
+                            return true;
+                          }
                         }
                       }
                     }
                   }
                 }
-              }
-            } catch (_) {}
-          }
-          return false;
-        }).toList();
-      } else {
-        _filtrados = data;
+              } catch (_) {}
+            }
+            return false;
+          }).toList();
+        } else {
+          _filtrados = data;
+        }
+      });
+    } catch (e) {
+      debugPrint("Error al cargar inventario: $e");
+      if (mounted) {
+        setState(
+          () => _estaCargando = false,
+        ); // 👈 Garantiza que NUNCA se quede cargando infinito
       }
-    });
+    }
   }
 
   void _filtrar(String q) {
@@ -272,7 +308,37 @@ class _PantallaInventarioState extends State<PantallaInventario> {
         child: CircularProgressIndicator(color: Color(0xFF0D47A1)),
       );
     }
-    if (_filtrados.isEmpty) return const Center(child: Text('Sin productos'));
+    if (_filtrados.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.inventory_2_outlined,
+              size: 70,
+              color: Colors.grey.shade400,
+            ),
+            const SizedBox(height: 14),
+            Text(
+              _searchCtrl.text.isNotEmpty
+                  ? 'No hay productos que coincidan'
+                  : 'Sin productos en inventario',
+              style: const TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 16,
+                color: Colors.grey,
+              ),
+            ),
+            const SizedBox(height: 6),
+            if (_searchCtrl.text.isEmpty)
+              const Text(
+                'Toca el botón "+ Añadir Producto" para comenzar.',
+                style: TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+          ],
+        ),
+      );
+    }
 
     final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
     double anchoPantalla = MediaQuery.of(context).size.width;
@@ -851,6 +917,8 @@ class _PantallaFormularioProductoState
   @override
   void initState() {
     super.initState();
+    _cargarProveedores(); // 👈 Se llama SIEMPRE (tanto para crear como para editar)
+
     if (widget.producto != null) {
       _estaActivo = (widget.producto!['activo'] ?? 1) == 1;
       _nC.text = widget.producto!['nombre'];
@@ -865,24 +933,23 @@ class _PantallaFormularioProductoState
       int sMin = (widget.producto!['stock_minimo'] as num?)?.toInt() ?? 0;
       _stockMinCtrl.text = sMin > 0 ? sMin.toString() : '';
       _proveedorIdSeleccionado = widget.producto!['proveedor_id'] as int?;
-      if (widget.producto!['variantes'] != null && widget.producto!['variantes'].toString().length > 5) {
+      if (widget.producto!['variantes'] != null &&
+          widget.producto!['variantes'].toString().length > 5) {
         try {
-          // 1. Decodificamos el JSON
           final decoded = jsonDecode(widget.producto!['variantes']);
-          
-          // 2. Lo convertimos a una lista de Mapas real para evitar el crash de tipo
           _gruposVariantes = List<Map<String, dynamic>>.from(
-            decoded.map((e) => Map<String, dynamic>.from(e))
+            decoded.map((e) => Map<String, dynamic>.from(e)),
           );
 
-          // 3. Limpiamos las opciones inicializando siempre una lista real si viene nula
           for (var grupo in _gruposVariantes) {
             if (grupo['opciones'] != null && grupo['opciones'] is List) {
               grupo['opciones'] = List<Map<String, dynamic>>.from(
-                (grupo['opciones'] as List).map((o) => Map<String, dynamic>.from(o))
+                (grupo['opciones'] as List).map(
+                  (o) => Map<String, dynamic>.from(o),
+                ),
               );
             } else {
-              grupo['opciones'] = <Map<String, dynamic>>[]; // 👈 Evita que grupo['opciones'] sea null
+              grupo['opciones'] = <Map<String, dynamic>>[];
             }
           }
         } catch (e) {
@@ -890,10 +957,12 @@ class _PantallaFormularioProductoState
           _gruposVariantes = [];
         }
       }
-      _cargarFotosVariantes(); 
-      _cargarProveedores(); // 👈 NUEVO
+      _cargarFotosVariantes();
     } else {
-      _sC.text = "0"; _pCC.text = ""; _pVC.text = ""; _descPctC.text = "";
+      _sC.text = "0";
+      _pCC.text = "";
+      _pVC.text = "";
+      _descPctC.text = "";
     }
   }
 

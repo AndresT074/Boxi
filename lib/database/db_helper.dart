@@ -20,22 +20,40 @@ class DBHelper {
     final path = join(dbPath, filePath);
     return await openDatabase(
       path,
-      version: 23,
+      version: 24, // 👈 Subido a versión 24 para forzar migración automática
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
     );
   }
 
   Future _createDB(Database db, int version) async {
-    await db.execute('''CREATE TABLE vendedores (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, telefono TEXT, email TEXT, ultima_modificacion TEXT)''',);
-    await db.execute('''CREATE TABLE proveedores (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, telefono TEXT, indicativo TEXT DEFAULT '57', email TEXT, ultima_modificacion TEXT)''',);
-    await db.execute('''CREATE TABLE clientes (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre_completo TEXT NOT NULL, nombre_negocio TEXT, direccion TEXT, telefono TEXT, departamento TEXT, ciudad TEXT, firma TEXT, ultima_modificacion TEXT)''');
-    await db.execute('''CREATE TABLE productos (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, foto_path TEXT, precio_compra REAL NOT NULL, precio_venta REAL NOT NULL, descuento REAL DEFAULT 0, stock INTEGER DEFAULT 0, descripcion TEXT, variantes TEXT, orden INTEGER DEFAULT 0, activo INTEGER DEFAULT 1, ultima_modificacion TEXT, categoria TEXT)''');
-    await db.execute('''CREATE TABLE pedidos (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha_hora TEXT NOT NULL, fecha_pago TEXT, cliente_id INTEGER NOT NULL, vendedor_id INTEGER NOT NULL, total_venta REAL NOT NULL, ganancia_total REAL NOT NULL, estado TEXT NOT NULL, departamento TEXT, ciudad TEXT, firma BLOB, valor_domicilio REAL DEFAULT 0, cliente_nombre_snapshot TEXT, ultima_modificacion TEXT)'''); // ✅ Agregada columna fecha_pago
-    await db.execute('''CREATE TABLE detalle_pedidos (id INTEGER PRIMARY KEY AUTOINCREMENT, pedido_id INTEGER NOT NULL, producto_id INTEGER NOT NULL, cantidad INTEGER NOT NULL, precio_unitario REAL NOT NULL, subtotal REAL NOT NULL, nombre_snapshot TEXT, descuento REAL DEFAULT 0, ultima_modificacion TEXT, FOREIGN KEY (pedido_id) REFERENCES pedidos (id) ON DELETE CASCADE)''');
-    await db.execute('''CREATE TABLE ajustes_capital (id INTEGER PRIMARY KEY AUTOINCREMENT, monto REAL NOT NULL, fecha TEXT NOT NULL, descripcion TEXT, ultima_modificacion TEXT)''');
-    await db.execute('''CREATE TABLE reportes_guardados (id INTEGER PRIMARY KEY AUTOINCREMENT, titulo TEXT, fecha TEXT, caja REAL, utilidad REAL, reinversion REAL, detalle_json TEXT, ultima_modificacion TEXT)''');
-    await db.execute('''CREATE TABLE operaciones_pendientes (id INTEGER PRIMARY KEY AUTOINCREMENT, tabla TEXT NOT NULL, operacion TEXT NOT NULL, doc_id TEXT NOT NULL, datos_json TEXT, fecha_creacion TEXT NOT NULL)''');
+    await db.execute(
+      '''CREATE TABLE vendedores (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, telefono TEXT, email TEXT, ultima_modificacion TEXT)''',
+    );
+    await db.execute(
+      '''CREATE TABLE proveedores (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, telefono TEXT, indicativo TEXT DEFAULT '57', email TEXT, ultima_modificacion TEXT)''',
+    );
+    await db.execute(
+      '''CREATE TABLE clientes (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre_completo TEXT NOT NULL, nombre_negocio TEXT DEFAULT '', direccion TEXT, telefono TEXT, departamento TEXT, ciudad TEXT, firma TEXT, ultima_modificacion TEXT)''',
+    );
+    await db.execute(
+      '''CREATE TABLE productos (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, foto_path TEXT, precio_compra REAL NOT NULL, precio_venta REAL NOT NULL, descuento REAL DEFAULT 0, stock INTEGER DEFAULT 0, stock_minimo INTEGER DEFAULT 0, proveedor_id INTEGER DEFAULT NULL, descripcion TEXT, variantes TEXT, orden INTEGER DEFAULT 0, activo INTEGER DEFAULT 1, ultima_modificacion TEXT, categoria TEXT)''',
+    );
+    await db.execute(
+      '''CREATE TABLE pedidos (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha_hora TEXT NOT NULL, fecha_pago TEXT, cliente_id INTEGER NOT NULL, vendedor_id INTEGER NOT NULL, total_venta REAL NOT NULL, ganancia_total REAL NOT NULL, estado TEXT NOT NULL, departamento TEXT, ciudad TEXT, firma BLOB, valor_domicilio REAL DEFAULT 0, cliente_nombre_snapshot TEXT, ultima_modificacion TEXT)''',
+    );
+    await db.execute(
+      '''CREATE TABLE detalle_pedidos (id INTEGER PRIMARY KEY AUTOINCREMENT, pedido_id INTEGER NOT NULL, producto_id INTEGER NOT NULL, cantidad INTEGER NOT NULL, precio_unitario REAL NOT NULL, subtotal REAL NOT NULL, nombre_snapshot TEXT, descuento REAL DEFAULT 0, ultima_modificacion TEXT, FOREIGN KEY (pedido_id) REFERENCES pedidos (id) ON DELETE CASCADE)''',
+    );
+    await db.execute(
+      '''CREATE TABLE ajustes_capital (id INTEGER PRIMARY KEY AUTOINCREMENT, monto REAL NOT NULL, fecha TEXT NOT NULL, descripcion TEXT, cantidad INTEGER DEFAULT 0, proveedor_id INTEGER DEFAULT NULL, producto_id INTEGER DEFAULT NULL, ultima_modificacion TEXT)''',
+    );
+    await db.execute(
+      '''CREATE TABLE reportes_guardados (id INTEGER PRIMARY KEY AUTOINCREMENT, titulo TEXT, fecha TEXT, caja REAL, utilidad REAL, reinversion REAL, detalle_json TEXT, ultima_modificacion TEXT)''',
+    );
+    await db.execute(
+      '''CREATE TABLE operaciones_pendientes (id INTEGER PRIMARY KEY AUTOINCREMENT, tabla TEXT NOT NULL, operacion TEXT NOT NULL, doc_id TEXT NOT NULL, datos_json TEXT, fecha_creacion TEXT NOT NULL)''',
+    );
     await db.execute('''
       CREATE TABLE fotos_variantes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,6 +94,7 @@ class DBHelper {
         tarjeta_id INTEGER NOT NULL,
         puntos_actuales INTEGER DEFAULT 0,
         completadas_totales INTEGER DEFAULT 0,
+        client_uid TEXT,
         ultima_modificacion TEXT,
         FOREIGN KEY (cliente_id) REFERENCES clientes (id) ON DELETE CASCADE,
         FOREIGN KEY (tarjeta_id) REFERENCES tarjetas_fidelidad (id) ON DELETE CASCADE
@@ -235,11 +254,45 @@ class DBHelper {
       } catch (_) {}
     }
 
-    // 🔥 MIGRACIÓN VERSIÓN 23 (Nombre de Negocio para Clientes)
+    /// 🔥 MIGRACIÓN VERSIÓN 23 (Nombre de Negocio para Clientes)
     if (oldVersion < 23) {
       try {
         await db.execute(
           'ALTER TABLE clientes ADD COLUMN nombre_negocio TEXT DEFAULT ""',
+        );
+      } catch (_) {}
+    }
+
+    // 🔥 MIGRACIÓN VERSIÓN 24 (Garantizar columnas en bases de datos ya existentes)
+    if (oldVersion < 24) {
+      try {
+        await db.execute(
+          'ALTER TABLE productos ADD COLUMN stock_minimo INTEGER DEFAULT 0',
+        );
+      } catch (_) {}
+      try {
+        await db.execute(
+          'ALTER TABLE productos ADD COLUMN proveedor_id INTEGER DEFAULT NULL',
+        );
+      } catch (_) {}
+      try {
+        await db.execute(
+          'ALTER TABLE ajustes_capital ADD COLUMN cantidad INTEGER DEFAULT 0',
+        );
+      } catch (_) {}
+      try {
+        await db.execute(
+          'ALTER TABLE ajustes_capital ADD COLUMN proveedor_id INTEGER DEFAULT NULL',
+        );
+      } catch (_) {}
+      try {
+        await db.execute(
+          'ALTER TABLE ajustes_capital ADD COLUMN producto_id INTEGER DEFAULT NULL',
+        );
+      } catch (_) {}
+      try {
+        await db.execute(
+          'ALTER TABLE puntos_clientes ADD COLUMN client_uid TEXT',
         );
       } catch (_) {}
     }

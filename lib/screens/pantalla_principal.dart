@@ -78,6 +78,9 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   final Map<int, TextEditingController> _cantControllers = {};
   int _cantidadSolicitudes = 0;
   bool _primeraCargaSolicitudes = true;
+  bool _cargandoInicial = true;
+  bool _reordenandoLocalmente =
+      false; // 👈 Bloquea el rebote de Firebase mientras arrastras
   StreamSubscription? _subSolicitudes;
   StreamSubscription? _subSyncTriggers; 
   String _logoPath = "";
@@ -108,9 +111,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   Map<String, bool> categoriasExpandidas = {};
   final ScrollController _mainScroll = ScrollController();
   Timer? _autoScrollTimer;
-  Timer? _dragTimer;
-  bool _isDragging = false;
-  Offset? _startPos;
   final Set<String> _categoriasEnModoEliminacion = {};
   String _localBoxiPath = ""; 
   static bool _initialLinkProcesado = false;
@@ -127,13 +127,23 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
 
   Future<void> _inicializarTodo() async {
     try {
-      await ServicioNotificaciones.inicializar();
       await _cargarConfig();
-      await _cargar();
-      await _intentarSincronizacionNube();
-      _escucharSolicitudes();
+      await _cargar(); // 👈 1. Carga SQLite al instante (0 ms). Si hay productos, se ven ya.
+
+      if (productos.isNotEmpty && mounted) {
+        setState(() => _cargandoInicial = false);
+      }
+
+      await _intentarSincronizacionNube(); // 2. Comprueba la nube en segundo plano
+      await _cargar(); // 3. Refresca si la nube trajo algo nuevo
     } catch (e) {
       debugPrint("Error en inicialización secuencial: $e");
+    } finally {
+      if (mounted) {
+        setState(() => _cargandoInicial = false);
+      }
+      ServicioNotificaciones.inicializar();
+      _escucharSolicitudes();
     }
   }
 
@@ -179,7 +189,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     _subSyncTriggers?.cancel();
     _timerReorden?.cancel();
     _autoScrollTimer?.cancel();
-    _dragTimer?.cancel();
     // 🔥 Limpiar variables
     _nombreController.dispose();
     _searchCtrl.dispose();
@@ -418,15 +427,21 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
 
     // 2. 🔥 Escuchador en tiempo real directamente sobre el Catálogo Web
     if (_subSyncTriggers == null) {
-      bool esPrimerEvento = true; // 👈 Ignora el primer evento de conexión inicial
+      bool esPrimerEvento = true;
       _subSyncTriggers = ServicioNube.escucharCambiosNubeRTDB(() async {
         if (esPrimerEvento) {
           esPrimerEvento = false;
-          return; // Omite el disparo inicial duplicado al abrir la pantalla
+          return;
+        }
+        // 🛑 Si estás moviendo productos con el dedo, ignora el eco de la nube
+        if (_reordenandoLocalmente) {
+          return;
         }
         final uid = FirebaseAuth.instance.currentUser?.uid;
         if (uid != null) {
-          debugPrint("🔔 Cambio en catalogos_web detectado. Sincronizando borrados y recargando pantalla...");
+          debugPrint(
+            "🔔 Cambio en catalogos_web detectado. Sincronizando borrados y recargando pantalla...",
+          );
           await ServicioNube.sincronizarBorradosFisicos(uid, 'productos');
           if (mounted) {
             await _cargar();
@@ -546,14 +561,30 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     try {
       final prefs = await SharedPreferences.getInstance();
       bool hayCambios = false;
-      
-      // 1. VERIFICAR DATOS PRIVADOS (Ventas, Clientes)
-      final refPrivado = FirebaseDatabase.instance.ref("datos_privados/${user.uid}/timestamp_privado");
+
+      final dbLocal = await DBHelper.instance.database;
+      final prodsCount =
+          Sqflite.firstIntValue(
+            await dbLocal.rawQuery('SELECT COUNT(*) FROM productos'),
+          ) ??
+          0;
+      final pedidosCount =
+          Sqflite.firstIntValue(
+            await dbLocal.rawQuery('SELECT COUNT(*) FROM pedidos'),
+          ) ??
+          0;
+      final bool bdVacia = prodsCount == 0 && pedidosCount == 0;
+
+      // 1. VERIFICAR DATOS PRIVADOS (Ventas, Clientes, Finanzas)
+      final refPrivado = FirebaseDatabase.instance.ref(
+        "datos_privados/${user.uid}/timestamp_privado",
+      );
       final snapPrivado = await refPrivado.get();
       if (snapPrivado.exists) {
-        int nubeTsPrivado = snapPrivado.value as int;
-        int localTsPrivado = prefs.getInt('rt_timestamp_privado_${user.uid}') ?? 0;
-        if (nubeTsPrivado > localTsPrivado) {
+        int nubeTsPrivado = (snapPrivado.value as num?)?.toInt() ?? 0;
+        int localTsPrivado =
+            prefs.getInt('rt_timestamp_privado_${user.uid}') ?? 0;
+        if (bdVacia || nubeTsPrivado > localTsPrivado) {
           await ServicioNube.descargarDatosPrivadosRTDB();
           await prefs.setInt('rt_timestamp_privado_${user.uid}', nubeTsPrivado);
           hayCambios = true;
@@ -561,76 +592,134 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       }
 
       // 2. VERIFICAR INVENTARIO (Catálogo Web)
-      final refCatalogo = FirebaseDatabase.instance.ref("catalogos_web/${user.uid}/ultima_actualizacion");
+      final refCatalogo = FirebaseDatabase.instance.ref(
+        "catalogos_web/${user.uid}/ultima_actualizacion",
+      );
       final snapCatalogo = await refCatalogo.get();
       if (snapCatalogo.exists) {
-        String nubeTsCatalogo = snapCatalogo.value as String;
-        String localTsCatalogo = prefs.getString('rt_timestamp_catalogo_${user.uid}') ?? "";
-        if (nubeTsCatalogo != localTsCatalogo) {
+        String nubeTsCatalogo = snapCatalogo.value?.toString() ?? "";
+        String localTsCatalogo =
+            prefs.getString('rt_timestamp_catalogo_${user.uid}') ?? "";
+        if (bdVacia || nubeTsCatalogo != localTsCatalogo) {
           await ServicioNube.importarCatalogoDesdeRTDB(user.uid);
-          await prefs.setString('rt_timestamp_catalogo_${user.uid}', nubeTsCatalogo);
+          await prefs.setString(
+            'rt_timestamp_catalogo_${user.uid}',
+            nubeTsCatalogo,
+          );
           hayCambios = true;
         }
       }
 
       if (hayCambios) {
-        _cargar(); 
+        await _cargar();
         debugPrint("📦 Datos actualizados desde RTDB.");
       } else {
         debugPrint("☁️ Nube al día. 0 lecturas consumidas.");
       }
-      
     } catch (e) {
       debugPrint("Error de sincronización RTDB: $e");
     }
   }
 
   Future<void> _guardarOrden() async {
-    if (!mounted) return; 
-    
-    final db = await DBHelper.instance.database;
-    final List<Map<String, dynamic>> productosBD = await db.query('productos', columns: ['id', 'orden']);
-    
-    Batch batchLocal = db.batch();
-    List<Map<String, dynamic>> productosCambiados = [];
+    if (!mounted) return;
 
-    for (int i = 0; i < filtrados.length; i++) {
-      int idActual = filtrados[i]['id'];
-      var prodOriginal = productosBD.firstWhere((p) => p['id'] == idActual);
-      
-      if (prodOriginal['orden'] != i) {
-        filtrados[i]['orden'] = i; 
-        batchLocal.update('productos', {'orden': i}, where: 'id = ?', whereArgs: [idActual]);
-        productosCambiados.add(filtrados[i]); 
+    try {
+      final db = await DBHelper.instance.database;
+      final List<Map<String, dynamic>> productosBD = await db.query(
+        'productos',
+        columns: ['id', 'orden'],
+      );
+
+      Map<int, int> ordenesMap = {
+        for (var p in productosBD)
+          (p['id'] as int): (p['orden'] as num?)?.toInt() ?? -1,
+      };
+
+      Batch batchLocal = db.batch();
+      bool huboCambios = false;
+
+      for (int i = 0; i < filtrados.length; i++) {
+        int idActual = filtrados[i]['id'] as int;
+        int ordenActual = ordenesMap[idActual] ?? -1;
+
+        if (ordenActual != i) {
+          filtrados[i]['orden'] = i;
+          batchLocal.update(
+            'productos',
+            {'orden': i},
+            where: 'id = ?',
+            whereArgs: [idActual],
+          );
+          huboCambios = true;
+        }
       }
-    }
-    
-    await batchLocal.commit(noResult: true);
-    if (!mounted) return; 
-    setState(() => productos = List.from(filtrados));
-    
-    if (_esPremium && productosCambiados.isNotEmpty) {
-      await ServicioNube.compilarYSubirCatalogoRTDB();
+
+      if (huboCambios) {
+        await batchLocal.commit(noResult: true);
+        if (_esPremium) {
+          // Subida en segundo plano sin congelar la pantalla
+          ServicioNube.compilarYSubirCatalogoRTDB();
+        }
+      }
+    } catch (e) {
+      debugPrint("Error guardando orden de productos: $e");
     }
   }
 
-  void _onReorderCategoria(List<Map<String, dynamic>> sublista, int oldIndex, int newIndex) {
+  void _onReorderCategoria(
+    List<Map<String, dynamic>> sublista,
+    int oldIndex,
+    int newIndex,
+  ) {
+    if (sublista.isEmpty ||
+        oldIndex < 0 ||
+        oldIndex >= sublista.length ||
+        newIndex < 0 ||
+        newIndex >= sublista.length)
+      return;
+
+    _reordenandoLocalmente = true; // 🛡️ Bloquea recargas externas de Firebase
+
     setState(() {
       final item = sublista.removeAt(oldIndex);
       sublista.insert(newIndex, item);
-      
-      // Reordenamos globalmente para que tu _guardarOrden original funcione perfecto
+
       String? catNombre = item['categoria'];
-      int primerIndice = filtrados.indexWhere((p) => p['categoria'] == catNombre);
+
+      int primerIndice = filtrados.indexWhere(
+        (p) => p['categoria'] == catNombre,
+      );
       if (primerIndice != -1) {
         filtrados.removeWhere((p) => p['categoria'] == catNombre);
         filtrados.insertAll(primerIndice, sublista);
+      } else {
+        // Para productos de OTROS PRODUCTOS
+        int pInd = filtrados.indexWhere(
+          (p) =>
+              p['categoria'] == null ||
+              p['categoria'].toString().trim().isEmpty,
+        );
+        if (pInd != -1) {
+          filtrados.removeWhere(
+            (p) =>
+                p['categoria'] == null ||
+                p['categoria'].toString().trim().isEmpty,
+          );
+          filtrados.insertAll(pInd, sublista);
+        }
       }
+
+      // Sincroniza la lista en memoria inmediatamente
+      productos = List.from(filtrados);
     });
-    
+
     _timerReorden?.cancel();
-    _timerReorden = Timer(const Duration(seconds: 3), () {
-      _guardarOrden(); // Llama a tu función original intacta
+    _timerReorden = Timer(const Duration(milliseconds: 500), () async {
+      await _guardarOrden();
+      Future.delayed(const Duration(milliseconds: 1500), () {
+        _reordenandoLocalmente = false;
+      });
     });
   }
 
@@ -2015,10 +2104,23 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         builder: (context, setStateDialog) {
           final isOscuro = Theme.of(context).brightness == Brightness.dark;
           
-          // Filtrar productos: que no tengan categoría Y que coincidan con la búsqueda
+          // 🛡️ Nombres de categorías válidas en minúsculas y sin espacios
+          final Set<String> catsValidas = categorias
+              .map((c) => c['nombre'].toString().trim().toLowerCase())
+              .toSet();
+
+          // Filtrar productos: sin categoría, con categoría vacía o huérfana que coincida con la búsqueda
           final prodsDisponibles = productos.where((p) {
-            bool sinCat = p['categoria'] == null;
-            bool coincideBusqueda = p['nombre'].toString().toLowerCase().contains(busqueda.toLowerCase());
+            String? c = p['categoria']?.toString().trim();
+            bool sinCat =
+                c == null ||
+                c.isEmpty ||
+                c == 'null' ||
+                !catsValidas.contains(c.toLowerCase());
+            bool coincideBusqueda = p['nombre']
+                .toString()
+                .toLowerCase()
+                .contains(busqueda.toLowerCase());
             return sinCat && coincideBusqueda;
           }).toList();
 
@@ -2230,7 +2332,16 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       builder: (ctx) => StatefulBuilder(
         builder: (context, setStateDialog) {
           final isOscuro = Theme.of(context).brightness == Brightness.dark;
-          final prodsDisponibles = productos.where((p) => p['categoria'] == null).toList();
+          final Set<String> catsValidas = categorias
+              .map((c) => c['nombre'].toString().trim().toLowerCase())
+              .toSet();
+          final prodsDisponibles = productos.where((p) {
+            String? c = p['categoria']?.toString().trim();
+            return c == null ||
+                c.isEmpty ||
+                c == 'null' ||
+                !catsValidas.contains(c.toLowerCase());
+          }).toList();
 
           return AlertDialog(
             backgroundColor: Theme.of(context).cardColor,
@@ -4187,12 +4298,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     
     return const Icon(Icons.broken_image, color: Colors.red);
   }
-  
-  void _detenerArrastreGlobal() {
-    _dragTimer?.cancel();
-    _autoScrollTimer?.cancel();
-    _isDragging = false;
-  }
 
   Widget _construirVistaProductos(int columnas, bool esHorizontal) {
     final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
@@ -4204,6 +4309,31 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
         _buildBannerFidelidadPendiente(),
         Expanded(
           child: () {
+            // ⏳ Mientras conecta con la nube en un inicio limpio, muestra cargando y no "sin productos"
+            if (_cargandoInicial && productos.isEmpty) {
+              return Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    CircularProgressIndicator(
+                      color: isOscuro
+                          ? Colors.cyanAccent
+                          : const Color(0xFF0D47A1),
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      "Cargando tus productos...",
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                        color: isOscuro ? Colors.white70 : Colors.black54,
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }
+
             if (productos.isEmpty) {
               return Center(
                 child: SingleChildScrollView(
@@ -4294,14 +4424,17 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
             Map<String, List<Map<String, dynamic>>> grupos = {
               '_sin_categoria': [],
             };
-            for (var cat in categorias) grupos[cat['nombre']] = [];
+            for (var cat in categorias) {
+              grupos[cat['nombre']] = [];
+            }
 
             for (var p in filtrados) {
               String? cat = p['categoria'];
-              if (cat != null && grupos.containsKey(cat))
+              if (cat != null && grupos.containsKey(cat)) {
                 grupos[cat]!.add(p);
-              else
+              } else {
                 grupos['_sin_categoria']!.add(p);
+              }
             }
 
             Widget construirTarjeta(
@@ -4612,75 +4745,16 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
             if (mostrarBanner) offsetTopItems++;
             if (widget.esAdmin && !buscandoActivo) offsetTopItems++;
 
-            return Listener(
-              onPointerDown: (e) {
-                _startPos = e.position;
-                _dragTimer = Timer(
-                  const Duration(milliseconds: 350),
-                  () => _isDragging = true,
-                );
-              },
-              onPointerMove: (e) {
-                if (!_isDragging && _startPos != null) {
-                  if ((e.position - _startPos!).distance > 15)
-                    _dragTimer?.cancel();
-                }
-                if (_isDragging) {
-                  double y = e.position.dy;
-                  double h = MediaQuery.of(context).size.height;
-                  double edge = 150.0;
-
-                  if (y < edge) {
-                    if (_autoScrollTimer == null ||
-                        !_autoScrollTimer!.isActive) {
-                      _autoScrollTimer = Timer.periodic(
-                        const Duration(milliseconds: 20),
-                        (_) {
-                          if (_mainScroll.hasClients) {
-                            _mainScroll.jumpTo(
-                              (_mainScroll.offset - 10).clamp(
-                                0.0,
-                                _mainScroll.position.maxScrollExtent,
-                              ),
-                            );
-                          }
-                        },
-                      );
-                    }
-                  } else if (y > h - edge) {
-                    if (_autoScrollTimer == null ||
-                        !_autoScrollTimer!.isActive) {
-                      _autoScrollTimer = Timer.periodic(
-                        const Duration(milliseconds: 20),
-                        (_) {
-                          if (_mainScroll.hasClients) {
-                            _mainScroll.jumpTo(
-                              (_mainScroll.offset + 10).clamp(
-                                0.0,
-                                _mainScroll.position.maxScrollExtent,
-                              ),
-                            );
-                          }
-                        },
-                      );
-                    }
-                  } else {
-                    _autoScrollTimer?.cancel();
-                  }
-                }
-              },
-              onPointerUp: (e) => _detenerArrastreGlobal(),
-              onPointerCancel: (e) => _detenerArrastreGlobal(),
-              child: RawScrollbar(
-                controller: _mainScroll,
-                thumbVisibility: true,
-                thickness: 7,
-                radius: const Radius.circular(10),
-                thumbColor: isOscuro
-                    ? Colors.cyanAccent.withOpacity(0.7)
-                    : const Color(0xFF0D47A1).withOpacity(0.7),
-                interactive: true,
-                child: ReorderableListView(
+            return RawScrollbar(
+              controller: _mainScroll,
+              thumbVisibility: true,
+              thickness: 7,
+              radius: const Radius.circular(10),
+              thumbColor: isOscuro
+                  ? Colors.cyanAccent.withOpacity(0.7)
+                  : const Color(0xFF0D47A1).withOpacity(0.7),
+              interactive: true,
+              child: ReorderableListView(
                   scrollController: _mainScroll,
                   physics: const BouncingScrollPhysics(),
                   buildDefaultDragHandles: false,
@@ -4830,7 +4904,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                         nombre,
                       );
                       List<Map<String, dynamic>> prodsEnCat =
-                          grupos[nombre] ?? [];
+                        grupos[nombre] ?? [];
 
                       if (!widget.esAdmin && !isActivo)
                         return SizedBox.shrink(
@@ -5190,11 +5264,11 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                                             ),
                                         itemCount: prodsEnCat.length,
                                         onReorder: (oldIdx, newIdx) =>
-                                            _onReorderCategoria(
-                                              grupos[nombre]!,
-                                              oldIdx,
-                                              newIdx,
-                                            ),
+                                          _onReorderCategoria(
+                                            prodsEnCat, // 👈 Pasa la lista segura directamente sin operadores '!'
+                                            oldIdx,
+                                            newIdx,
+                                          ),
                                         itemBuilder: (ctx, i) =>
                                             construirTarjeta(
                                               ctx,
@@ -5383,11 +5457,12 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                                         ),
                                     itemCount: grupos['_sin_categoria']!.length,
                                     onReorder: (oldIdx, newIdx) =>
-                                        _onReorderCategoria(
-                                          grupos['_sin_categoria']!,
-                                          oldIdx,
-                                          newIdx,
-                                        ),
+                                      _onReorderCategoria(
+                                        grupos['_sin_categoria'] ??
+                                            [], // 👈 Evita el error nulo
+                                        oldIdx,
+                                        newIdx,
+                                      ),
                                     itemBuilder: (ctx, i) => construirTarjeta(
                                       ctx,
                                       grupos['_sin_categoria']![i],
@@ -5438,8 +5513,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                     const SizedBox(key: ValueKey('spacer_end'), height: 100),
                   ],
                 ),
-              ),
-            );
+              ); // 👈 Cierra ReorderableListView y RawScrollbar (sin el Listener)
           }(),
         ),
       ],

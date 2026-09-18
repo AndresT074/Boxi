@@ -65,6 +65,7 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
   List<Map<String, dynamic>> _tarjetasFidelidad = [];
   int? _tarjetaFidelidadSeleccionada;
   List<Map<String, dynamic>> _topClientesFidelidad = [];
+  int _limiteFidelidad = 5; // 👈 NUEVO: Filtro para Top 3, Top 5, Top 10
 
   String _filtroProveedores = 'Semana';
   int _limiteProveedores = 5;
@@ -1236,17 +1237,22 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
         }
         _tarjetaFidelidadSeleccionada = targetId;
 
-        final qPuntos = await db.rawQuery('''
+        final qPuntos = await db.rawQuery(
+          '''
           SELECT c.nombre_completo, c.nombre_negocio, c.telefono, 
-                 p.puntos_actuales, p.completadas_totales, 
+                 MAX(p.puntos_actuales) as puntos_actuales, 
+                 MAX(p.completadas_totales) as completadas_totales, 
                  t.meta_compras, t.titulo as tarjeta_titulo, t.premio_descripcion
           FROM puntos_clientes p
           JOIN clientes c ON p.cliente_id = c.id
           JOIN tarjetas_fidelidad t ON p.tarjeta_id = t.id
           WHERE p.tarjeta_id = ? AND (p.puntos_actuales > 0 OR p.completadas_totales > 0)
-          ORDER BY p.completadas_totales DESC, p.puntos_actuales DESC
-          LIMIT 10
-        ''', [targetId]);
+          GROUP BY LOWER(TRIM(c.nombre_completo)) -- 👈 Deduplica para que jamás se repita un cliente
+          ORDER BY completadas_totales DESC, puntos_actuales DESC
+          LIMIT $_limiteFidelidad -- 👈 Aplica el límite dinámico
+        ''',
+          [targetId],
+        );
 
         topPuntos = List<Map<String, dynamic>>.from(qPuntos);
       }
@@ -1498,67 +1504,144 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Selector de Tarjeta
+            // Selectores de Tarjeta y Límite (Top 3, 5, 10)
             Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Icon(
-                  Icons.card_giftcard_rounded,
-                  size: 18,
-                  color: Color(0xFF0D47A1),
-                ),
-                const SizedBox(width: 8),
-                const Text(
-                  "Tarjeta:",
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.grey,
-                  ),
-                ),
-                const SizedBox(width: 8),
                 Expanded(
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10),
-                    decoration: BoxDecoration(
-                      color: isOscuro
-                          ? Colors.white.withOpacity(0.05)
-                          : Colors.grey.shade100,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(
-                        color: isOscuro ? Colors.white10 : Colors.grey.shade300,
+                  child: Row(
+                    children: [
+                      const Icon(
+                        Icons.card_giftcard_rounded,
+                        size: 16,
+                        color: Color(0xFF0D47A1),
                       ),
-                    ),
-                    child: DropdownButton<int>(
-                      isExpanded: true,
-                      value: _tarjetaFidelidadSeleccionada,
-                      dropdownColor: isOscuro
-                          ? const Color(0xFF0F172A)
-                          : Colors.white,
-                      style: TextStyle(
-                        color: isOscuro
-                            ? Colors.cyanAccent
-                            : const Color(0xFF0D47A1),
-                        fontWeight: FontWeight.bold,
-                        fontSize: 12,
+                      const SizedBox(width: 6),
+                      const Text(
+                        "Tarjeta:",
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.grey,
+                        ),
                       ),
-                      underline: const SizedBox(),
-                      items: _tarjetasFidelidad.map((t) {
-                        return DropdownMenuItem<int>(
-                          value: t['id'] as int,
-                          child: Text(
-                            "${t['titulo']} (Meta: ${t['meta_compras']})",
-                            overflow: TextOverflow.ellipsis,
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          decoration: BoxDecoration(
+                            color: isOscuro
+                                ? Colors.white.withOpacity(0.05)
+                                : Colors.grey.shade100,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                              color: isOscuro
+                                  ? Colors.white10
+                                  : Colors.grey.shade300,
+                            ),
                           ),
-                        );
-                      }).toList(),
-                      onChanged: (val) {
-                        if (val != null) {
-                          setState(() => _tarjetaFidelidadSeleccionada = val);
-                          _cargarDatosGraficos();
-                        }
-                      },
-                    ),
+                          child: DropdownButton<int>(
+                            isExpanded: true,
+                            menuWidth:
+                                280, // 👈 Hace que el menú desplegable se abra amplio
+                            menuMaxHeight: 350,
+                            value: _tarjetaFidelidadSeleccionada,
+                            dropdownColor: isOscuro
+                                ? const Color(0xFF0F172A)
+                                : Colors.white,
+                            style: TextStyle(
+                              color: isOscuro
+                                  ? Colors.cyanAccent
+                                  : const Color(0xFF0D47A1),
+                              fontWeight: FontWeight.bold,
+                              fontSize: 12,
+                            ),
+                            underline: const SizedBox(),
+                            items: _tarjetasFidelidad.map((t) {
+                              return DropdownMenuItem<int>(
+                                value: t['id'] as int,
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 4,
+                                  ),
+                                  child: Text(
+                                    "${t['titulo']} (${t['meta_compras']} sellos)",
+                                    maxLines:
+                                        2, // 👈 Permite leer nombres largos completos
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              );
+                            }).toList(),
+                            onChanged: (val) {
+                              if (val != null) {
+                                setState(
+                                  () => _tarjetaFidelidadSeleccionada = val,
+                                );
+                                _cargarDatosGraficos();
+                              }
+                            },
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
+                ),
+                const SizedBox(width: 8),
+                Row(
+                  children: [
+                    const Text(
+                      "Mostrar:",
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.grey,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      decoration: BoxDecoration(
+                        color: isOscuro
+                            ? Colors.white.withOpacity(0.05)
+                            : Colors.grey.shade100,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: isOscuro
+                              ? Colors.white10
+                              : Colors.grey.shade300,
+                        ),
+                      ),
+                      child: DropdownButton<int>(
+                        value: _limiteFidelidad,
+                        dropdownColor: isOscuro
+                            ? const Color(0xFF0F172A)
+                            : Colors.white,
+                        style: TextStyle(
+                          color: isOscuro
+                              ? Colors.cyanAccent
+                              : const Color(0xFF0D47A1),
+                          fontWeight: FontWeight.bold,
+                          fontSize: 11,
+                        ),
+                        underline: const SizedBox(),
+                        items: [3, 5, 10]
+                            .map(
+                              (e) => DropdownMenuItem(
+                                value: e,
+                                child: Text("Top $e"),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: (v) {
+                          if (v != null) {
+                            setState(() => _limiteFidelidad = v);
+                            _cargarDatosGraficos();
+                          }
+                        },
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
