@@ -538,7 +538,7 @@ class ServicioRespaldo {
       SnackBar(content: Text("❌ $msg"), backgroundColor: Colors.red),
     );
   }
-  // 🧹 LIMPIEZA PROFUNDA DE CLONES EN CELULAR Y EN REALTIME DATABASE
+  // 🧹 LIMPIEZA PROFUNDA Y DEFINITIVA DE PEDIDOS Y DETALLES CLONADOS
   static Future<void> repararYDesduplicarPedidos(BuildContext context) async {
     try {
       final db = await DBHelper.instance.database;
@@ -568,17 +568,16 @@ class ServicioRespaldo {
             .trim()
             .toLowerCase();
 
-        // Clave única sin cliente_id para que no ignore los clientes clonados
         String clave = "${fecha}_${nombre}_${total.toStringAsFixed(0)}";
 
         if (pedidosVistos.contains(clave)) {
-          pedidosABorrar.add(id); // Es clon -> se borra
+          pedidosABorrar.add(id);
         } else {
-          pedidosVistos.add(clave); // Es el original -> se conserva
+          pedidosVistos.add(clave);
         }
       }
 
-      // Borramos los pedidos clonados y todos sus detalles
+      // Borrar pedidos clonados y sus detalles
       Batch batchPedidos = db.batch();
       for (int pedId in pedidosABorrar) {
         batchPedidos.delete('pedidos', where: 'id = ?', whereArgs: [pedId]);
@@ -591,13 +590,14 @@ class ServicioRespaldo {
       await batchPedidos.commit(noResult: true);
 
       // =========================================================================
-      // 2. ELIMINAR PRODUCTOS DUPLICADOS DENTRO DEL MISMO PEDIDO (Elimina el 50%)
+      // 2. DESDUPLICAR DETALLES CON JOIN A PRODUCTOS (Resuelve nombres nulos)
       // =========================================================================
       final todosDetalles = await db.rawQuery('''
-        SELECT id, pedido_id, producto_id, cantidad,
-               COALESCE(NULLIF(TRIM(nombre_snapshot), ''), 'producto') as nombre_prod
-        FROM detalle_pedidos
-        ORDER BY id ASC
+        SELECT d.id, d.pedido_id, d.producto_id, d.cantidad, d.precio_unitario,
+               LOWER(TRIM(COALESCE(NULLIF(d.nombre_snapshot, ''), NULLIF(p.nombre, ''), 'prod'))) as nombre_resuelto
+        FROM detalle_pedidos d
+        LEFT JOIN productos p ON d.producto_id = p.id
+        ORDER BY d.id ASC
       ''');
 
       Set<String> detallesVistos = {};
@@ -606,18 +606,20 @@ class ServicioRespaldo {
       for (var d in todosDetalles) {
         int id = d['id'] as int;
         int pedId = (d['pedido_id'] as num?)?.toInt() ?? 0;
-        String nom = (d['nombre_prod'] ?? '').toString().trim().toLowerCase();
+        int prodId = (d['producto_id'] as num?)?.toInt() ?? 0;
+        String nom = d['nombre_resuelto'].toString();
         int cant = (d['cantidad'] as num?)?.toInt() ?? 1;
 
-        // Clave por ítem dentro del pedido: Mismo Pedido + Mismo Nombre + Misma Cantidad
-        String claveDetalle = "${pedId}_${nom}_$cant";
+        // Si tiene producto_id válido usamos el id del producto; si no, el nombre resuelto
+        String idOIdentificador = prodId > 0 ? "prod_$prodId" : nom;
+        String claveDetalle = "${pedId}_${idOIdentificador}_$cant";
 
         if (detallesVistos.contains(claveDetalle)) {
           detallesABorrar.add(
             id,
-          ); // Clon del producto dentro del pedido -> se borra
+          ); // Es clon exacto dentro del mismo pedido -> borrar
         } else {
-          detallesVistos.add(claveDetalle); // Original -> se conserva
+          detallesVistos.add(claveDetalle);
         }
       }
 
@@ -631,28 +633,31 @@ class ServicioRespaldo {
       }
       await batchDetalles.commit(noResult: true);
 
-      // Limpieza de huérfanos residuales
+      // =========================================================================
+      // 3. LIMPIEZA DE HUÉRFANOS RESIDUALES
+      // =========================================================================
       await db.rawDelete(
         'DELETE FROM detalle_pedidos WHERE pedido_id NOT IN (SELECT id FROM pedidos)',
       );
 
       // =========================================================================
-      // 3. LIMPIAR DESCUENTOS FALSOS EN DETALLES RESIDUALES
+      // 4. RESTABLECER PRECIO UNITARIO Y ELIMINAR EL FALSO DESCUENTO (-50%)
       // =========================================================================
-      // Si el subtotal de los productos ya cuadra con el total del pedido, elimina el falso 50%
+      // Ponemos descuento = 0 y recalculamos subtotal para que coincida exactamente
       await db.rawUpdate('''
         UPDATE detalle_pedidos 
-        SET descuento = 0 
+        SET descuento = 0,
+            subtotal = (precio_unitario * cantidad)
         WHERE pedido_id IN (
-          SELECT pedidos.id FROM pedidos 
-          JOIN detalle_pedidos ON pedidos.id = detalle_pedidos.pedido_id 
-          GROUP BY pedidos.id 
-          HAVING COUNT(detalle_pedidos.id) = 1 AND pedidos.total_venta = detalle_pedidos.precio_unitario
+          SELECT p.id FROM pedidos p
+          JOIN detalle_pedidos d ON p.id = d.pedido_id
+          GROUP BY p.id
+          HAVING COUNT(d.id) = 1
         )
       ''');
 
       // =========================================================================
-      // 4. SUBIR BASE DE DATOS LIMPIA A REALTIME DATABASE
+      // 5. SINCRONIZAR A REALTIME DATABASE
       // =========================================================================
       final prefs = await SharedPreferences.getInstance();
       if (prefs.getBool('es_premium') ?? false) {
@@ -666,7 +671,7 @@ class ServicioRespaldo {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              "✅ Éxito: Se eliminaron $pedidosTotalBorrados pedidos repetidos y $totalBorrados productos duplicados. Descuentos corregidos.",
+              "✅ Limpieza completada: se eliminaron $pedidosTotalBorrados pedidos repetidos y $totalBorrados productos duplicados.",
             ),
             backgroundColor: Colors.green,
             duration: const Duration(seconds: 4),
