@@ -16,105 +16,270 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'servicio_fidelidad.dart';
 import 'servicio_respaldo.dart';
 import 'package:url_launcher/url_launcher.dart';
+String _localBoxiPathGlobal = "/storage/emulated/0/Pictures/Boxi";
 
-final Map<String, Uint8List> _imageCache = {};
-String _localBoxiPathGlobal = "/storage/emulated/0/Pictures/Boxi"; // 🔥 Añadido para gestionar la ruta offline
+// 🔣 FORMATEO DE DESCUENTOS EXACTOS COMO EN PANTALLA PRINCIPAL (Ej: 13.333)
+String formatearDescuento(double pct) {
+  if (pct <= 0) return "0";
+  if (pct == pct.roundToDouble()) return pct.toInt().toString();
+  return pct
+      .toStringAsFixed(4)
+      .replaceAll(RegExp(r'0+$'), '')
+      .replaceAll(RegExp(r'\.$'), '');
+}
+
+String? _obtenerRutaFisicaLegibleSync(String urlOPath) {
+  if (urlOPath.isEmpty) return null;
+  if (!urlOPath.startsWith('http')) {
+    try {
+      final f = File(urlOPath);
+      if (f.existsSync() && f.lengthSync() > 0) return urlOPath;
+    } catch (_) {}
+    return null;
+  }
+
+  String rawName = urlOPath.split('/').last.split('?').first;
+  String nameWithExt = rawName.contains('.') ? rawName : '$rawName.jpg';
+  String id = rawName.split('.').first;
+
+  final candidatos = [
+    File('$_localBoxiPathGlobal/$nameWithExt'),
+    File('$_localBoxiPathGlobal/$id.png'),
+    File('$_localBoxiPathGlobal/$id.jpg'),
+    File('$_localBoxiPathGlobal/Variantes/$nameWithExt'),
+    File('$_localBoxiPathGlobal/Variantes/$id.png'),
+    File('$_localBoxiPathGlobal/Variantes/$id.jpg'),
+  ];
+
+  for (var f in candidatos) {
+    try {
+      if (f.existsSync() && f.lengthSync() > 0) {
+        return f.path;
+      }
+    } catch (_) {}
+  }
+  return null;
+}
+
+final Map<String, String?> _cacheRutasFotos = {};
+
+class MiniaturaItemPedido extends StatefulWidget {
+  final String? fotoInicial;
+  final int? productoId;
+  final String nombreProd;
+  final bool isOscuro;
+
+  const MiniaturaItemPedido({
+    super.key,
+    this.fotoInicial,
+    this.productoId,
+    required this.nombreProd,
+    required this.isOscuro,
+  });
+
+  @override
+  State<MiniaturaItemPedido> createState() => _MiniaturaItemPedidoState();
+}
+
+class _MiniaturaItemPedidoState extends State<MiniaturaItemPedido> {
+  String? _fotoFinal;
+  bool _cargando = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _resolverFoto();
+  }
+
+  Future<void> _resolverFoto() async {
+    String cacheKey = "${widget.productoId}_${widget.nombreProd}";
+    if (_cacheRutasFotos.containsKey(cacheKey)) {
+      if (mounted) {
+        setState(() {
+          _fotoFinal = _cacheRutasFotos[cacheKey];
+          _cargando = false;
+        });
+      }
+      return;
+    }
+
+    String? foto = widget.fotoInicial;
+
+    // Si no vino foto inicial válida, buscar en la BD SQLite por ID o por Nombre
+    if (foto == null || foto.isEmpty || foto == "null") {
+      try {
+        final db = await DBHelper.instance.database;
+        // 1. Buscar por producto_id
+        if (widget.productoId != null && widget.productoId! > 0) {
+          final resId = await db.query(
+            'productos',
+            columns: ['foto_path'],
+            where: 'id = ?',
+            whereArgs: [widget.productoId],
+            limit: 1,
+          );
+          if (resId.isNotEmpty && resId.first['foto_path'] != null) {
+            foto = resId.first['foto_path'].toString();
+          }
+        }
+
+        // 2. Si no se encontró, buscar por el Nombre exacto del producto
+        if (foto == null || foto.isEmpty || foto == "null") {
+          String nombreLimpio = widget.nombreProd.split(" - ").first.trim();
+          final resNom = await db.rawQuery(
+            'SELECT foto_path FROM productos WHERE LOWER(TRIM(nombre)) = ? LIMIT 1',
+            [nombreLimpio.toLowerCase()],
+          );
+          if (resNom.isNotEmpty && resNom.first['foto_path'] != null) {
+            foto = resNom.first['foto_path'].toString();
+          }
+        }
+      } catch (_) {}
+    }
+
+    _cacheRutasFotos[cacheKey] = foto;
+    if (mounted) {
+      setState(() {
+        _fotoFinal = foto;
+        _cargando = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_cargando) {
+      return Container(
+        width: 45,
+        height: 45,
+        decoration: BoxDecoration(
+          color: widget.isOscuro ? Colors.white10 : Colors.grey.shade200,
+          borderRadius: BorderRadius.circular(8),
+        ),
+      );
+    }
+    return _construirMiniaturaSegura(_fotoFinal, widget.isOscuro);
+  }
+}
 
 Widget _construirMiniatura(String? pathOrBase64, bool isOscuro) {
-  if (pathOrBase64 == null || pathOrBase64.trim().isEmpty || pathOrBase64 == 'null') {
+  return _construirMiniaturaSegura(pathOrBase64, isOscuro);
+}
+
+Widget _construirMiniaturaSegura(String? pathOrBase64, bool isOscuro) {
+  if (pathOrBase64 == null ||
+      pathOrBase64.trim().isEmpty ||
+      pathOrBase64 == 'null') {
     return Container(
-      width: 45, height: 45,
+      width: 45,
+      height: 45,
       decoration: BoxDecoration(
         color: isOscuro ? Colors.white10 : Colors.grey.shade200,
         borderRadius: BorderRadius.circular(8),
       ),
-      child: Icon(Icons.image_not_supported,
-          size: 20, color: isOscuro ? Colors.white38 : Colors.black26),
+      child: Icon(
+        Icons.image_not_supported_outlined,
+        size: 20,
+        color: isOscuro ? Colors.white38 : Colors.black26,
+      ),
     );
   }
 
-  // 🔥 1. SI ES UNA URL DE CLOUDINARY
-  if (pathOrBase64.startsWith('http')) {
-    String name = pathOrBase64.split('/').last;
-    if (!name.contains('.')) name += '.jpg';
-    
-    File fPub = File('$_localBoxiPathGlobal/$name');
-    File fVar = File('$_localBoxiPathGlobal/Variantes/$name');
-    
-    bool fPubLegible = false;
-    try { if (fPub.existsSync()) { fPub.readAsBytesSync(); fPubLegible = true; } } catch(_) {}
-    
-    bool fVarLegible = false;
-    try { if (fVar.existsSync()) { fVar.readAsBytesSync(); fVarLegible = true; } } catch(_) {}
+  // 1. Archivo físico local resuelto
+  String? localPath = _obtenerRutaFisicaLegibleSync(pathOrBase64);
+  if (localPath != null) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: Image.file(
+        File(localPath),
+        width: 45,
+        height: 45,
+        fit: BoxFit.cover,
+        gaplessPlayback: true,
+        errorBuilder: (_, __, ___) =>
+            _miniaturaWebOBase64(pathOrBase64, isOscuro),
+      ),
+    );
+  }
 
-    if (fVarLegible) {
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(8),
-        child: Image.file(fVar, width: 45, height: 45, fit: BoxFit.cover, gaplessPlayback: true),
-      );
-    } else if (fPubLegible) {
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(8),
-        child: Image.file(fPub, width: 45, height: 45, fit: BoxFit.cover, gaplessPlayback: true),
-      );
-    }
-    
-    // Si no está offline, cargar de internet
+  return _miniaturaWebOBase64(pathOrBase64, isOscuro);
+}
+
+Widget _miniaturaWebOBase64(String pathOrBase64, bool isOscuro) {
+  if (pathOrBase64.startsWith('http')) {
     return ClipRRect(
       borderRadius: BorderRadius.circular(8),
       child: Image.network(
-        pathOrBase64, width: 45, height: 45, fit: BoxFit.cover, gaplessPlayback: true,
-        errorBuilder: (context, error, stackTrace) => Container(
-          width: 45, height: 45,
-          decoration: BoxDecoration(color: isOscuro ? Colors.white10 : Colors.grey.shade200, borderRadius: BorderRadius.circular(8)),
-          child: Icon(Icons.broken_image, size: 20, color: isOscuro ? Colors.white38 : Colors.black26),
+        pathOrBase64,
+        width: 45,
+        height: 45,
+        fit: BoxFit.cover,
+        gaplessPlayback: true,
+        errorBuilder: (_, __, ___) => Container(
+          width: 45,
+          height: 45,
+          decoration: BoxDecoration(
+            color: isOscuro ? Colors.white10 : Colors.grey.shade200,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Icon(
+            Icons.broken_image,
+            size: 20,
+            color: isOscuro ? Colors.white38 : Colors.black26,
+          ),
         ),
       ),
     );
   }
 
-  // 🔥 2. SI ES UN TEXTO BASE64 LARGO (Retrocompatibilidad)
-  if (pathOrBase64.length > 500) {
+  if (pathOrBase64.length > 100) {
     try {
       String cleanBase64 = pathOrBase64;
       if (cleanBase64.contains(',')) cleanBase64 = cleanBase64.split(',').last;
       cleanBase64 = cleanBase64.replaceAll(RegExp(r'\s+'), '');
 
-      Uint8List bytes;
-      if (_imageCache.containsKey(cleanBase64)) {
-        bytes = _imageCache[cleanBase64]!;
-      } else {
-        bytes = base64Decode(cleanBase64);
-        if (_imageCache.length > 200) _imageCache.clear();
-        _imageCache[cleanBase64] = bytes;
-      }
-
+      Uint8List bytes = base64Decode(cleanBase64);
       return ClipRRect(
         borderRadius: BorderRadius.circular(8),
-        child: Image.memory(bytes, width: 45, height: 45, fit: BoxFit.cover, gaplessPlayback: true),
+        child: Image.memory(
+          bytes,
+          width: 45,
+          height: 45,
+          fit: BoxFit.cover,
+          gaplessPlayback: true,
+        ),
       );
     } catch (_) {}
   }
 
-  // 🔥 3. SI ES UNA RUTA DE ARCHIVO LOCAL DIRECTA
   try {
-    File file = File(pathOrBase64);
-    if (file.existsSync()) {
-      file.readAsBytesSync();
+    File f = File(pathOrBase64);
+    if (f.existsSync()) {
       return ClipRRect(
         borderRadius: BorderRadius.circular(8),
-        child: Image.file(file, width: 45, height: 45, fit: BoxFit.cover, gaplessPlayback: true),
+        child: Image.file(
+          f,
+          width: 45,
+          height: 45,
+          fit: BoxFit.cover,
+          gaplessPlayback: true,
+        ),
       );
     }
   } catch (_) {}
 
   return Container(
-    width: 45, height: 45,
+    width: 45,
+    height: 45,
     decoration: BoxDecoration(
       color: isOscuro ? Colors.white10 : Colors.grey.shade200,
       borderRadius: BorderRadius.circular(8),
     ),
-    child: Icon(Icons.broken_image, size: 20, color: isOscuro ? Colors.white38 : Colors.black26),
+    child: Icon(
+      Icons.broken_image,
+      size: 20,
+      color: isOscuro ? Colors.white38 : Colors.black26,
+    ),
   );
 }
 
@@ -624,16 +789,20 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     }
     double totalRealProductos = totalCobrado - domi;
 
-    final resultado = await db.rawQuery('''
+    final resultado = await db.rawQuery(
+      '''
       SELECT d.*,
             IFNULL(d.nombre_snapshot, IFNULL(p.nombre, "Producto")) as nombre_prod,
+            p.foto_path as prod_foto_base,
             p.variantes as prod_variantes,
             p.nombre as prod_nombre_base,
             p.stock as stock_actual_general
       FROM detalle_pedidos d
       LEFT JOIN productos p ON d.producto_id = p.id
       WHERE d.pedido_id = ?
-    ''', [pedId]);
+    ''',
+      [pedId],
+    );
 
     List<Map<String, dynamic>> detallesEditables =
         resultado.map((e) => Map<String, dynamic>.from(e)).toList();
@@ -648,9 +817,13 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     bool algunItemTieneDescuento = detallesEditables.any((d) => ((d['descuento'] as num?)?.toDouble() ?? 0.0) > 0);
 
     double descGlobalFaltante = 0.0;
-    if (!algunItemTieneDescuento && subtotalSinDescuento > 0 && totalRealProductos > 0 && (subtotalSinDescuento - totalRealProductos) > 1.0) {
-      double rawDesc = ((subtotalSinDescuento - totalRealProductos) / subtotalSinDescuento) * 100;
-      descGlobalFaltante = double.parse(rawDesc.toStringAsFixed(2));
+    if (!algunItemTieneDescuento &&
+        subtotalSinDescuento > 0 &&
+        totalRealProductos > 0 &&
+        (subtotalSinDescuento - totalRealProductos) > 0.1) {
+      descGlobalFaltante =
+          ((subtotalSinDescuento - totalRealProductos) / subtotalSinDescuento) *
+          100;
     }
 
     for (var d in detallesEditables) {
@@ -698,8 +871,20 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
         if (stockBase < 0) d['sin_stock'] = 1;
       }
 
-      // Pre-carga de fotos
-      d['foto_data'] = await _obtenerFotoDetalleEstatico(db, d['producto_id'] as int, d['nombre_prod']?.toString() ?? '');
+      // Pre-carga de fotos con fallback seguro
+      int? pId = d['producto_id'] != null
+          ? (d['producto_id'] as num).toInt()
+          : null;
+      if (pId != null && pId > 0) {
+        String? fFound = await _obtenerFotoDetalleEstatico(
+          db,
+          pId,
+          d['nombre_prod']?.toString() ?? '',
+        );
+        d['foto_data'] = fFound ?? d['prod_foto_base'];
+      } else {
+        d['foto_data'] = d['prod_foto_base'];
+      }
     }
     return detallesEditables;
   }
@@ -797,7 +982,6 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     );
   }
 
-  // Consulta de SQLite rápida y estática para las imágenes
   Future<String?> _obtenerFotoDetalleEstatico(
     dynamic db,
     int productoId,
@@ -813,7 +997,10 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
       );
 
       if (prod.isNotEmpty) {
+        String fotoProd = prod.first['foto_path']?.toString() ?? "";
         String varStr = prod.first['variantes']?.toString() ?? "";
+
+        // 1. Si es variante, buscar coincidencia en fotos_variantes
         if (varStr.length > 5 && nombreSnapshot.contains(" - ")) {
           String nombreOpc = nombreSnapshot
               .split(' - ')
@@ -824,23 +1011,53 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
             nombreOpc = nombreOpc.split(': ').last.trim();
 
           try {
-            var dec = jsonDecode(varStr);
-            if (dec is List) {
-              for (var g in dec) {
-                if (g is Map && g['opciones'] is List) {
-                  for (var o in g['opciones']) {
-                    if (o is Map) {
-                      String opcNombre = (o['nombre'] ?? '')
-                          .toString()
-                          .trim()
-                          .toLowerCase();
-                      if (opcNombre.isNotEmpty &&
-                          (opcNombre == nombreOpc ||
-                              nombreSnapshot.toLowerCase().contains(
-                                opcNombre,
-                              ))) {
-                        String fotoVar = o['foto_path']?.toString() ?? "";
-                        if (fotoVar.isNotEmpty) return fotoVar;
+            final fVars = await db.query(
+              'fotos_variantes',
+              where: 'producto_id = ?',
+              whereArgs: [productoId],
+            );
+
+            if (fVars.isNotEmpty) {
+              var dec = jsonDecode(varStr);
+              var grupos =
+                  (dec is List &&
+                      dec.isNotEmpty &&
+                      !dec[0].containsKey('grupo'))
+                  ? [
+                      {'opciones': dec},
+                    ]
+                  : dec;
+
+              if (grupos is List) {
+                for (int gIdx = 0; gIdx < grupos.length; gIdx++) {
+                  var g = grupos[gIdx];
+                  if (g is Map && g['opciones'] is List) {
+                    var opciones = g['opciones'] as List;
+                    for (int oIdx = 0; oIdx < opciones.length; oIdx++) {
+                      var o = opciones[oIdx];
+                      if (o is Map) {
+                        String opcNom = (o['nombre'] ?? '')
+                            .toString()
+                            .trim()
+                            .toLowerCase();
+                        if (opcNom.isNotEmpty &&
+                            (opcNom == nombreOpc ||
+                                nombreSnapshot.toLowerCase().contains(
+                                  opcNom,
+                                ))) {
+                          var match = fVars.where(
+                            (f) =>
+                                f['grupo_index'] == gIdx &&
+                                f['opcion_index'] == oIdx,
+                          );
+                          if (match.isNotEmpty) {
+                            String fBase =
+                                match.first['foto_base64']?.toString() ?? "";
+                            if (fBase.isNotEmpty) return fBase;
+                          }
+                          String fPath = o['foto_path']?.toString() ?? "";
+                          if (fPath.isNotEmpty) return fPath;
+                        }
                       }
                     }
                   }
@@ -849,7 +1066,9 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
             }
           } catch (_) {}
         }
-        return prod.first['foto_path'] as String?;
+
+        // 2. Si no hay variante o no tiene foto individual, retornar la foto principal
+        if (fotoProd.isNotEmpty && fotoProd != "null") return fotoProd;
       }
     } catch (_) {}
     return null;
@@ -2132,14 +2351,17 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
       if (val == null) return "";
       double d = (val as num).toDouble();
       if (d <= 0) return "";
-      return (d == d.roundToDouble()) ? d.toInt().toString() : d.toStringAsFixed(2);
+      return formatearDescuento(d);
     }
 
-    TextEditingController domiCtrl =
-        TextEditingController(text: formatearInicial(pedido['valor_domicilio'] ?? 0));
+    TextEditingController domiCtrl = TextEditingController(
+      text: formatearInicial(pedido['valor_domicilio'] ?? 0),
+    );
     final Map<int, TextEditingController> descCtrls = {};
     for (var item in detalles) {
-      descCtrls[item['id'] as int] = TextEditingController(text: formatearInicial(item['descuento'] ?? 0));
+      descCtrls[item['id'] as int] = TextEditingController(
+        text: formatearInicial(item['descuento'] ?? 0),
+      );
     }
 
     showDialog(
@@ -2147,333 +2369,578 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
       barrierDismissible: false,
       builder: (ctx) => StatefulBuilder(
         builder: (context, setSt) {
-          double subtotalProds =
-              detalles.fold(0, (sum, i) => sum + (i['subtotal'] as num).toDouble());
+          double subtotalProds = detalles.fold(
+            0,
+            (sum, i) => sum + (i['subtotal'] as num).toDouble(),
+          );
           double domiActual = double.tryParse(domiCtrl.text) ?? 0;
 
-          return GestureDetector(
-            onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
-            child: AlertDialog(
-              backgroundColor: Theme.of(context).cardColor,
-            insetPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 20),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(25)),
-            title: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text("Editar Pedido",
-                    style: TextStyle(
-                        color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1),
-                        fontWeight: FontWeight.bold,
-                        fontSize: 20)),
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                        icon: const Icon(Icons.add_circle, color: Colors.green, size: 30),
-                        tooltip: "Añadir producto",
-                        onPressed: () =>
-                            _buscarYAgregar(pedId, setSt, (newList) => detalles = newList)),
-                    IconButton(
-                        icon: Icon(Icons.close,
-                            color: isOscuro ? Colors.white54 : Colors.grey, size: 26),
-                        tooltip: "Cerrar",
-                        onPressed: () => Navigator.pop(ctx)), // 🔥 BOTÓN X PARA SALIR
-                  ],
-                ),
-              ],
+          return Dialog(
+            backgroundColor: Theme.of(context).cardColor,
+            insetPadding: const EdgeInsets.symmetric(
+              horizontal: 14,
+              vertical: 20,
             ),
-            content: SizedBox(
-              width: MediaQuery.of(context).size.width * 0.9,
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    TextField(
-                      controller: domiCtrl,
-                      keyboardType: TextInputType.number,
-                      style: TextStyle(color: isOscuro ? Colors.white : Colors.black),
-                      decoration: InputDecoration(
-                        labelText: "Costo de Domicilio",
-                        hintText: "0",
-                        labelStyle:
-                            TextStyle(color: isOscuro ? Colors.white60 : Colors.black54),
-                        prefixIcon: const Icon(Icons.motorcycle, color: Colors.blue),
-                        border: const OutlineInputBorder(),
-                      ),
-                      onChanged: (v) => setSt(() {}),
-                    ),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: TextButton.icon(
-                        icon: const Icon(Icons.percent, size: 16, color: Colors.orange),
-                        label: const Text("Aplicar % a todo",
-                            style: TextStyle(
-                                color: Colors.orange, fontWeight: FontWeight.bold)),
-                        onPressed: () => _promptDescuentoGlobal(
-                            pedId, detalles, setSt, (newList) => detalles = newList),
-                      ),
-                    ),
-                    const Divider(height: 30),
-                    ...detalles.map((item) {
-                      final int idDetalle = item['id'] as int;
-                      if (!descCtrls.containsKey(idDetalle)) {
-                        descCtrls[idDetalle] = TextEditingController(
-                            text: formatearInicial(item['descuento'] ?? 0));
-                      }
-                      final descCtrl = descCtrls[idDetalle]!;
-                      bool tieneVariantes = item['prod_variantes'] != null &&
-                          item['prod_variantes'].toString().length > 5;
-                      double pUnitario = (item['precio_unitario'] as num).toDouble();
-                      double dPct = (item['descuento'] ?? 0).toDouble();
-                      int cant = (item['cantidad'] as int);
-                      double subtotalItem = (pUnitario - (pUnitario * (dPct / 100))) * cant;
-
-                      return Card(
-                        margin: const EdgeInsets.only(bottom: 15),
-                        color: isOscuro
-                            ? Colors.white.withOpacity(0.05)
-                            : Colors.grey.shade50,
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(15),
-                            side: BorderSide(
-                                color: isOscuro ? Colors.white10 : Colors.black12)),
-                        child: Padding(
-                          padding: const EdgeInsets.all(12),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              // 🔥 AQUÍ SE ARREGLA EL PARPADEO. Se usa foto_data directo.
-                              Row(
-                                children: [
-                                  _construirMiniatura(item['foto_data']?.toString(), isOscuro),
-                                  const SizedBox(width: 12),
-                                  Expanded(
-                                    child: Text(item['nombre_prod'],
-                                        style: TextStyle(
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 13,
-                                            color: isOscuro ? Colors.white : Colors.black87)),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 12),
-                              Row(
-                                children: [
-                                  Container(
-                                    decoration: BoxDecoration(
-                                        color: isOscuro ? Colors.white10 : Colors.white,
-                                        borderRadius: BorderRadius.circular(10),
-                                        border: Border.all(
-                                            color: isOscuro
-                                                ? Colors.white10
-                                                : Colors.black12)),
-                                    child: Row(
-                                      children: [
-                                        IconButton(
-                                            icon: const Icon(Icons.remove,
-                                                size: 18, color: Colors.red),
-                                            onPressed: () => _actualizarCantidadDetalle(
-                                                item, pedId, -1, setSt, (l) => detalles = l)),
-                                        Text("${item['cantidad']}",
-                                            style: const TextStyle(
-                                                fontWeight: FontWeight.bold, fontSize: 15)),
-                                        IconButton(
-                                            icon: const Icon(Icons.add,
-                                                size: 18, color: Colors.green),
-                                            onPressed: () => _actualizarCantidadDetalle(
-                                                item, pedId, 1, setSt, (l) => detalles = l)),
-                                      ],
-                                    ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Expanded(
-                                    child: TextField(
-                                      controller: descCtrl,
-                                      keyboardType: TextInputType.number,
-                                      textAlign: TextAlign.center,
-                                      style: TextStyle(
-                                          fontSize: 14,
-                                          fontWeight: FontWeight.bold,
-                                          color: isOscuro ? Colors.white : Colors.black),
-                                      decoration: InputDecoration(
-                                        hintText: "0",
-                                        labelText: "% Desc",
-                                        isDense: true,
-                                        contentPadding:
-                                            const EdgeInsets.symmetric(vertical: 10),
-                                        border: OutlineInputBorder(
-                                            borderRadius: BorderRadius.circular(8)),
-                                      ),
-                                      onChanged: (v) {
-                                        setSt(() {
-                                          double parsed = double.tryParse(v) ?? 0;
-                                          item['descuento'] = double.parse(parsed.toStringAsFixed(2));
-                                          double pU = (item['precio_unitario'] as num).toDouble();
-                                          double dP = (item['descuento'] as num).toDouble();
-                                          item['subtotal'] = (pU - (pU * (dP / 100))) * (item['cantidad'] as int);
-                                        });
-                                      },
-                                      onEditingComplete: () {
-                                        double val =
-                                            double.tryParse(descCtrl.text) ?? 0;
-                                        _actualizarDescuentoDetalle(
-                                            item, pedId, val, setSt, (l) => detalles = l);
-                                        FocusScope.of(context).unfocus();
-                                      },
-                                    ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      if (tieneVariantes)
-                                        IconButton(
-                                          icon: const Icon(Icons.swap_horiz,
-                                              color: Colors.orange, size: 24),
-                                          onPressed: () async {
-                                            // 🔥 Esperamos el mapa de datos limpios
-                                            final result = await _cambiarVariante(item, pedId);
-                                            if (result != null && mounted) {
-                                              setSt(() {
-                                                // Refleja en pantalla instantáneamente sin parpadeo
-                                                item['nombre_prod'] = result['nombreNueva'];
-                                                item['nombre_snapshot'] = result['nombreNueva'];
-                                                item['foto_data'] = result['fotoBase64']; 
-                                              });
-                                              // Ejecuta la BD en fondo con la info exacta, sin referenciar
-                                              _procesarCambioVarianteEnSegundoPlano(
-                                                  result['detalleId'], 
-                                                  result['productoId'], 
-                                                  result['cantidad'], 
-                                                  result['nombreViejo'], 
-                                                  result['nombreNueva'], 
-                                                  pedId);
-                                            }
-                                          },
-                                        ),
-                                      IconButton(
-                                          icon: const Icon(Icons.delete_outline,
-                                              color: Colors.redAccent, size: 24),
-                                          onPressed: () async {
-                                            if (item['producto_id'] != null) {
-                                              await _modificarStockBD(
-                                                  item['producto_id'] as int,
-                                                  -(item['cantidad'] as int),
-                                                  item['nombre_snapshot']?.toString());
-                                            }
-                                            final db = await DBHelper.instance.database;
-                                            await db.delete('detalle_pedidos',
-                                                where: 'id = ?', whereArgs: [item['id']]);
-                                            if (_esPremium)
-                                              ServicioNube.eliminarDetallePedidoNube(
-                                                  item['id']);
-                                            _recalcularTotal(pedId);
-                                            descCtrls.remove(item['id']); 
-                                            _actualizarVistaEditor(pedId, setSt, (newList) {
-                                              detalles = newList;
-                                            });
-                                          })
-                                    ],
-                                  )
-                                ],
-                              ),
-                              const SizedBox(height: 10),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 10, vertical: 4),
-                                decoration: BoxDecoration(
-                                    color: isOscuro
-                                        ? Colors.black26
-                                        : Colors.black.withOpacity(0.02),
-                                    borderRadius: BorderRadius.circular(8)),
-                                child: Row(
-                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                  children: [
-                                    Text("Subtotal ítem:",
-                                        style: TextStyle(
-                                            fontSize: 11,
-                                            color: isOscuro
-                                                ? Colors.white38
-                                                : Colors.black54)),
-                                    Text("\$${subtotalItem.toStringAsFixed(0)}",
-                                        style: TextStyle(
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 13,
-                                            color: isOscuro
-                                                ? Colors.greenAccent
-                                                : Colors.green.shade700)),
-                                  ],
-                                ),
-                              )
-                            ],
-                          ),
-                        ),
-                      );
-                    }).toList(),
-                  ],
-                ),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(25),
+            ),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: 480,
+                maxHeight: MediaQuery.of(context).size.height * 0.85,
               ),
-            ),
-            actions: [
-              Container(
-                padding: const EdgeInsets.all(15),
-                decoration: BoxDecoration(
-                    color: isOscuro
-                        ? Colors.white.withOpacity(0.05)
-                        : Colors.blue.shade50,
-                    borderRadius: BorderRadius.circular(15)),
-                child: Column(
-                  children: [
-                    Row(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 16, 12, 10),
+                    child: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        const Text("TOTAL FINAL:",
-                            style: TextStyle(
-                                fontWeight: FontWeight.bold, fontSize: 14)),
-                        Text("\$${(subtotalProds + domiActual).toStringAsFixed(0)}",
-                            style: const TextStyle(
-                                fontSize: 22,
-                                fontWeight: FontWeight.w900,
-                                color: Colors.green)),
+                        Text(
+                          "Editar Pedido",
+                          style: TextStyle(
+                            color: isOscuro
+                                ? Colors.cyanAccent
+                                : const Color(0xFF0D47A1),
+                            fontWeight: FontWeight.bold,
+                            fontSize: 20,
+                          ),
+                        ),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: const Icon(
+                                Icons.add_circle,
+                                color: Colors.green,
+                                size: 28,
+                              ),
+                              tooltip: "Añadir producto",
+                              onPressed: () => _buscarYAgregar(
+                                pedId,
+                                setSt,
+                                (newList) => detalles = newList,
+                              ),
+                            ),
+                            IconButton(
+                              icon: Icon(
+                                Icons.close,
+                                color: isOscuro ? Colors.white54 : Colors.grey,
+                                size: 24,
+                              ),
+                              tooltip: "Cerrar",
+                              onPressed: () => Navigator.pop(ctx),
+                            ),
+                          ],
+                        ),
                       ],
                     ),
-                    const SizedBox(height: 12),
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF0D47A1),
-                          minimumSize: const Size(double.infinity, 50),
-                          shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(15))),
-                      onPressed: () async { 
-                        for (var item in detalles) {
-                          int idDetalle = item['id'] as int;
-                          if (!descCtrls.containsKey(idDetalle)) {
-                            descCtrls[idDetalle] = TextEditingController(
-                                text: formatearInicial(item['descuento'] ?? 0));
-                          }
-                          double descActual =
-                              double.tryParse(descCtrls[idDetalle]!.text) ?? 0;
-                          await _actualizarDescuentoDetalle(
-                              item, pedId, descActual, setSt, (l) => detalles = l);
-                        }
-                        double valFinalDomi = double.tryParse(domiCtrl.text) ?? 0;
-                        await _actualizarDomicilio(pedId, valFinalDomi); // Esto internamente recalcula e invalida la caché
-                        
-                        if (mounted) {
-                          Navigator.pop(ctx);
-                          await _cargar(); // 🔥 Recarga el listado general con la caché limpia
-                        }
-                      },
-                      child: const Text("GUARDAR CAMBIOS",
-                          style: TextStyle(
-                              color: Colors.white, fontWeight: FontWeight.bold)),
+                  ),
+                  const Divider(height: 1),
+                  Flexible(
+                    child: SingleChildScrollView(
+                      physics: const ClampingScrollPhysics(),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 12,
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          TextField(
+                            controller: domiCtrl,
+                            keyboardType: const TextInputType.numberWithOptions(
+                              decimal: true,
+                              signed: false,
+                            ),
+                            enableSuggestions: false,
+                            autocorrect: false,
+                            textInputAction: TextInputAction.next,
+                            style: TextStyle(
+                              color: isOscuro ? Colors.white : Colors.black,
+                            ),
+                            decoration: InputDecoration(
+                              labelText: "Costo de Domicilio",
+                              hintText: "0",
+                              labelStyle: TextStyle(
+                                color: isOscuro
+                                    ? Colors.white60
+                                    : Colors.black54,
+                              ),
+                              prefixIcon: const Icon(
+                                Icons.motorcycle,
+                                color: Colors.blue,
+                              ),
+                              border: const OutlineInputBorder(),
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 12,
+                              ),
+                            ),
+                            onChanged: (v) => setSt(() {}),
+                          ),
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: TextButton.icon(
+                              icon: const Icon(
+                                Icons.percent,
+                                size: 16,
+                                color: Colors.orange,
+                              ),
+                              label: const Text(
+                                "Aplicar % a todo",
+                                style: TextStyle(
+                                  color: Colors.orange,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              onPressed: () => _promptDescuentoGlobal(
+                                pedId,
+                                detalles,
+                                setSt,
+                                (newList) => detalles = newList,
+                              ),
+                            ),
+                          ),
+                          const Divider(height: 16),
+                          ...detalles.map((item) {
+                            final int idDetalle = item['id'] as int;
+                            if (!descCtrls.containsKey(idDetalle)) {
+                              descCtrls[idDetalle] = TextEditingController(
+                                text: formatearInicial(item['descuento'] ?? 0),
+                              );
+                            }
+                            final descCtrl = descCtrls[idDetalle]!;
+                            bool tieneVariantes =
+                                item['prod_variantes'] != null &&
+                                item['prod_variantes'].toString().length > 5;
+                            double pUnitario = (item['precio_unitario'] as num)
+                                .toDouble();
+                            double dPct = (item['descuento'] ?? 0).toDouble();
+                            int cant = (item['cantidad'] as int);
+                            double subtotalItem =
+                                (pUnitario - (pUnitario * (dPct / 100))) * cant;
+
+                            return Card(
+                              margin: const EdgeInsets.only(bottom: 12),
+                              color: isOscuro
+                                  ? Colors.white.withOpacity(0.05)
+                                  : Colors.grey.shade50,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(15),
+                                side: BorderSide(
+                                  color: isOscuro
+                                      ? Colors.white10
+                                      : Colors.black12,
+                                ),
+                              ),
+                              child: Padding(
+                                padding: const EdgeInsets.all(12),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        MiniaturaItemPedido(
+                                          key: ValueKey(
+                                            "foto_edit_${item['id']}_${item['nombre_prod']}",
+                                          ),
+                                          fotoInicial: item['foto_data']
+                                              ?.toString(),
+                                          productoId:
+                                              (item['producto_id'] as num?)
+                                                  ?.toInt(),
+                                          nombreProd:
+                                              item['nombre_prod']?.toString() ??
+                                              '',
+                                          isOscuro: isOscuro,
+                                        ),
+                                        const SizedBox(width: 12),
+                                        Expanded(
+                                          child: Text(
+                                            item['nombre_prod'],
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 13,
+                                              color: isOscuro
+                                                  ? Colors.white
+                                                  : Colors.black87,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 12),
+                                    Row(
+                                      children: [
+                                        Container(
+                                          decoration: BoxDecoration(
+                                            color: isOscuro
+                                                ? Colors.white10
+                                                : Colors.white,
+                                            borderRadius: BorderRadius.circular(
+                                              10,
+                                            ),
+                                            border: Border.all(
+                                              color: isOscuro
+                                                  ? Colors.white10
+                                                  : Colors.black12,
+                                            ),
+                                          ),
+                                          child: Row(
+                                            children: [
+                                              IconButton(
+                                                icon: const Icon(
+                                                  Icons.remove,
+                                                  size: 18,
+                                                  color: Colors.red,
+                                                ),
+                                                onPressed: () =>
+                                                    _actualizarCantidadDetalle(
+                                                      item,
+                                                      pedId,
+                                                      -1,
+                                                      setSt,
+                                                      (l) => detalles = l,
+                                                    ),
+                                              ),
+                                              Text(
+                                                "${item['cantidad']}",
+                                                style: const TextStyle(
+                                                  fontWeight: FontWeight.bold,
+                                                  fontSize: 15,
+                                                ),
+                                              ),
+                                              IconButton(
+                                                icon: const Icon(
+                                                  Icons.add,
+                                                  size: 18,
+                                                  color: Colors.green,
+                                                ),
+                                                onPressed: () =>
+                                                    _actualizarCantidadDetalle(
+                                                      item,
+                                                      pedId,
+                                                      1,
+                                                      setSt,
+                                                      (l) => detalles = l,
+                                                    ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: TextField(
+                                            controller: descCtrl,
+                                            keyboardType:
+                                                const TextInputType.numberWithOptions(
+                                                  decimal: true,
+                                                  signed: false,
+                                                ),
+                                            enableSuggestions: false,
+                                            autocorrect: false,
+                                            textInputAction:
+                                                TextInputAction.done,
+                                            textAlign: TextAlign.center,
+                                            style: TextStyle(
+                                              fontSize: 14,
+                                              fontWeight: FontWeight.bold,
+                                              color: isOscuro
+                                                  ? Colors.white
+                                                  : Colors.black,
+                                            ),
+                                            decoration: InputDecoration(
+                                              hintText: "0",
+                                              labelText: "% Desc",
+                                              isDense: true,
+                                              contentPadding:
+                                                  const EdgeInsets.symmetric(
+                                                    vertical: 10,
+                                                  ),
+                                              border: OutlineInputBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(8),
+                                              ),
+                                            ),
+                                            onChanged: (v) {
+                                              double parsed =
+                                                  double.tryParse(
+                                                    v.replaceAll(',', '.'),
+                                                  ) ??
+                                                  0;
+                                              item['descuento'] = parsed;
+                                              double pU =
+                                                  (item['precio_unitario']
+                                                          as num)
+                                                      .toDouble();
+                                              item['subtotal'] =
+                                                  (pU - (pU * (parsed / 100))) *
+                                                  (item['cantidad'] as int);
+                                            },
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            if (tieneVariantes)
+                                              IconButton(
+                                                icon: const Icon(
+                                                  Icons.swap_horiz,
+                                                  color: Colors.orange,
+                                                  size: 24,
+                                                ),
+                                                onPressed: () async {
+                                                  final result =
+                                                      await _cambiarVariante(
+                                                        item,
+                                                        pedId,
+                                                      );
+                                                  if (result != null &&
+                                                      mounted) {
+                                                    setSt(() {
+                                                      item['nombre_prod'] =
+                                                          result['nombreNueva'];
+                                                      item['nombre_snapshot'] =
+                                                          result['nombreNueva'];
+                                                      item['foto_data'] =
+                                                          result['fotoBase64'];
+                                                    });
+                                                    _procesarCambioVarianteEnSegundoPlano(
+                                                      result['detalleId'],
+                                                      result['productoId'],
+                                                      result['cantidad'],
+                                                      result['nombreViejo'],
+                                                      result['nombreNueva'],
+                                                      pedId,
+                                                    );
+                                                  }
+                                                },
+                                              ),
+                                            IconButton(
+                                              icon: const Icon(
+                                                Icons.delete_outline,
+                                                color: Colors.redAccent,
+                                                size: 24,
+                                              ),
+                                              onPressed: () async {
+                                                if (item['producto_id'] !=
+                                                    null) {
+                                                  await _modificarStockBD(
+                                                    item['producto_id'] as int,
+                                                    -(item['cantidad'] as int),
+                                                    item['nombre_snapshot']
+                                                        ?.toString(),
+                                                  );
+                                                }
+                                                final db = await DBHelper
+                                                    .instance
+                                                    .database;
+                                                await db.delete(
+                                                  'detalle_pedidos',
+                                                  where: 'id = ?',
+                                                  whereArgs: [item['id']],
+                                                );
+                                                if (_esPremium) {
+                                                  ServicioNube.eliminarDetallePedidoNube(
+                                                    item['id'],
+                                                  );
+                                                }
+                                                _recalcularTotal(pedId);
+                                                descCtrls.remove(item['id']);
+                                                _actualizarVistaEditor(
+                                                  pedId,
+                                                  setSt,
+                                                  (newList) =>
+                                                      detalles = newList,
+                                                );
+                                              },
+                                            ),
+                                          ],
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 10),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 10,
+                                        vertical: 4,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: isOscuro
+                                            ? Colors.black26
+                                            : Colors.black.withOpacity(0.02),
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                      child: Row(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.spaceBetween,
+                                        children: [
+                                          Text(
+                                            "Subtotal ítem:",
+                                            style: TextStyle(
+                                              fontSize: 11,
+                                              color: isOscuro
+                                                  ? Colors.white38
+                                                  : Colors.black54,
+                                            ),
+                                          ),
+                                          Text(
+                                            "\$${subtotalItem.toStringAsFixed(0)}",
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 13,
+                                              color: isOscuro
+                                                  ? Colors.greenAccent
+                                                  : Colors.green.shade700,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          }).toList(),
+                        ],
+                      ),
                     ),
-                  ],
-                ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: isOscuro
+                            ? Colors.white.withOpacity(0.05)
+                            : Colors.blue.shade50,
+                        borderRadius: BorderRadius.circular(15),
+                      ),
+                      child: Column(
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Text(
+                                "TOTAL FINAL:",
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 14,
+                                ),
+                              ),
+                              Text(
+                                "\$${(subtotalProds + domiActual).toStringAsFixed(0)}",
+                                style: const TextStyle(
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.w900,
+                                  color: Colors.green,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 10),
+                          ElevatedButton(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF0D47A1),
+                              minimumSize: const Size(double.infinity, 48),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                            onPressed: () async {
+                              final db = await DBHelper.instance.database;
+                              Batch batch = db.batch();
+
+                              for (var item in detalles) {
+                                int idDetalle = item['id'] as int;
+                                double descActual =
+                                    (item['descuento'] as num?)?.toDouble() ??
+                                    0.0;
+                                if (descCtrls.containsKey(idDetalle)) {
+                                  descActual =
+                                      double.tryParse(
+                                        descCtrls[idDetalle]!.text.replaceAll(
+                                          ',',
+                                          '.',
+                                        ),
+                                      ) ??
+                                      descActual;
+                                }
+                                double pBase = (item['precio_unitario'] as num)
+                                    .toDouble();
+                                int c = item['cantidad'] as int;
+                                double nSubtotal =
+                                    (pBase - (pBase * (descActual / 100))) * c;
+
+                                batch.update(
+                                  'detalle_pedidos',
+                                  {
+                                    'descuento': descActual,
+                                    'subtotal': nSubtotal,
+                                    'ultima_modificacion': DateTime.now()
+                                        .toIso8601String(),
+                                  },
+                                  where: 'id = ?',
+                                  whereArgs: [idDetalle],
+                                );
+                              }
+
+                              double valFinalDomi =
+                                  double.tryParse(
+                                    domiCtrl.text.replaceAll(',', '.'),
+                                  ) ??
+                                  0;
+                              batch.update(
+                                'pedidos',
+                                {
+                                  'valor_domicilio': valFinalDomi,
+                                  'ultima_modificacion': DateTime.now()
+                                      .toIso8601String(),
+                                },
+                                where: 'id = ?',
+                                whereArgs: [pedId],
+                              );
+
+                              await batch.commit(noResult: true);
+                              await _recalcularTotal(pedId);
+
+                              if (mounted) {
+                                Navigator.pop(ctx);
+                                await _cargar();
+                              }
+
+                              if (_esPremium) {
+                                Future.microtask(() async {
+                                  final detActualizados = await db.query(
+                                    'detalle_pedidos',
+                                    where: 'pedido_id = ?',
+                                    whereArgs: [pedId],
+                                  );
+                                  for (var d in detActualizados) {
+                                    ServicioNube.guardarUnicoDetalleNube(d);
+                                  }
+                                });
+                              }
+                            },
+                            child: const Text(
+                              "GUARDAR CAMBIOS",
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
               ),
-            ],
-          ), 
-          ); 
+            ),
+          );
         },
       ),
     );
@@ -2574,10 +3041,7 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
     showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(
-        builder: (context, setStSearch) => GestureDetector(
-          onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
-          behavior: HitTestBehavior.translucent,
-          child: AlertDialog(
+        builder: (context, setStSearch) => AlertDialog(
           backgroundColor: Theme.of(context).cardColor,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
           title: Row(
@@ -2604,6 +3068,8 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
               children: [
                 TextField(
                   controller: searchCtrl,
+                  enableSuggestions: false,
+                  autocorrect: false,
                   style: TextStyle(color: isOscuro ? Colors.white : Colors.black),
                   decoration: InputDecoration(
                   hintText: "Buscar producto...",
@@ -2819,24 +3285,9 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
               ],
             ),
           ),
-        ), 
-        ), 
+        ),
       ),
-    ); 
-  }
-
-  Future<void> _actualizarDomicilio(int pedidoId, double nuevoVal) async {
-    final db = await DBHelper.instance.database;
-    await db.update(
-        'pedidos',
-        {
-          'valor_domicilio': nuevoVal,
-          'ultima_modificacion': DateTime.now().toIso8601String()
-        },
-        where: 'id = ?',
-        whereArgs: [pedidoId]);
-    await _recalcularTotal(pedidoId);
-    _cargar();
+    );
   }
 
   Future<void> _recalcularTotal(int pedId) async {
@@ -3672,9 +4123,6 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
             double descPct = (d['descuento'] ?? 0).toDouble();
             double finalP = base - (base * (descPct / 100));
 
-            String formatDesc(double pct) =>
-                pct == pct.roundToDouble() ? pct.toStringAsFixed(0) : pct.toStringAsFixed(1);
-
             return Padding(
               padding: const EdgeInsets.symmetric(vertical: 3),
               child: Row(
@@ -3682,7 +4130,11 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                   if (falta)
                     const Padding(
                       padding: EdgeInsets.only(right: 4),
-                      child: Icon(Icons.warning_rounded, color: Colors.red, size: 13),
+                      child: Icon(
+                        Icons.warning_rounded,
+                        color: Colors.red,
+                        size: 13,
+                      ),
                     ),
                   Expanded(
                     child: RichText(
@@ -3697,11 +4149,12 @@ class _PantallaGestionPedidosState extends State<PantallaGestionPedidos>
                           TextSpan(text: d['nombre_prod']),
                           if (descPct > 0)
                             TextSpan(
-                              text: ' (−${formatDesc(descPct)}%)',
+                              text: ' (−${formatearDescuento(descPct)}%)',
                               style: const TextStyle(
-                                  color: Colors.orange,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 10),
+                                color: Colors.orange,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 10,
+                              ),
                             ),
                         ],
                       ),

@@ -197,18 +197,24 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
         prodsProcesados.add(pClon);
       }
 
-      // 2. CAPITAL GLOBAL DE REINVERSIÓN (Cálculo Contable Infalible: Total Venta - Ganancia = Costo Real)
+      // 2. CAPITAL GLOBAL DE REINVERSIÓN (Con soporte de reinicio total a $0)
+      final SharedPreferences prefsInst = await SharedPreferences.getInstance();
+      String? fechaReinicio = prefsInst.getString('fecha_reinicio_capital');
+      String filtroFechaReinicio =
+          (fechaReinicio != null && fechaReinicio.isNotEmpty)
+          ? "AND COALESCE(p.fecha_pago, p.fecha_hora) >= '$fechaReinicio'"
+          : "";
+
       final capitalVentasRaw = await db.rawQuery('''
         SELECT COALESCE(d.nombre_snapshot, (SELECT nombre FROM productos WHERE id = d.producto_id), 'Producto') as nombre_snapshot, 
                d.cantidad as cantidad_total, 
                COALESCE(p.fecha_pago, p.fecha_hora) as fecha,
                (d.cantidad * COALESCE(
                  NULLIF((SELECT precio_compra FROM productos WHERE id = d.producto_id), 0),
-                 NULLIF(d.precio_unitario - (d.subtotal / NULLIF(d.cantidad, 0) * 0.3), 0),
                  d.precio_unitario * 0.5
                )) as capital_recuperado
         FROM detalle_pedidos d JOIN pedidos p ON d.pedido_id = p.id
-        WHERE p.estado = 'Completado' AND d.cantidad > 0
+        WHERE p.estado = 'Completado' AND d.cantidad > 0 $filtroFechaReinicio
         ORDER BY COALESCE(p.fecha_pago, p.fecha_hora) DESC
         LIMIT 150
       ''');
@@ -220,12 +226,21 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
         limit: 150,
       );
 
-      // Suma contable exacta del costo de todos los pedidos completados
       final totalRecuperadoVentas = await db.rawQuery('''
-        SELECT SUM(COALESCE(total_venta - ganancia_total, 0)) as total 
-        FROM pedidos 
-        WHERE estado = 'Completado'
+        SELECT SUM(
+          CASE 
+            WHEN p.total_venta > p.ganancia_total AND p.ganancia_total >= 0 
+              THEN (p.total_venta - p.ganancia_total)
+            WHEN (SELECT precio_compra FROM productos WHERE id = d.producto_id) > 0 
+              THEN (d.cantidad * (SELECT precio_compra FROM productos WHERE id = d.producto_id))
+            ELSE (d.cantidad * d.precio_unitario * 0.5)
+          END
+        ) as total 
+        FROM detalle_pedidos d
+        JOIN pedidos p ON d.pedido_id = p.id
+        WHERE p.estado = 'Completado' AND d.cantidad > 0 $filtroFechaReinicio
       ''');
+
       final totalGastadoQ = await db.rawQuery(
         "SELECT SUM(monto) as total FROM ajustes_capital",
       );
@@ -579,11 +594,14 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
     return await _pedirPasswordManual(user, esAdminPass: false);
   }
 
-  Future<bool> _pedirPasswordManual(User user, {required bool esAdminPass}) async {
+  Future<bool> _pedirPasswordManual(
+    User user, {
+    required bool esAdminPass,
+  }) async {
+    final emailCtrl = TextEditingController();
     final passCtrl = TextEditingController();
     bool validando = false;
     final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
-    bool esGoogle = user.providerData.any((p) => p.providerId == 'google.com');
 
     bool? exito = await showDialog<bool>(
       context: context,
@@ -592,84 +610,276 @@ class _PantallaPresupuestosState extends State<PantallaPresupuestos> {
         builder: (context, setSt) {
           return AlertDialog(
             backgroundColor: Theme.of(context).cardColor,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: esAdminPass ? Colors.cyanAccent : Colors.orangeAccent, width: 1)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+              side: BorderSide(
+                color: esAdminPass ? Colors.cyanAccent : Colors.orangeAccent,
+                width: 1.5,
+              ),
+            ),
             title: Row(
               children: [
-                Icon(Icons.security, color: esAdminPass ? Colors.cyanAccent : Colors.orangeAccent), const SizedBox(width: 8),
-                Expanded(child: Text(esAdminPass ? "Seguridad Administrador" : "Seguridad de Cuenta", style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold))),
+                Icon(
+                  Icons.security_rounded,
+                  color: esAdminPass ? Colors.cyanAccent : Colors.orangeAccent,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    esAdminPass
+                        ? "Contraseña de Administrador"
+                        : "Seguridad de la Cuenta",
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
               ],
             ),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(esAdminPass ? "Ingresa tu contraseña de administración local para autorizar la acción." : (esGoogle ? "Iniciaste sesión con Google. Por seguridad, ingresa tu correo de Boxi para confirmar: (${user.email})" : "No tienes clave admin. Confirma ingresando la contraseña de tu cuenta de Boxi (${user.email})."),
-                  style: TextStyle(fontSize: 12, color: isOscuro ? Colors.white60 : Colors.black54),
-                ),
-                const SizedBox(height: 15),
-                if (esGoogle && !esAdminPass) TextField(controller: passCtrl, keyboardType: TextInputType.emailAddress, style: TextStyle(color: isOscuro ? Colors.white : Colors.black), decoration: const InputDecoration(labelText: "Confirmar Correo", border: OutlineInputBorder(), prefixIcon: Icon(Icons.email)))
-                else TextField(controller: passCtrl, obscureText: true, style: TextStyle(color: isOscuro ? Colors.white : Colors.black), decoration: const InputDecoration(labelText: "Contraseña", border: OutlineInputBorder(), prefixIcon: Icon(Icons.lock))),
-                if (validando) const Padding(padding: EdgeInsets.only(top: 15), child: CircularProgressIndicator())
-              ],
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    esAdminPass
+                        ? "Ingresa tu contraseña de administración de la app para autorizar la acción."
+                        : "Ingresa el correo y la contraseña de tu cuenta de Boxi para autorizar el reinicio:",
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: isOscuro ? Colors.white70 : Colors.black87,
+                    ),
+                  ),
+                  const SizedBox(height: 15),
+
+                  // 1. CAMPO CORREO (Solo para validación de cuenta)
+                  if (!esAdminPass) ...[
+                    TextField(
+                      controller: emailCtrl,
+                      keyboardType: TextInputType.emailAddress,
+                      style: TextStyle(
+                        color: isOscuro ? Colors.white : Colors.black,
+                        fontSize: 13,
+                      ),
+                      decoration: const InputDecoration(
+                        labelText: "Correo de tu cuenta Boxi",
+                        border: OutlineInputBorder(),
+                        prefixIcon: Icon(Icons.email_outlined),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                  ],
+
+                  // 2. CAMPO CONTRASEÑA (Para Admin o para Cuenta)
+                  TextField(
+                    controller: passCtrl,
+                    obscureText: true,
+                    style: TextStyle(
+                      color: isOscuro ? Colors.white : Colors.black,
+                      fontSize: 13,
+                    ),
+                    decoration: InputDecoration(
+                      labelText: esAdminPass
+                          ? "Contraseña de Administrador (App)"
+                          : "Contraseña de tu cuenta",
+                      border: const OutlineInputBorder(),
+                      prefixIcon: const Icon(Icons.lock_outline),
+                    ),
+                  ),
+
+                  if (validando)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 15),
+                      child: Center(child: CircularProgressIndicator()),
+                    ),
+                ],
+              ),
             ),
             actions: [
-              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("CANCELAR", style: TextStyle(color: Colors.grey))),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text(
+                  "CANCELAR",
+                  style: TextStyle(
+                    color: Colors.grey,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
               ElevatedButton(
-                style: ElevatedButton.styleFrom(backgroundColor: esAdminPass ? Colors.cyanAccent.shade700 : Colors.orangeAccent, foregroundColor: esAdminPass ? Colors.white : Colors.black),
-                onPressed: validando ? null : () async {
-                  String input = passCtrl.text.trim();
-                  if (input.isEmpty) return;
-                  setSt(() => validando = true);
-                  try {
-                    if (esAdminPass) {
-                      if (await ServicioContrasenaAdmin.validarPassword(input, user.uid)) { Navigator.pop(ctx, true); } else { throw "Contraseña incorrecta"; }
-                    } else {
-                      if (esGoogle) {
-                        if (input.toLowerCase() == user.email!.toLowerCase()) { Navigator.pop(ctx, true); } else { throw "El correo no coincide"; }
-                      } else {
-                        AuthCredential credential = EmailAuthProvider.credential(email: user.email!, password: input);
-                        await user.reauthenticateWithCredential(credential);
-                        Navigator.pop(ctx, true);
-                      }
-                    }
-                  } catch (e) {
-                    setSt(() => validando = false);
-                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("❌ Error: $e"), backgroundColor: Colors.red));
-                  }
-                },
-                child: const Text("CONFIRMAR", style: TextStyle(fontWeight: FontWeight.bold)),
-              )
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: esAdminPass
+                      ? Colors.cyanAccent.shade700
+                      : Colors.orangeAccent,
+                  foregroundColor: esAdminPass ? Colors.white : Colors.black,
+                ),
+                onPressed: validando
+                    ? null
+                    : () async {
+                        String emailInput = emailCtrl.text.trim();
+                        String passInput = passCtrl.text.trim();
+
+                        if (esAdminPass) {
+                          if (passInput.isEmpty) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text("⚠️ Ingresa la contraseña"),
+                                backgroundColor: Colors.orange,
+                              ),
+                            );
+                            return;
+                          }
+                        } else {
+                          if (emailInput.isEmpty || passInput.isEmpty) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text("⚠️ Ingresa correo y contraseña"),
+                                backgroundColor: Colors.orange,
+                              ),
+                            );
+                            return;
+                          }
+                        }
+
+                        setSt(() => validando = true);
+                        try {
+                          if (esAdminPass) {
+                            if (await ServicioContrasenaAdmin.validarPassword(
+                              passInput,
+                              user.uid,
+                            )) {
+                              Navigator.pop(ctx, true);
+                            } else {
+                              throw "Contraseña de administrador incorrecta";
+                            }
+                          } else {
+                            // Validación obligatoria del correo
+                            if (emailInput.toLowerCase() !=
+                                user.email!.toLowerCase()) {
+                              throw "El correo no coincide con tu cuenta de Boxi";
+                            }
+
+                            // Reautenticar con correo y contraseña en Firebase
+                            AuthCredential credential =
+                                EmailAuthProvider.credential(
+                                  email: emailInput,
+                                  password: passInput,
+                                );
+                            await user.reauthenticateWithCredential(credential);
+                            Navigator.pop(ctx, true);
+                          }
+                        } catch (e) {
+                          setSt(() => validando = false);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text("❌ Error: $e"),
+                              backgroundColor: Colors.red,
+                            ),
+                          );
+                        }
+                      },
+                child: const Text(
+                  "AUTORIZAR",
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
             ],
           );
-        }
+        },
       ),
     );
     return exito ?? false;
   }
 
   void _reiniciarCapitalConfirmacion() {
-    showDialog(context: context, builder: (ctx) => AlertDialog(
-      backgroundColor: Theme.of(context).cardColor, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      title: const Row(children: [Icon(Icons.warning_amber_rounded, color: Colors.redAccent, size: 28), SizedBox(width: 10), Text("¿Reiniciar Capital?", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.redAccent))]),
-      content: const Text("Se borrarán permanentemente todos los registros de compras de stock y ajustes manuales. ¿Estás seguro de continuar?"),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("CANCELAR")),
-        ElevatedButton(
-          style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
-          onPressed: () async {
-            Navigator.pop(ctx);
-            if (await _verificarIdentidadUrgente()) {
-              final db = await DBHelper.instance.database;
-              await db.delete('ajustes_capital');
-              if (_esPremiumUsuario) {
-                await ServicioNube.respaldarDatosPrivadosRTDB();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Theme.of(context).cardColor,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Row(
+          children: [
+            Icon(
+              Icons.warning_amber_rounded,
+              color: Colors.redAccent,
+              size: 28,
+            ),
+            SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                "¿Reiniciar Todo el Capital?",
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                  color: Colors.redAccent,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: const Text(
+          "Esta acción reiniciará tu Capital de Reinversión a \$0:\n\n"
+          "• Se reinicia el capital recuperado de ventas a \$0.\n"
+          "• Se borran los registros de compras de stock y ajustes.\n"
+          "• Tus pedidos y clientes NO se borrarán.\n\n"
+          "El fondo de reinversión empezará desde cero a partir de este momento.",
+          style: TextStyle(fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("CANCELAR", style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+            onPressed: () async {
+              Navigator.pop(ctx);
+              // Pide huella -> o contraseña admin -> o correo y contraseña de la cuenta
+              if (await _verificarIdentidadUrgente()) {
+                final db = await DBHelper.instance.database;
+                final prefs = await SharedPreferences.getInstance();
+
+                // 1. Marca la fecha/hora exacta del reinicio para empezar el recuperado en 0
+                await prefs.setString(
+                  'fecha_reinicio_capital',
+                  DateTime.now().toIso8601String(),
+                );
+
+                // 2. Borra las compras y ajustes manuales
+                await db.delete('ajustes_capital');
+
+                // 3. Sincroniza con la nube si es usuario Pro
+                if (_esPremiumUsuario) {
+                  await ServicioNube.respaldarDatosPrivadosRTDB();
+                }
+
+                // 4. Recalcula el motor financiero en 0
+                await _ejecutarMotorFinanciero();
+
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                        "✅ Capital de reinversión reiniciado a \$0 exitosamente.",
+                      ),
+                      backgroundColor: Colors.green,
+                    ),
+                  );
+                }
               }
-              _ejecutarMotorFinanciero();
-            }
-          },
-          child: const Text("REINICIAR", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-        )
-      ],
-    ));
+            },
+            child: const Text(
+              "REINICIAR A \$0",
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   void _ajustarCapitalManualDialogo() {

@@ -11,6 +11,21 @@ import 'package:universal_html/js.dart' as js;
 import 'package:http/http.dart' as http; 
 import 'package:firebase_database/firebase_database.dart';
 
+double obtenerDescuentoWeb(Map<String, dynamic> p) {
+  double desc = (p['descuento'] as num?)?.toDouble() ?? 0.0;
+  if (desc <= 0) return 0.0;
+  if (p['fecha_fin_descuento'] != null &&
+      p['fecha_fin_descuento'].toString().isNotEmpty &&
+      p['fecha_fin_descuento'].toString() != "null") {
+    try {
+      DateTime fin = DateTime.parse(p['fecha_fin_descuento'].toString());
+      if (DateTime.now().isAfter(fin)) {
+        return 0.0; // Descuento expirado automáticamente
+      }
+    } catch (_) {}
+  }
+  return desc;
+}
 // 🔥 FUNCIÓN DE COMPRESIÓN DE ANCHO DE BANDA PARA LA WEB
 String optimizarUrlCloudinary(String urlOriginal, {int width = 400}) {
   if (urlOriginal.isEmpty) return urlOriginal;
@@ -195,7 +210,7 @@ class _CatalogoWebState extends State<CatalogoWeb> {
       String idKey = cartId ?? producto['id'].toString();
 
       double precioBase = (producto['precio_venta'] as num).toDouble();
-      double descPct = (producto['descuento'] ?? 0).toDouble();
+      double descPct = obtenerDescuentoWeb(producto);
       double precioCalculado = precioBase - (precioBase * (descPct / 100));
 
       if (!carrito.containsKey(idKey) && cambio > 0) {
@@ -747,7 +762,27 @@ class _CatalogoWebState extends State<CatalogoWeb> {
 
   Widget _tarjetaProducto(Map<String, dynamic> p) {
     double precioOriginal = (p['precio_venta'] as num).toDouble();
-    double descPct = (p['descuento'] ?? 0).toDouble();
+    double descPct = obtenerDescuentoWeb(p);
+
+    double anchoPantalla = MediaQuery.of(context).size.width;
+    bool esCelular = anchoPantalla < 600;
+
+    String? hastaFecha = formatearVencimientoDescuento(
+      p['fecha_fin_descuento'],
+      corto: esCelular,
+    );
+    String textoEtiqueta = hastaFecha != null
+        ? "-${_fmtDesc(descPct)}% $hastaFecha"
+        : "-${_fmtDesc(descPct)}%";
+    if (p['fecha_fin_descuento'] != null &&
+        p['fecha_fin_descuento'].toString().isNotEmpty) {
+      try {
+        DateTime fin = DateTime.parse(p['fecha_fin_descuento'].toString());
+        if (DateTime.now().isAfter(fin)) {
+          descPct = 0.0; // Descuento expirado en el catálogo web
+        }
+      } catch (_) {}
+    }
     double precioOferta = descPct > 0 ? precioOriginal - (precioOriginal * (descPct / 100)) : precioOriginal;
     double ahorro = precioOriginal - precioOferta;
 
@@ -770,11 +805,6 @@ class _CatalogoWebState extends State<CatalogoWeb> {
 
     int cantTotalProd = 0;
     carrito.forEach((key, item) { if (item['id'] == p['id']) cantTotalProd += (item['cantidad'] as int); });
-
-    // Detectamos dinámicamente si es pantalla de celular
-    double anchoPantalla = MediaQuery.of(context).size.width;
-    bool esCelular = anchoPantalla < 600;
-
     return Container(
       key: ValueKey("prod_${p['id']}"), 
       decoration: BoxDecoration(
@@ -799,15 +829,33 @@ class _CatalogoWebState extends State<CatalogoWeb> {
                 
                 if (descPct > 0)
                   Positioned(
-                    top: 12, left: 12,
+                    top: 12,
+                    left: 12,
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(
-                        gradient: const LinearGradient(colors: [Colors.orange, Colors.redAccent]),
-                        borderRadius: BorderRadius.circular(12),
-                        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 4)],
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
                       ),
-                      child: Text("-${_fmtDesc(descPct)}%", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 14)), // 🔥 1 decimal máx
+                      decoration: BoxDecoration(
+                        gradient: const LinearGradient(
+                          colors: [Colors.orange, Colors.redAccent],
+                        ),
+                        borderRadius: BorderRadius.circular(12),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withOpacity(0.3),
+                            blurRadius: 4,
+                          ),
+                        ],
+                      ),
+                      child: Text(
+                        textoEtiqueta,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w900,
+                          fontSize: 11,
+                        ),
+                      ),
                     ),
                   ),
 
@@ -1002,10 +1050,22 @@ class _CatalogoWebState extends State<CatalogoWeb> {
     );
   }
 
-  void _mostrarDetalleProductoWeb(Map<String, dynamic> p, bool tieneVariantes, List<dynamic> grps) {
+  void _mostrarDetalleProductoWeb(
+    Map<String, dynamic> p,
+    bool tieneVariantes,
+    List<dynamic> grps,
+  ) {
     double precioOriginal = (p['precio_venta'] as num).toDouble();
-    double descPct = (p['descuento'] ?? 0).toDouble();
+    double descPct = obtenerDescuentoWeb(p);
     double precioOferta = precioOriginal - (precioOriginal * (descPct / 100));
+
+    String? hastaFecha = formatearVencimientoDescuento(
+      p['fecha_fin_descuento'],
+      corto: false,
+    );
+    String textoOfertaModal = hastaFecha != null
+        ? "OFERTA -${_fmtDesc(descPct)}% $hastaFecha"
+        : "OFERTA -${_fmtDesc(descPct)}%";
 
     showDialog(
       context: context,
@@ -1039,11 +1099,24 @@ class _CatalogoWebState extends State<CatalogoWeb> {
                           : Container(height: 250, width: double.infinity, color: Colors.grey.shade200, child: const Icon(Icons.image, size: 60, color: Colors.grey)),
                       if (descPct > 0)
                         Positioned(
-                          top: 20, left: 20,
+                          top: 20,
+                          left: 20,
                           child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                            decoration: BoxDecoration(color: Colors.red, borderRadius: BorderRadius.circular(10)),
-                            child: Text("OFERTA -${_fmtDesc(descPct)}%", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), // 🔥 1 decimal máx
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 6,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.red,
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Text(
+                              textoOfertaModal,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
                           ),
                         )
                     ],
@@ -2056,4 +2129,53 @@ class MyCustomScrollBehavior extends MaterialScrollBehavior {
     PointerDeviceKind.mouse,
     PointerDeviceKind.trackpad,
   };
+}
+
+String? formatearVencimientoDescuento(
+  dynamic fechaFinStr, {
+  bool corto = false,
+}) {
+  if (fechaFinStr == null ||
+      fechaFinStr.toString().trim().isEmpty ||
+      fechaFinStr.toString() == "null") {
+    return null;
+  }
+  try {
+    DateTime fin = DateTime.parse(fechaFinStr.toString());
+    DateTime now = DateTime.now();
+    DateTime hoy = DateTime(now.year, now.month, now.day);
+    DateTime finDia = DateTime(fin.year, fin.month, fin.day);
+
+    if (now.isAfter(fin)) return null;
+
+    const meses = [
+      '',
+      'Ene',
+      'Feb',
+      'Mar',
+      'Abr',
+      'May',
+      'Jun',
+      'Jul',
+      'Ago',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dic',
+    ];
+
+    if (corto) {
+      if (hoy.isAtSameMomentAs(finDia)) return "hasta hoy";
+      int dias = finDia.difference(hoy).inDays;
+      if (dias == 1) return "hasta mañana";
+      return "hasta ${fin.day} ${meses[fin.month]}";
+    } else {
+      if (hoy.isAtSameMomentAs(finDia)) return "hasta hoy a las 11:59 PM";
+      int dias = finDia.difference(hoy).inDays;
+      if (dias == 1) return "hasta mañana a las 11:59 PM";
+      return "hasta el ${fin.day} de ${meses[fin.month]} a las 11:59 PM";
+    }
+  } catch (_) {
+    return null;
+  }
 }

@@ -20,7 +20,8 @@ class DBHelper {
     final path = join(dbPath, filePath);
     return await openDatabase(
       path,
-      version: 24, // 👈 Subido a versión 24 para forzar migración automática
+      version:
+          26, // 👈 Subida a versión 26 para campos de Alimentos y Vencimiento
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
     );
@@ -37,7 +38,7 @@ class DBHelper {
       '''CREATE TABLE clientes (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre_completo TEXT NOT NULL, nombre_negocio TEXT DEFAULT '', direccion TEXT, telefono TEXT, departamento TEXT, ciudad TEXT, firma TEXT, ultima_modificacion TEXT)''',
     );
     await db.execute(
-      '''CREATE TABLE productos (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, foto_path TEXT, precio_compra REAL NOT NULL, precio_venta REAL NOT NULL, descuento REAL DEFAULT 0, stock INTEGER DEFAULT 0, stock_minimo INTEGER DEFAULT 0, proveedor_id INTEGER DEFAULT NULL, descripcion TEXT, variantes TEXT, orden INTEGER DEFAULT 0, activo INTEGER DEFAULT 1, ultima_modificacion TEXT, categoria TEXT)''',
+      '''CREATE TABLE productos (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, foto_path TEXT, precio_compra REAL NOT NULL, precio_venta REAL NOT NULL, descuento REAL DEFAULT 0, fecha_fin_descuento TEXT, stock INTEGER DEFAULT 0, stock_minimo INTEGER DEFAULT 0, proveedor_id INTEGER DEFAULT NULL, descripcion TEXT, variantes TEXT, orden INTEGER DEFAULT 0, activo INTEGER DEFAULT 1, ultima_modificacion TEXT, categoria TEXT, tipo TEXT DEFAULT 'Producto', vence INTEGER DEFAULT 0, fecha_vencimiento TEXT DEFAULT NULL, fecha_alerta_vencimiento TEXT DEFAULT NULL)''',
     );
     await db.execute(
       '''CREATE TABLE pedidos (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha_hora TEXT NOT NULL, fecha_pago TEXT, cliente_id INTEGER NOT NULL, vendedor_id INTEGER NOT NULL, total_venta REAL NOT NULL, ganancia_total REAL NOT NULL, estado TEXT NOT NULL, departamento TEXT, ciudad TEXT, firma BLOB, valor_domicilio REAL DEFAULT 0, cliente_nombre_snapshot TEXT, ultima_modificacion TEXT)''',
@@ -293,6 +294,48 @@ class DBHelper {
       try {
         await db.execute(
           'ALTER TABLE puntos_clientes ADD COLUMN client_uid TEXT',
+        );
+      } catch (_) {}
+    }
+
+    if (oldVersion < 25) {
+      try {
+        await db.execute(
+          'ALTER TABLE productos ADD COLUMN fecha_fin_descuento TEXT DEFAULT NULL',
+        );
+      } catch (_) {}
+    }
+
+    if (oldVersion < 26) {
+      try {
+        await db.execute(
+          "ALTER TABLE productos ADD COLUMN fecha_fin_descuento TEXT DEFAULT NULL",
+        );
+      } catch (_) {}
+      try {
+        await db.execute(
+          "ALTER TABLE productos ADD COLUMN tipo TEXT DEFAULT 'Producto'",
+        );
+      } catch (_) {}
+      try {
+        await db.execute(
+          "ALTER TABLE productos ADD COLUMN vence INTEGER DEFAULT 0",
+        );
+      } catch (_) {}
+      try {
+        await db.execute(
+          "ALTER TABLE productos ADD COLUMN fecha_vencimiento TEXT DEFAULT NULL",
+        );
+      } catch (_) {}
+      try {
+        await db.execute(
+          "ALTER TABLE productos ADD COLUMN fecha_alerta_vencimiento TEXT DEFAULT NULL",
+        );
+      } catch (_) {}
+      // 🔥 Garantiza que todos los productos existentes queden como 'Producto'
+      try {
+        await db.execute(
+          "UPDATE productos SET tipo = 'Producto' WHERE tipo IS NULL OR tipo = ''",
         );
       } catch (_) {}
     }

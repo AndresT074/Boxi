@@ -42,19 +42,22 @@ class PantallaInventario extends StatefulWidget {
   State<PantallaInventario> createState() => _PantallaInventarioState();
 }
 
-class _PantallaInventarioState extends State<PantallaInventario> {
+class _PantallaInventarioState extends State<PantallaInventario>
+    with WidgetsBindingObserver {
   List<Map<String, dynamic>> _prods =[];
   List<Map<String, dynamic>> _filtrados =[];
   bool _esPremium = false; 
   bool _estaCargando = true; 
-  int _vistaModo = 1; 
+  int _vistaModo = 1;
   final _searchCtrl = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
   StreamSubscription? _subSyncTriggers;
 
   @override
   void initState() {
     super.initState();
-    _cargar(); // 👈 1. Carga SQLite DE INMEDIATO (0 ms) para quitar la ruleta de carga
+    WidgetsBinding.instance.addObserver(this); // 👈 Añade esto aquí
+    _cargar();
     _iniciarYMigrar();
   }
 
@@ -127,9 +130,19 @@ class _PantallaInventarioState extends State<PantallaInventario> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _cargar(); // Recarga inmediata si la app vuelve de segundo plano
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this); // 👈 Añade esto aquí
     _subSyncTriggers?.cancel();
     _searchCtrl.dispose();
+    if (_scrollController.hasClients) _scrollController.jumpTo(0);
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -161,7 +174,7 @@ class _PantallaInventarioState extends State<PantallaInventario> {
       final prefs = await SharedPreferences.getInstance();
 
       final data = await db.rawQuery('''
-        SELECT p.id, p.nombre, p.precio_compra, p.precio_venta, p.descuento, p.stock, p.stock_minimo, p.proveedor_id, p.descripcion, p.orden, p.activo, p.ultima_modificacion, p.variantes, p.categoria
+        SELECT p.id, p.nombre, p.precio_compra, p.precio_venta, p.descuento, p.fecha_fin_descuento, p.stock, p.stock_minimo, p.proveedor_id, p.descripcion, p.orden, p.activo, p.ultima_modificacion, p.variantes, p.categoria, p.tipo, p.vence, p.fecha_vencimiento, p.fecha_alerta_vencimiento
         FROM productos p
         LEFT JOIN categorias c ON p.categoria = c.nombre
         ORDER BY 
@@ -372,16 +385,26 @@ class _PantallaInventarioState extends State<PantallaInventario> {
 
     bool esCompacto = columnasCalculadas == 3 || columnasCalculadas >= 5;
 
-    return GridView.builder(
-      padding: const EdgeInsets.only(left: 8, right: 8, top: 8, bottom: 90),
-      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: columnasCalculadas,
-        childAspectRatio: aspect,
-        crossAxisSpacing: 10,
-        mainAxisSpacing: 10,
-      ),
-      itemCount: _filtrados.length,
-      itemBuilder: (context, i) {
+    return RawScrollbar(
+      controller: _scrollController,
+      thumbVisibility: true,
+      thickness: 7,
+      radius: const Radius.circular(10),
+      thumbColor: isOscuro
+          ? Colors.cyanAccent.withOpacity(0.7)
+          : const Color(0xFF0D47A1).withOpacity(0.7),
+      interactive: true,
+      child: GridView.builder(
+        controller: _scrollController,
+        padding: const EdgeInsets.only(left: 8, right: 8, top: 8, bottom: 90),
+        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: columnasCalculadas,
+          childAspectRatio: aspect,
+          crossAxisSpacing: 10,
+          mainAxisSpacing: 10,
+        ),
+        itemCount: _filtrados.length,
+        itemBuilder: (context, i) {
         final p = _filtrados[i];
         bool estaInactivo = (p['activo'] ?? 1) == 0;
 
@@ -413,14 +436,74 @@ class _PantallaInventarioState extends State<PantallaInventario> {
           } catch (_) {}
         }
         int stockNum = int.tryParse(p['stock']?.toString() ?? '0') ?? 0;
-        int stockMinNum = (p['stock_minimo'] as num?)?.toInt() ?? 0;
-        bool sinStockGlobal = stockNum <= 0;
-        bool necesitaReponer =
-            !sinStockGlobal && (stockMinNum > 0 && stockNum <= stockMinNum);
-        bool mostrarAlerta = tieneVariantes
-            ? tieneNegativoOCero
-            : (sinStockGlobal || necesitaReponer);
-        double descuentoPct = (p['descuento'] ?? 0).toDouble();
+          int stockMinNum = (p['stock_minimo'] as num?)?.toInt() ?? 0;
+          bool sinStockGlobal = stockNum <= 0;
+          bool necesitaReponer =
+              !sinStockGlobal && (stockMinNum > 0 && stockNum <= stockMinNum);
+
+          // 🍎 Control estricto de vencimiento por DÍA calendario y cálculo de días
+          bool esAlimento = (p['tipo']?.toString() == 'Alimento');
+          bool venceAlimento = (p['vence']?.toString() == '1');
+          bool alimentoVencido = false;
+          bool alimentoVenceHoy = false;
+          bool alimentoProximoVencer = false;
+          int diasParaVencer = 0;
+
+          if (esAlimento && venceAlimento) {
+            DateTime now = DateTime.now();
+            DateTime hoy = DateTime(now.year, now.month, now.day);
+
+            if (p['fecha_vencimiento'] != null &&
+                p['fecha_vencimiento'].toString().length >= 10) {
+              try {
+                DateTime fV = DateTime.parse(p['fecha_vencimiento'].toString());
+                DateTime fVencDia = DateTime(fV.year, fV.month, fV.day);
+                diasParaVencer = fVencDia.difference(hoy).inDays;
+
+                if (hoy.isAfter(fVencDia)) {
+                  alimentoVencido = true;
+                } else if (hoy.isAtSameMomentAs(fVencDia)) {
+                  alimentoVenceHoy = true;
+                }
+              } catch (_) {}
+            }
+
+            if (!alimentoVencido &&
+                !alimentoVenceHoy &&
+                p['fecha_alerta_vencimiento'] != null &&
+                p['fecha_alerta_vencimiento'].toString().length >= 10) {
+              try {
+                DateTime fA = DateTime.parse(
+                  p['fecha_alerta_vencimiento'].toString(),
+                );
+                DateTime fAlertaDia = DateTime(fA.year, fA.month, fA.day);
+
+                if (hoy.isAfter(fAlertaDia) ||
+                    hoy.isAtSameMomentAs(fAlertaDia)) {
+                  alimentoProximoVencer = true;
+                }
+              } catch (_) {}
+            }
+          }
+
+          String textoBadgeVencimiento = alimentoVencido
+              ? 'VENCIDO'
+              : (alimentoVenceHoy
+                    ? 'VENCE HOY'
+                    : (diasParaVencer == 1
+                          ? 'VENCE EN 1 DÍA'
+                          : 'VENCE EN $diasParaVencer DÍAS'));
+
+          bool mostrarAlerta = tieneVariantes
+              ? tieneNegativoOCero
+              : (sinStockGlobal ||
+                    necesitaReponer ||
+                    alimentoVencido ||
+                    alimentoProximoVencer);
+        double descuentoPct = obtenerDescuentoVigente(
+            p['descuento'],
+            p['fecha_fin_descuento'],
+          );
         double precioCompra = (p['precio_compra'] ?? 0).toDouble();
         double precioBase = (p['precio_venta'] ?? 0).toDouble();
         double precioFinal = descuentoPct > 0 ? precioBase - (precioBase * descuentoPct / 100) : precioBase;
@@ -447,14 +530,60 @@ class _PantallaInventarioState extends State<PantallaInventario> {
                         id: p['id']
                       ),
                   if (estaInactivo)
-                    Center(
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(5)),
-                        child: Text('INACTIVO', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 10 * factorTexto)),
+                      Center(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.black87,
+                            borderRadius: BorderRadius.circular(5),
+                          ),
+                          child: Text(
+                            'INACTIVO',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 10 * factorTexto,
+                            ),
+                          ),
+                        ),
                       ),
-                    ),
-                  if (descuentoPct > 0)
+                    // 🚨 Etiqueta naranja flotante de Vencimiento sobre la foto
+                    if (alimentoVencido ||
+                        alimentoVenceHoy ||
+                        alimentoProximoVencer)
+                      Positioned(
+                        top: 5,
+                        left: 5,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 3,
+                          ),
+                          decoration: BoxDecoration(
+                            color: alimentoVencido
+                                ? Colors.red
+                                : (alimentoVenceHoy
+                                      ? Colors.redAccent.shade700
+                                      : Colors.orange.shade800),
+                            borderRadius: BorderRadius.circular(6),
+                            boxShadow: const [
+                              BoxShadow(color: Colors.black38, blurRadius: 4),
+                            ],
+                          ),
+                          child: Text(
+                            textoBadgeVencimiento,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w900,
+                              fontSize: 9,
+                            ),
+                          ),
+                        ),
+                      ),
+                    if (descuentoPct > 0)
                     Positioned(
                       top: 5,
                       left: esLista ? 0 : null,
@@ -583,35 +712,40 @@ class _PantallaInventarioState extends State<PantallaInventario> {
                                     color: isOscuro ? Colors.white : Colors.black)),
                             
                             if (!esCompacto) const SizedBox(height: 2),
-                            
-                            Text(
-                              sinStockGlobal
-                                  ? 'Agotado (0 u.)'
-                                  : (necesitaReponer
-                                        ? '⚠️ Reponer (${p['stock']} u.)'
-                                        : 'Stock: ${p['stock']}'),
-                              style: TextStyle(
-                                fontSize: (esCompacto ? 9 : 11) * factorTexto,
-                                height: esCompacto ? 1.1 : null,
-                                fontWeight: (sinStockGlobal || necesitaReponer)
-                                    ? FontWeight.bold
-                                    : FontWeight.normal,
-                                color: sinStockGlobal
-                                    ? const Color.fromARGB(255, 247, 85, 85)
+
+                              Text(
+                                sinStockGlobal
+                                    ? 'Agotado (0 u.)'
                                     : (necesitaReponer
-                                          ? Colors.orange
-                                          : (isOscuro
-                                                ? Colors.white70
-                                                : Colors.black54)),
-                              ),
-                            ),
-                            Text('Costo: \$${precioCompra.toStringAsFixed(0)}', 
+                                          ? '⚠️ Reponer (${p['stock']} u.)'
+                                          : 'Stock: ${p['stock']}'),
                                 style: TextStyle(
-                                    fontSize: (esCompacto ? 9 : 11) * factorTexto,
-                                    height: esCompacto ? 1.1 : null, // 🔥 Elimina el margen invisible
-                                    color: isOscuro ? Colors.white38 : Colors.blueGrey,
-                                    fontWeight: FontWeight.bold)),
-                                    
+                                  fontSize: (esCompacto ? 9 : 11) * factorTexto,
+                                  height: esCompacto ? 1.1 : null,
+                                  fontWeight:
+                                      (sinStockGlobal || necesitaReponer)
+                                      ? FontWeight.bold
+                                      : FontWeight.normal,
+                                  color: sinStockGlobal
+                                      ? const Color.fromARGB(255, 247, 85, 85)
+                                      : (necesitaReponer
+                                            ? Colors.orange
+                                            : (isOscuro
+                                                  ? Colors.white70
+                                                  : Colors.black54)),
+                                ),
+                              ),
+                              Text(
+                                'Costo: \$${precioCompra.toStringAsFixed(0)}',
+                                style: TextStyle(
+                                  fontSize: (esCompacto ? 9 : 11) * factorTexto,
+                                  height: esCompacto ? 1.1 : null,
+                                  color: isOscuro
+                                      ? Colors.white38
+                                      : Colors.blueGrey,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
                             if (descuentoPct > 0)
                               Text('\$${precioBase.toStringAsFixed(0)}',
                                   style: TextStyle(
@@ -719,8 +853,9 @@ class _PantallaInventarioState extends State<PantallaInventario> {
                     ],
                   ),
           ),
-        );
-      },
+          );
+        },
+      ),
     );
   }
 
@@ -900,7 +1035,14 @@ class _PantallaFormularioProductoState
       _sC = TextEditingController();
   final _descC = TextEditingController();
   final _descPctC = TextEditingController();
-  final _stockMinCtrl = TextEditingController(); 
+  final _stockMinCtrl = TextEditingController();
+  DateTime? _fechaFinDescuento;
+
+  // 🔥 Campos de Tipo y Vencimiento
+  String _tipo = 'Producto'; // 'Producto' o 'Alimento'
+  bool _vence = false;
+  DateTime? _fechaVencimiento;
+  DateTime? _fechaAlertaVencimiento;
   int? _proveedorIdSeleccionado; 
   List<Map<String, dynamic>> _listaProveedores = []; 
 
@@ -929,7 +1071,37 @@ class _PantallaFormularioProductoState
       _procesarFotoPrincipal();
       _descC.text = widget.producto!['descripcion'] ?? '';
       double pct = widget.producto!['descuento']?.toDouble() ?? 0.0;
-      _descPctC.text = pct > 0 ? pct.toString() : '';
+      _descPctC.text = pct > 0
+          ? (pct == pct.roundToDouble()
+                ? pct.toInt().toString()
+                : pct.toString())
+          : '';
+      if (widget.producto!['fecha_fin_descuento'] != null &&
+          widget.producto!['fecha_fin_descuento'].toString().isNotEmpty) {
+        try {
+          _fechaFinDescuento = DateTime.parse(
+            widget.producto!['fecha_fin_descuento'],
+          );
+        } catch (_) {}
+      }
+      _tipo = widget.producto!['tipo']?.toString() ?? 'Producto';
+      _vence = (widget.producto!['vence'] ?? 0) == 1;
+      if (widget.producto!['fecha_vencimiento'] != null &&
+          widget.producto!['fecha_vencimiento'].toString().isNotEmpty) {
+        try {
+          _fechaVencimiento = DateTime.parse(
+            widget.producto!['fecha_vencimiento'],
+          );
+        } catch (_) {}
+      }
+      if (widget.producto!['fecha_alerta_vencimiento'] != null &&
+          widget.producto!['fecha_alerta_vencimiento'].toString().isNotEmpty) {
+        try {
+          _fechaAlertaVencimiento = DateTime.parse(
+            widget.producto!['fecha_alerta_vencimiento'],
+          );
+        } catch (_) {}
+      }
       int sMin = (widget.producto!['stock_minimo'] as num?)?.toInt() ?? 0;
       _stockMinCtrl.text = sMin > 0 ? sMin.toString() : '';
       _proveedorIdSeleccionado = widget.producto!['proveedor_id'] as int?;
@@ -1211,9 +1383,39 @@ class _PantallaFormularioProductoState
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("⚠️ Valores no pueden ser negativos"), backgroundColor: Colors.orange));
       return;
     }
-    if (pVenta <= pCompra && pVenta != 0) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("⚠️ El precio base de venta debe ser mayor al de compra"), backgroundColor: Colors.red));
-      return;
+    // 🔥 Validación estricta si es alimento y vence
+    if (_tipo == 'Alimento' && _vence) {
+      if (_fechaVencimiento == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("⚠️ Selecciona la fecha de vencimiento del alimento"),
+            backgroundColor: Colors.red,
+          ),
+        );
+        return;
+      }
+      if (_fechaAlertaVencimiento == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              "⚠️ La fecha de alerta de proximidad de vencimiento es obligatoria",
+            ),
+            backgroundColor: Colors.red,
+          ),
+        );
+        return;
+      }
+      if (_fechaAlertaVencimiento!.isAfter(_fechaVencimiento!)) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              "⚠️ La alerta de vencimiento debe ser anterior o igual a la fecha de vencimiento",
+            ),
+            backgroundColor: Colors.orange,
+          ),
+        );
+        return;
+      }
     }
     _gruposVariantes.removeWhere((g) {
       if (g['opciones'] == null || g['opciones'] is! List) return true;
@@ -1294,11 +1496,24 @@ class _PantallaFormularioProductoState
         'precio_compra': pCompra,
         'precio_venta': pVenta,
         'stock': nuevoStock,
-        'stock_minimo': sMinVal, // 👈 NUEVO
-        'proveedor_id': _proveedorIdSeleccionado, // 👈 NUEVO
+        'stock_minimo': sMinVal,
+        'proveedor_id': _proveedorIdSeleccionado,
         'foto_path': pathFinal,
         'orden': ordenActual,
         'descuento': descPct,
+        'fecha_fin_descuento': descPct > 0 && _fechaFinDescuento != null
+            ? _fechaFinDescuento!.toIso8601String()
+            : null,
+        'tipo': _tipo,
+        'vence': (_tipo == 'Alimento' && _vence) ? 1 : 0,
+        'fecha_vencimiento':
+            (_tipo == 'Alimento' && _vence && _fechaVencimiento != null)
+            ? _fechaVencimiento!.toIso8601String()
+            : null,
+        'fecha_alerta_vencimiento':
+            (_tipo == 'Alimento' && _vence && _fechaAlertaVencimiento != null)
+            ? _fechaAlertaVencimiento!.toIso8601String()
+            : null,
       };
 
       int idActual;
@@ -1511,6 +1726,468 @@ class _PantallaFormularioProductoState
               child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children:[
+            // 🏷️ SELECTOR TIPO DE PRODUCTO (PRODUCTO / ALIMENTO)
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 20),
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).cardColor,
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(
+                        color: isOscuro ? Colors.white10 : Colors.black12,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.03),
+                          blurRadius: 10,
+                          offset: const Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          "Tipo de Producto *",
+                          style: TextStyle(
+                            fontWeight: FontWeight.w900,
+                            fontSize: 14,
+                            color: isOscuro ? Colors.white70 : Colors.black87,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: ChoiceChip(
+                                label: Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: const [
+                                    Icon(Icons.inventory_2_outlined, size: 18),
+                                    SizedBox(width: 8),
+                                    Text(
+                                      "Producto",
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                selected: _tipo == 'Producto',
+                                selectedColor: isOscuro
+                                    ? Colors.cyanAccent.withOpacity(0.2)
+                                    : Colors.blue.shade100,
+                                onSelected: (v) {
+                                  if (v)
+                                    setState(() {
+                                      _tipo = 'Producto';
+                                      _vence = false;
+                                    });
+                                },
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: ChoiceChip(
+                                label: Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: const [
+                                    Icon(Icons.restaurant_rounded, size: 18),
+                                    SizedBox(width: 8),
+                                    Text(
+                                      "Alimento",
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                selected: _tipo == 'Alimento',
+                                selectedColor: Colors.orange.withOpacity(0.25),
+                                onSelected: (v) {
+                                  if (v) setState(() => _tipo = 'Alimento');
+                                },
+                              ),
+                            ),
+                          ],
+                        ),
+
+                        // Si es alimento, cuadro opcional ¿Vence?
+                        if (_tipo == 'Alimento') ...[
+                          const Divider(height: 25),
+                          SwitchListTile(
+                            contentPadding: EdgeInsets.zero,
+                            title: Text(
+                              "¿Tiene fecha de vencimiento?",
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                                color: isOscuro ? Colors.white : Colors.black87,
+                              ),
+                            ),
+                            subtitle: const Text(
+                              "Actívalo si el alimento caduca",
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Colors.grey,
+                              ),
+                            ),
+                            value: _vence,
+                            activeColor: Colors.orange,
+                            onChanged: (v) => setState(() => _vence = v),
+                          ),
+
+                          if (_vence) ...[
+                            const SizedBox(height: 10),
+
+                            // ⚡ ACCESOS RÁPIDOS DE 1 TOQUE
+                            SingleChildScrollView(
+                              scrollDirection: Axis.horizontal,
+                              child: Row(
+                                children: [
+                                  ActionChip(
+                                    avatar: const Icon(
+                                      Icons.bolt,
+                                      size: 16,
+                                      color: Colors.orange,
+                                    ),
+                                    label: const Text(
+                                      "Vence Mañana (Avisar Hoy)",
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                    onPressed: () {
+                                      DateTime now = DateTime.now();
+                                      setState(() {
+                                        _fechaVencimiento = DateTime(
+                                          now.year,
+                                          now.month,
+                                          now.day + 1,
+                                          23,
+                                          59,
+                                          59,
+                                        );
+                                        _fechaAlertaVencimiento = DateTime(
+                                          now.year,
+                                          now.month,
+                                          now.day,
+                                          0,
+                                          0,
+                                          0,
+                                        );
+                                      });
+                                    },
+                                  ),
+                                  const SizedBox(width: 8),
+                                  ActionChip(
+                                    label: const Text(
+                                      "En 7 días",
+                                      style: TextStyle(fontSize: 11),
+                                    ),
+                                    onPressed: () {
+                                      DateTime now = DateTime.now();
+                                      setState(() {
+                                        _fechaVencimiento = DateTime(
+                                          now.year,
+                                          now.month,
+                                          now.day + 7,
+                                          23,
+                                          59,
+                                          59,
+                                        );
+                                        _fechaAlertaVencimiento = DateTime(
+                                          now.year,
+                                          now.month,
+                                          now.day + 5,
+                                          0,
+                                          0,
+                                          0,
+                                        );
+                                      });
+                                    },
+                                  ),
+                                  const SizedBox(width: 8),
+                                  ActionChip(
+                                    label: const Text(
+                                      "En 30 días",
+                                      style: TextStyle(fontSize: 11),
+                                    ),
+                                    onPressed: () {
+                                      DateTime now = DateTime.now();
+                                      setState(() {
+                                        _fechaVencimiento = DateTime(
+                                          now.year,
+                                          now.month,
+                                          now.day + 30,
+                                          23,
+                                          59,
+                                          59,
+                                        );
+                                        _fechaAlertaVencimiento = DateTime(
+                                          now.year,
+                                          now.month,
+                                          now.day + 25,
+                                          0,
+                                          0,
+                                          0,
+                                        );
+                                      });
+                                    },
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+
+                            // 1. FECHA DE VENCIMIENTO
+                            InkWell(
+                              onTap: () async {
+                                DateTime ahora = DateTime.now();
+                                DateTime fechaInit = _fechaVencimiento ?? ahora;
+
+                                final picked = await showDatePicker(
+                                  context: context,
+                                  initialDate: fechaInit,
+                                  firstDate: DateTime(2020),
+                                  lastDate: DateTime(2040),
+                                );
+
+                                if (picked != null) {
+                                  setState(() {
+                                    _fechaVencimiento = DateTime(
+                                      picked.year,
+                                      picked.month,
+                                      picked.day,
+                                      23,
+                                      59,
+                                      59,
+                                    );
+
+                                    // 🔥 SINCRONIZACIÓN AUTOMÁTICA: Si la alerta estaba en otro mes o después del vencimiento, la reajustamos de inmediato a hoy o al mismo día
+                                    DateTime alertaMaxima = DateTime(
+                                      picked.year,
+                                      picked.month,
+                                      picked.day,
+                                      0,
+                                      0,
+                                      0,
+                                    );
+                                    if (_fechaAlertaVencimiento == null ||
+                                        _fechaAlertaVencimiento!.isAfter(
+                                          alertaMaxima,
+                                        )) {
+                                      DateTime hoy = DateTime(
+                                        ahora.year,
+                                        ahora.month,
+                                        ahora.day,
+                                        0,
+                                        0,
+                                        0,
+                                      );
+                                      _fechaAlertaVencimiento =
+                                          hoy.isBefore(alertaMaxima)
+                                          ? hoy
+                                          : alertaMaxima;
+                                    }
+                                  });
+                                }
+                              },
+                              borderRadius: BorderRadius.circular(12),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                  vertical: 12,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: isOscuro
+                                      ? Colors.white.withOpacity(0.04)
+                                      : Colors.grey.shade100,
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                    color: Colors.redAccent.withOpacity(0.4),
+                                  ),
+                                ),
+                                child: Row(
+                                  children: [
+                                    const Icon(
+                                      Icons.event_busy_rounded,
+                                      color: Colors.redAccent,
+                                      size: 20,
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: Builder(
+                                        builder: (context) {
+                                          const meses = [
+                                            '',
+                                            'Ene',
+                                            'Feb',
+                                            'Mar',
+                                            'Abr',
+                                            'May',
+                                            'Jun',
+                                            'Jul',
+                                            'Ago',
+                                            'Sep',
+                                            'Oct',
+                                            'Nov',
+                                            'Dic',
+                                          ];
+                                          String fechaTexto =
+                                              _fechaVencimiento == null
+                                              ? "Seleccionar Fecha de Vencimiento *"
+                                              : "Vence el: ${_fechaVencimiento!.day} de ${meses[_fechaVencimiento!.month]} de ${_fechaVencimiento!.year}";
+                                          return Text(
+                                            fechaTexto,
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 13,
+                                              color: _fechaVencimiento == null
+                                                  ? Colors.redAccent
+                                                  : (isOscuro
+                                                        ? Colors.white
+                                                        : Colors.black87),
+                                            ),
+                                          );
+                                        },
+                                      ),
+                                    ),
+                                    const Icon(
+                                      Icons.arrow_drop_down,
+                                      color: Colors.grey,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+
+                            const SizedBox(height: 14),
+
+                            const Text(
+                              "Fecha en la que se avisará que tu Producto alimenticio está próximo a vencer:",
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.orange,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+
+                            // 2. FECHA DE ALERTA (100% BLINDADA CONTRA BLOQUEOS)
+                            InkWell(
+                              onTap: () async {
+                                DateTime ahora = DateTime.now();
+                                DateTime maxDate =
+                                    _fechaVencimiento ?? DateTime(2040);
+
+                                // 🔥 Cálculo seguro que nunca causa error de límites
+                                DateTime initDate =
+                                    _fechaAlertaVencimiento ?? ahora;
+                                if (initDate.isAfter(maxDate)) {
+                                  initDate = maxDate;
+                                }
+                                DateTime minDate = DateTime(2020);
+                                if (initDate.isBefore(minDate)) {
+                                  initDate = minDate;
+                                }
+
+                                final picked = await showDatePicker(
+                                  context: context,
+                                  initialDate: initDate,
+                                  firstDate: minDate,
+                                  lastDate: maxDate,
+                                );
+
+                                if (picked != null) {
+                                  setState(() {
+                                    _fechaAlertaVencimiento = DateTime(
+                                      picked.year,
+                                      picked.month,
+                                      picked.day,
+                                      0,
+                                      0,
+                                      0,
+                                    );
+                                  });
+                                }
+                              },
+                              borderRadius: BorderRadius.circular(12),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                  vertical: 12,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: isOscuro
+                                      ? Colors.white.withOpacity(0.04)
+                                      : Colors.grey.shade100,
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                    color: Colors.orange.withOpacity(0.5),
+                                  ),
+                                ),
+                                child: Row(
+                                  children: [
+                                    const Icon(
+                                      Icons.notifications_active_rounded,
+                                      color: Colors.orange,
+                                      size: 20,
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: Builder(
+                                        builder: (context) {
+                                          const meses = [
+                                            '',
+                                            'Ene',
+                                            'Feb',
+                                            'Mar',
+                                            'Abr',
+                                            'May',
+                                            'Jun',
+                                            'Jul',
+                                            'Ago',
+                                            'Sep',
+                                            'Oct',
+                                            'Nov',
+                                            'Dic',
+                                          ];
+                                          String alertaTexto =
+                                              _fechaAlertaVencimiento == null
+                                              ? "Seleccionar Fecha de Alerta *"
+                                              : "Avisar desde el: ${_fechaAlertaVencimiento!.day} de ${meses[_fechaAlertaVencimiento!.month]} de ${_fechaAlertaVencimiento!.year}";
+                                          return Text(
+                                            alertaTexto,
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 13,
+                                              color:
+                                                  _fechaAlertaVencimiento ==
+                                                      null
+                                                  ? Colors.orange
+                                                  : (isOscuro
+                                                        ? Colors.white
+                                                        : Colors.black87),
+                                            ),
+                                          );
+                                        },
+                                      ),
+                                    ),
+                                    const Icon(
+                                      Icons.arrow_drop_down,
+                                      color: Colors.grey,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ],
+                    ),
+                  ),
             
             // FOTO PRINCIPAL
             InkWell(
@@ -1585,30 +2262,165 @@ class _PantallaFormularioProductoState
             ),
             const SizedBox(height: 12),
             Row(
-              children: [
-                Expanded(child: TextField(controller: _descPctC, onChanged: (v)=>setState((){}), keyboardType: TextInputType.number, decoration: _decoModerno('Desc %', Icons.percent_rounded))),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 10),
-                    decoration: BoxDecoration(
-                      color: generaPerdida ? Colors.red.withOpacity(0.15) : (descPct > 0 ? Colors.green.withOpacity(0.15) : (isOscuro ? Colors.white10 : Colors.grey.shade200)),
-                      borderRadius: BorderRadius.circular(15),
-                      border: Border.all(color: generaPerdida ? Colors.red : (descPct > 0 ? Colors.green : Colors.transparent))
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _descPctC,
+                          onChanged: (v) => setState(() {}),
+                          keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true,
+                          ),
+                          decoration: _decoModerno(
+                            'Desc %',
+                            Icons.percent_rounded,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            vertical: 12,
+                            horizontal: 10,
+                          ),
+                          decoration: BoxDecoration(
+                            color: generaPerdida
+                                ? Colors.red.withOpacity(0.15)
+                                : (descPct > 0
+                                      ? Colors.green.withOpacity(0.15)
+                                      : (isOscuro
+                                            ? Colors.white10
+                                            : Colors.grey.shade200)),
+                            borderRadius: BorderRadius.circular(15),
+                            border: Border.all(
+                              color: generaPerdida
+                                  ? Colors.red
+                                  : (descPct > 0
+                                        ? Colors.green
+                                        : Colors.transparent),
+                            ),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Text(
+                                "Precio Final:",
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                  color: isOscuro
+                                      ? Colors.white54
+                                      : Colors.black54,
+                                ),
+                              ),
+                              FittedBox(
+                                child: Text(
+                                  "\$${precioFinal.toStringAsFixed(0)}",
+                                  style: TextStyle(
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.w900,
+                                    color: generaPerdida
+                                        ? Colors.redAccent
+                                        : (isOscuro
+                                              ? Colors.white
+                                              : Colors.black87),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (descPct > 0) ...[
+                    const SizedBox(height: 10),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: isOscuro
+                            ? Colors.white.withOpacity(0.04)
+                            : Colors.orange.shade50.withOpacity(0.5),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: isOscuro
+                              ? Colors.white12
+                              : Colors.orange.shade200,
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(
+                            Icons.timer_outlined,
+                            color: Colors.orange,
+                            size: 20,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              _fechaFinDescuento == null
+                                  ? "Sin fecha límite (Permanente)"
+                                  : "Vence: ${_fechaFinDescuento!.day.toString().padLeft(2, '0')}/${_fechaFinDescuento!.month.toString().padLeft(2, '0')}/${_fechaFinDescuento!.year} 11:59 PM",
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                                color: isOscuro
+                                    ? Colors.white70
+                                    : Colors.black87,
+                              ),
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: () async {
+                              final picked = await showDatePicker(
+                                context: context,
+                                initialDate:
+                                    _fechaFinDescuento ?? DateTime.now(),
+                                firstDate: DateTime.now(),
+                                lastDate: DateTime(2035),
+                              );
+                              if (picked != null) {
+                                setState(() {
+                                  // Fija el vencimiento al final exacto del día seleccionado (11:59:59 PM)
+                                  _fechaFinDescuento = DateTime(
+                                    picked.year,
+                                    picked.month,
+                                    picked.day,
+                                    23,
+                                    59,
+                                    59,
+                                  );
+                                });
+                              }
+                            },
+                            child: Text(
+                              _fechaFinDescuento == null
+                                  ? "Fijar fecha"
+                                  : "Cambiar",
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                          if (_fechaFinDescuento != null)
+                            IconButton(
+                              icon: const Icon(
+                                Icons.close,
+                                size: 18,
+                                color: Colors.red,
+                              ),
+                              onPressed: () =>
+                                  setState(() => _fechaFinDescuento = null),
+                              tooltip: "Quitar fecha límite",
+                            ),
+                        ],
+                      ),
                     ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Text("Precio Final:", style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: isOscuro ? Colors.white54 : Colors.black54)),
-                        // FittedBox previene la cinta de policia si el número es enorme
-                        FittedBox(child: Text("\$${precioFinal.toStringAsFixed(0)}", style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: generaPerdida ? Colors.redAccent : (isOscuro ? Colors.white : Colors.black87)))),
-                      ],
-                    ),
-                  )
-                )
-              ],
-            ),
+                  ],
             if (generaPerdida)
               Padding(
                 padding: const EdgeInsets.only(top: 10),
@@ -2632,4 +3444,18 @@ class _AnuncioNativoWidgetState extends State<AnuncioNativoWidget> {
       ),
     );
   }
+}
+
+double obtenerDescuentoVigente(dynamic descVal, dynamic fechaFinVal) {
+  double desc = (descVal as num?)?.toDouble() ?? 0.0;
+  if (desc <= 0) return 0.0;
+  if (fechaFinVal != null && fechaFinVal.toString().trim().isNotEmpty && fechaFinVal.toString() != "null") {
+    try {
+      DateTime fin = DateTime.parse(fechaFinVal.toString());
+      if (DateTime.now().isAfter(fin)) {
+        return 0.0; // Descuento expirado
+      }
+    } catch (_) {}
+  }
+  return desc;
 }

@@ -14,6 +14,7 @@ import 'package:Boxi/screens/servicio_fcm.dart';
 import 'api_keys.dart'; // 🔥 NUEVO: Importamos el archivo de llaves oculto
 import 'package:app_links/app_links.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -127,7 +128,16 @@ class BoxiApp extends StatelessWidget {
         return MaterialApp(
           debugShowCheckedModeBanner: false,
           title: 'Boxi',
-          themeMode: modoActual, 
+          themeMode: modoActual,
+
+          // 🇪🇸 IDIOMA ESPAÑOL GLOBAL (Calendarios, meses, botones en español)
+          locale: const Locale('es', 'ES'),
+          supportedLocales: const [Locale('es', 'ES'), Locale('es')],
+          localizationsDelegates: const [
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
 
           theme: ThemeData(
             brightness: Brightness.light,

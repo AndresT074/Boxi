@@ -271,14 +271,37 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   Future<void> _cargar() async {
     final db = await DBHelper.instance.database;
     
-    final data = await db.query('productos',
-        columns: ['id', 'nombre', 'precio_compra', 'precio_venta', 'descuento', 'stock', 'descripcion', 'variantes', 'orden', 'activo', 'ultima_modificacion', 'categoria', 'foto_path'],
-        where: 'activo = 1', orderBy: 'orden ASC, id DESC');
-    
+    final data = await db.query(
+      'productos',
+      columns: [
+        'id',
+        'nombre',
+        'precio_compra',
+        'precio_venta',
+        'descuento',
+        'fecha_fin_descuento',
+        'stock',
+        'descripcion',
+        'variantes',
+        'orden',
+        'activo',
+        'ultima_modificacion',
+        'categoria',
+        'foto_path',
+      ],
+      where: 'activo = 1',
+      orderBy: 'orden ASC, id DESC',
+    );
     final catData = await db.query('categorias', orderBy: 'orden ASC, id DESC');
     
-    List<Map<String, dynamic>> datosEditables =
-        data.map((e) => Map<String, dynamic>.from(e)).toList();
+    List<Map<String, dynamic>> datosEditables = data.map((e) {
+      var item = Map<String, dynamic>.from(e);
+      item['descuento'] = obtenerDescuentoVigente(
+        item['descuento'],
+        item['fecha_fin_descuento'],
+      );
+      return item;
+    }).toList();
     bool necesitaForzarNube = false;
     for (int i = 0; i < datosEditables.length; i++) {
       if (datosEditables[i]['orden'] == null) {
@@ -2936,7 +2959,11 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
 
   void _mostrarDetalleProducto(Map<String, dynamic> p_parcial) async {
     final db = await DBHelper.instance.database;
-    final res = await db.query('productos', where: 'id = ?', whereArgs: [p_parcial['id']]);
+    final res = await db.query(
+      'productos',
+      where: 'id = ?',
+      whereArgs: [p_parcial['id']],
+    );
     if (res.isEmpty || !mounted) return;
     final p = res.first; // Tenemos el producto completo
 
@@ -2951,18 +2978,30 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
     String nombreProd = p['nombre']?.toString() ?? "Producto sin nombre";
     String descProd = p['descripcion']?.toString() ?? "";
 
-    // 🔥 RESOLUCIÓN DE IMAGEN INTELIGENTE Y SEGURA ANTES DE ABRIR EL DIÁLOGO
+    String? hastaFecha = formatearVencimientoDescuento(
+      p['fecha_fin_descuento'],
+      corto: false,
+    );
+    String textoOfertaModal = hastaFecha != null
+        ? "OFERTA -${_formatDesc(descPct)}% $hastaFecha"
+        : "OFERTA -${_formatDesc(descPct)}%";
+
+    // RESOLUCIÓN DE IMAGEN
     dynamic imagenAProcesar;
     if (fotoPath.isNotEmpty) {
-      String? rutaSegura = await ServicioNube.obtenerRutaLegibleSegura(fotoPath);
+      String? rutaSegura = await ServicioNube.obtenerRutaLegibleSegura(
+        fotoPath,
+      );
       if (rutaSegura != null) {
-        imagenAProcesar = File(rutaSegura); // Archivo local legible y verificado
+        imagenAProcesar = File(rutaSegura);
       } else {
         if (fotoPath.startsWith('http')) {
-          imagenAProcesar = fotoPath; // Fallback seguro a Internet
+          imagenAProcesar = fotoPath;
           final appDir = await getApplicationDocumentsDirectory();
-          // Mandamos a descargar en segundo plano a la zona privada de la app
-          ServicioNube.descargarFotoIndividualEnSegundoPlano(fotoPath, '${appDir.path}/Boxi');
+          ServicioNube.descargarFotoIndividualEnSegundoPlano(
+            fotoPath,
+            '${appDir.path}/Boxi',
+          );
         } else {
           imagenAProcesar = null;
         }
@@ -2984,24 +3023,66 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                 children: [
                   imagenAProcesar != null
                       ? GestureDetector(
-                          onTap: () => _ampliarImagen(context, imagenAProcesar is File ? imagenAProcesar.path : imagenAProcesar, nombreProd),
+                          onTap: () => _ampliarImagen(
+                            context,
+                            imagenAProcesar is File
+                                ? imagenAProcesar.path
+                                : imagenAProcesar,
+                            nombreProd,
+                          ),
                           child: Container(
-                            color: Colors.black, 
-                            width: double.infinity, 
-                            height: 280, 
+                            color: Colors.black,
+                            width: double.infinity,
+                            height: 280,
                             child: imagenAProcesar is File
-                                ? Image.file(imagenAProcesar, fit: BoxFit.contain)
-                                : Image.network(imagenAProcesar.toString(), fit: BoxFit.contain, errorBuilder: (_,__,___) => const Icon(Icons.broken_image, color: Colors.white, size: 60)),
+                                ? Image.file(
+                                    imagenAProcesar,
+                                    fit: BoxFit.contain,
+                                  )
+                                : Image.network(
+                                    imagenAProcesar.toString(),
+                                    fit: BoxFit.contain,
+                                    errorBuilder: (_, __, ___) => const Icon(
+                                      Icons.broken_image,
+                                      color: Colors.white,
+                                      size: 60,
+                                    ),
+                                  ),
                           ),
                         )
-                      : Container(height: 250, width: double.infinity, color: isOscuro ? Colors.white10 : Colors.grey.shade200, child: const Icon(Icons.image, size: 60, color: Colors.grey)),
+                      : Container(
+                          height: 250,
+                          width: double.infinity,
+                          color: isOscuro
+                              ? Colors.white10
+                              : Colors.grey.shade200,
+                          child: const Icon(
+                            Icons.image,
+                            size: 60,
+                            color: Colors.grey,
+                          ),
+                        ),
                   if (descPct > 0)
                     Positioned(
-                      top: 15, left: 15,
+                      top: 15,
+                      left: 15,
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                        decoration: BoxDecoration(color: Colors.red, borderRadius: BorderRadius.circular(10)),
-                        child: Text("OFERTA -${descPct.toStringAsFixed(0)}%", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14)),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.red,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text(
+                          textoOfertaModal,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 13,
+                          ),
+                        ),
                       ),
                     ),
                 ],
@@ -3017,19 +3098,39 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                         Expanded(
                           child: GestureDetector(
                             onTap: () {
-                              Clipboard.setData(ClipboardData(text: nombreProd));
+                              Clipboard.setData(
+                                ClipboardData(text: nombreProd),
+                              );
                               ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text("Nombre del producto copiado 📋"), duration: Duration(seconds: 1)),
+                                const SnackBar(
+                                  content: Text(
+                                    "Nombre del producto copiado 📋",
+                                  ),
+                                  duration: Duration(seconds: 1),
+                                ),
                               );
                             },
                             child: Tooltip(
                               message: "Toca para copiar",
-                              child: Text(nombreProd, style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: isOscuro ? Colors.white : Colors.black)),
+                              child: Text(
+                                nombreProd,
+                                style: TextStyle(
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.w900,
+                                  color: isOscuro ? Colors.white : Colors.black,
+                                ),
+                              ),
                             ),
                           ),
                         ),
                         IconButton(
-                          icon: Icon(Icons.share, size: 28, color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)),
+                          icon: Icon(
+                            Icons.share,
+                            size: 28,
+                            color: isOscuro
+                                ? Colors.cyanAccent
+                                : const Color(0xFF0D47A1),
+                          ),
                           onPressed: () => _compartirProducto(p),
                         ),
                       ],
@@ -3042,9 +3143,24 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                           Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text("Precio Original", style: TextStyle(fontSize: 11, color: isOscuro ? Colors.white54 : Colors.grey)),
-                              Text("\$${precioOriginal.toStringAsFixed(0)}", 
-                                style: const TextStyle(fontSize: 16, color: Colors.red, decoration: TextDecoration.lineThrough, fontWeight: FontWeight.w600)),
+                              Text(
+                                "Precio Original",
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: isOscuro
+                                      ? Colors.white54
+                                      : Colors.grey,
+                                ),
+                              ),
+                              Text(
+                                "\$${precioOriginal.toStringAsFixed(0)}",
+                                style: const TextStyle(
+                                  fontSize: 16,
+                                  color: Colors.red,
+                                  decoration: TextDecoration.lineThrough,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
                             ],
                           ),
                           const SizedBox(width: 20),
@@ -3052,16 +3168,29 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                         Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(descPct > 0 ? "Precio con Descuento" : "Precio de Venta", 
-                              style: TextStyle(fontSize: 11, color: isOscuro ? Colors.white54 : Colors.grey)),
-                            Text("\$${precioFinal.toStringAsFixed(0)}", 
+                            Text(
+                              descPct > 0
+                                  ? "Precio con Descuento"
+                                  : "Precio de Venta",
                               style: TextStyle(
-                                fontSize: 28, 
-                                color: descPct > 0 
-                                  ? (isOscuro ? Colors.greenAccent : Colors.green) 
-                                  : (isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1)), 
-                                fontWeight: FontWeight.w900
-                              )),
+                                fontSize: 11,
+                                color: isOscuro ? Colors.white54 : Colors.grey,
+                              ),
+                            ),
+                            Text(
+                              "\$${precioFinal.toStringAsFixed(0)}",
+                              style: TextStyle(
+                                fontSize: 28,
+                                color: descPct > 0
+                                    ? (isOscuro
+                                          ? Colors.greenAccent
+                                          : Colors.green)
+                                    : (isOscuro
+                                          ? Colors.cyanAccent
+                                          : const Color(0xFF0D47A1)),
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
                           ],
                         ),
                       ],
@@ -3070,34 +3199,69 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                       Container(
                         margin: const EdgeInsets.only(top: 15),
                         padding: const EdgeInsets.all(10),
-                        decoration: BoxDecoration(color: Colors.red.withOpacity(0.1), borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.red.withOpacity(0.3))),
-                        child: Row(
+                        decoration: BoxDecoration(
+                          color: Colors.red.withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                            color: Colors.red.withOpacity(0.3),
+                          ),
+                        ),
+                        child: const Row(
                           children: [
-                            const Icon(Icons.warning_amber_rounded, color: Colors.redAccent, size: 20),
-                            const SizedBox(width: 8),
-                            const Expanded(child: Text("Este descuento genera pérdidas.", style: TextStyle(color: Colors.redAccent, fontSize: 11, fontWeight: FontWeight.bold))),
+                            Icon(
+                              Icons.warning_amber_rounded,
+                              color: Colors.redAccent,
+                              size: 20,
+                            ),
+                            SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                "Este descuento genera pérdidas.",
+                                style: TextStyle(
+                                  color: Colors.redAccent,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
                           ],
                         ),
                       ),
                     const SizedBox(height: 25),
-                    Text("Descripción (Toca para copiar):", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: isOscuro ? Colors.blue.shade200 : Colors.blueGrey)),
+                    Text(
+                      "Descripción (Toca para copiar):",
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 14,
+                        color: isOscuro
+                            ? Colors.blue.shade200
+                            : Colors.blueGrey,
+                      ),
+                    ),
                     const SizedBox(height: 8),
                     GestureDetector(
                       onTap: () {
                         if (descProd.trim().isNotEmpty) {
                           Clipboard.setData(ClipboardData(text: descProd));
                           ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text("Descripción copiada 📋"), duration: Duration(seconds: 1)),
+                            const SnackBar(
+                              content: Text("Descripción copiada 📋"),
+                              duration: Duration(seconds: 1),
+                            ),
                           );
                         }
                       },
                       child: Tooltip(
                         message: "Toca para copiar",
                         child: Text(
-                          descProd.trim().isNotEmpty 
-                              ? descProd 
+                          descProd.trim().isNotEmpty
+                              ? descProd
                               : "No hay descripción disponible.",
-                          style: TextStyle(fontSize: 15, color: isOscuro ? Colors.white70 : Colors.black87, height: 1.4),
+                          style: TextStyle(
+                            fontSize: 15,
+                            color: isOscuro ? Colors.white70 : Colors.black87,
+                            height: 1.4,
+                          ),
                         ),
                       ),
                     ),
@@ -3109,14 +3273,24 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
                 padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
                 child: ElevatedButton(
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: isOscuro ? Colors.white12 : const Color(0xFF0D47A1), 
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)), 
-                    padding: const EdgeInsets.symmetric(vertical: 15)
+                    backgroundColor: isOscuro
+                        ? Colors.white12
+                        : const Color(0xFF0D47A1),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(15),
+                    ),
+                    padding: const EdgeInsets.symmetric(vertical: 15),
                   ),
                   onPressed: () => Navigator.pop(ctx),
-                  child: Text("CERRAR", style: TextStyle(color: isOscuro ? Colors.white70 : Colors.white, fontWeight: FontWeight.bold)),
+                  child: Text(
+                    "CERRAR",
+                    style: TextStyle(
+                      color: isOscuro ? Colors.white70 : Colors.white,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
                 ),
-              )
+              ),
             ],
           ),
         ),
@@ -3387,7 +3561,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       child: Stack( // 🔥 Envolvemos el Scaffold en un Stack para poder superponer el modal
         children: [
           Scaffold(
-            resizeToAvoidBottomInset: !_estaBuscando, 
+            resizeToAvoidBottomInset: false, // 🔥 CIERRE DEL TECLADO INSTANTÁNEO
             appBar: AppBar(backgroundColor: isOscuro ? const Color(0xFF0D1B2A) : const Color(0xFF0D47A1),
               titleSpacing: 0,
               leading: widget.esAdmin ? null : IconButton(
@@ -3935,11 +4109,12 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       ]),
     );
   }
-
-  String _formatDesc(double pct) => pct == pct.roundToDouble() 
-    ? pct.toStringAsFixed(0) 
-    : pct.toStringAsFixed(1);
-
+  String _formatDesc(double pct) {
+    if (pct <= 0) return "0";
+    if (pct == pct.roundToDouble()) return pct.toInt().toString();
+    String formateado = pct.toStringAsFixed(1);
+    return formateado.endsWith('.0') ? pct.toInt().toString() : formateado;
+  }
   Widget _btnCant(IconData icon, Color color, VoidCallback onTap) => 
     IconButton(icon: Icon(icon, size: 22, color: color), onPressed: onTap, constraints: const BoxConstraints(), padding: const EdgeInsets.all(4));
 
@@ -4139,6 +4314,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       },
     );
   }
+  
   void _mostrarDialogoDescuento() {
     showModalBottomSheet(
       context: context,
@@ -4146,61 +4322,80 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
       backgroundColor: Colors.transparent,
       builder: (ctx) => _DialogoDescuentoCart(
         carritoActual: carrito,
-        productosOriginales: productos, // 🔥 Enviamos la lista de inventario para comparar
+        productosOriginales: productos,
         globalInicial: _aplicarDescuentoGlobal,
         pctInicial: _descuentoGlobalPct,
         onAplicar: (individuales, global, pct) {
           setState(() {
             _aplicarDescuentoGlobal = global;
             _descuentoGlobalPct = pct;
-            
+
             if (!global) {
-              // 🔥 1. LIMPIAR DIVISIONES PREVIAS Y REINTEGRAR CANTIDADES ANTES DE APLICAR NUEVOS VALORES
+              // 1. REUNIFICAR PRODUCTOS DIVIDIDOS PREVIAMENTE RESTAURANDO SU DESCUENTO ORIGINAL DE INVENTARIO
               List<Map<String, dynamic>> carritoLimpio = [];
               for (var item in carrito) {
+                var prodBase = productos.firstWhere(
+                  (p) => p['id'] == item['id'],
+                  orElse: () => {},
+                );
+                double descInventario = prodBase.isNotEmpty
+                    ? (prodBase['descuento'] ?? 0).toDouble()
+                    : 0.0;
+
                 if (item['cart_id'].toString().contains('_desc_')) {
-                  String idBase = item['cart_id'].toString().split('_desc_').first;
-                  int idxBase = carritoLimpio.indexWhere((x) => x['cart_id'].toString() == idBase);
+                  String idBase = item['cart_id']
+                      .toString()
+                      .split('_desc_')
+                      .first;
+                  int idxBase = carritoLimpio.indexWhere(
+                    (x) => x['cart_id'].toString() == idBase,
+                  );
                   if (idxBase != -1) {
                     carritoLimpio[idxBase]['cantidad'] += item['cantidad'];
                   } else {
                     var restaurado = Map<String, dynamic>.from(item);
                     restaurado['cart_id'] = idBase;
-                    restaurado['descuento'] = 0.0;
+                    restaurado['descuento'] = descInventario;
                     carritoLimpio.add(restaurado);
                   }
                 } else {
                   var limpio = Map<String, dynamic>.from(item);
-                  limpio['descuento'] = 0.0; // Reseteamos temporalmente
+                  limpio['descuento'] =
+                      descInventario; // Restaura su descuento original de inventario, nunca 0.0 arbitrario
                   carritoLimpio.add(limpio);
                 }
               }
 
-              // 🔥 2. APLICAR NUEVOS VALORES INDIVIDUALES
-              List<Map<String, dynamic>> nuevoCarrito = [];         
+              // 2. APLICAR DESCUENTOS MANUALES DEL MODAL SIN CORROMPER LOS DEMÁS
+              List<Map<String, dynamic>> nuevoCarrito = [];
               for (var item in carritoLimpio) {
                 var discData = individuales.firstWhere(
-                  (d) => d['cart_id'] == item['cart_id'], 
-                  orElse: () => {}
+                  (d) => d['cart_id'] == item['cart_id'],
+                  orElse: () => {},
                 );
+
                 if (discData.isNotEmpty) {
                   int qtyOriginal = item['cantidad'];
                   int qtyDesc = discData['qty'];
                   double pctDesc = discData['desc'];
+
                   if (qtyDesc < qtyOriginal) {
                     item['cantidad'] = qtyOriginal - qtyDesc;
                     nuevoCarrito.add(item);
+
                     var itemConDesc = Map<String, dynamic>.from(item);
                     itemConDesc['cantidad'] = qtyDesc;
                     itemConDesc['descuento'] = pctDesc;
-                    itemConDesc['cart_id'] = "${item['cart_id']}_desc_$pctDesc"; 
+                    itemConDesc['cart_id'] = "${item['cart_id']}_desc_$pctDesc";
                     nuevoCarrito.add(itemConDesc);
                   } else {
                     item['descuento'] = pctDesc;
                     nuevoCarrito.add(item);
                   }
                 } else {
-                  nuevoCarrito.add(item);
+                  nuevoCarrito.add(
+                    item,
+                  ); // Conserva el descuento original de inventario
                 }
               }
               carrito = nuevoCarrito;
@@ -4213,28 +4408,41 @@ class _PantallaPrincipalState extends State<PantallaPrincipal>
   
   Widget _construirFotoConEtiqueta(Map<String, dynamic> p, int columnas) {
     double descPct = (p['descuento'] ?? 0).toDouble();
-    String fotoPath = p['foto_path']?.toString() ?? ""; // 🔥 Extraído directo de la RAM
+    String fotoPath = p['foto_path']?.toString() ?? "";
+    // 🔥 corto: true para que en la tarjeta solo salga la fecha (sin hora)
+    String? hastaFecha = formatearVencimientoDescuento(
+      p['fecha_fin_descuento'],
+      corto: true,
+    );
+    String textoEtiqueta = hastaFecha != null 
+        ? "-${_formatDesc(descPct)}% $hastaFecha" 
+        : "-${_formatDesc(descPct)}%";
+
     return SizedBox(
       width: double.infinity,
       height: double.infinity,
       child: Stack(
         fit: StackFit.expand, 
         children: [
-          _foto(p['id'], fotoPath), // 🔥 Pasamos la ruta de una vez
+          _foto(p['id'], fotoPath),
           if (descPct > 0)
             Positioned(
               top: 8,
               left: 0,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
                 decoration: const BoxDecoration(
                   color: Colors.red,
                   borderRadius: BorderRadius.only(topRight: Radius.circular(10), bottomRight: Radius.circular(10)),
                   boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 4)]
                 ),
                 child: Text(
-                  '-${_formatDesc(descPct)}%',
-                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11),
+                  textoEtiqueta,
+                  style: TextStyle(
+                    color: Colors.white, 
+                    fontWeight: FontWeight.w900, 
+                    fontSize: columnas >= 5 ? 8 : 10,
+                  ),
                 ),
               ),
             ),
@@ -6595,56 +6803,86 @@ class _PantallaSolicitudesState extends State<PantallaSolicitudes> {
 
 class _DialogoDescuentoCart extends StatefulWidget {
   final List<Map<String, dynamic>> carritoActual;
-  final List<Map<String, dynamic>> productosOriginales; // 🔥 Recibe el inventario original
+  final List<Map<String, dynamic>> productosOriginales;
   final bool globalInicial;
   final double pctInicial;
   final Function(List<Map<String, dynamic>>, bool, double) onAplicar;
+
   const _DialogoDescuentoCart({
-    required this.carritoActual, 
-    required this.productosOriginales, // 🔥 Recibe el inventario original
-    required this.globalInicial, 
-    required this.pctInicial, 
-    required this.onAplicar
+    required this.carritoActual,
+    required this.productosOriginales,
+    required this.globalInicial,
+    required this.pctInicial,
+    required this.onAplicar,
   });
+
   @override
   State<_DialogoDescuentoCart> createState() => _DialogoDescuentoCartState();
 }
 
 class _DialogoDescuentoCartState extends State<_DialogoDescuentoCart> {
   late bool _globalActivo;
+  bool _modoDineroGlobal = false;
   final TextEditingController _globalCtrl = TextEditingController();
+
   final Map<String, TextEditingController> _cantCtrls = {};
-  final Map<String, TextEditingController> _pctCtrls = {};
+  final Map<String, TextEditingController> _valCtrls = {};
+  final Map<String, bool> _modoDineroInd = {}; // false = %, true = $
+
+  String _fmtExact(double val) {
+    if (val <= 0) return "";
+    if (val == val.roundToDouble()) return val.toInt().toString();
+    return val
+        .toStringAsFixed(4)
+        .replaceAll(RegExp(r'0+$'), '')
+        .replaceAll(RegExp(r'\.$'), '');
+  }
+
   @override
   void initState() {
     super.initState();
     _globalActivo = widget.globalInicial;
-    _globalCtrl.text = widget.pctInicial > 0 ? widget.pctInicial.toStringAsFixed(0) : "";
+    _globalCtrl.text = _fmtExact(widget.pctInicial);
+
     for (var item in widget.carritoActual) {
       if (item['es_domicilio'] == true) continue;
-      
-      // 🔥 Buscamos si el producto originalmente ya tiene un descuento definitivo en inventario
+
       var original = widget.productosOriginales.firstWhere(
-        (p) => p['id'] == item['id'], 
-        orElse: () => <String, dynamic>{}
+        (p) => p['id'] == item['id'],
+        orElse: () => <String, dynamic>{},
       );
-      double descOriginal = original.isNotEmpty ? (original['descuento'] ?? 0).toDouble() : 0.0;
-      
-      // Si el descuento del carrito es manual, mostramos el valor para poder regresarlo a 0
-      double descAMostrar = descOriginal > 0 ? descOriginal : (item['descuento'] ?? 0).toDouble();
+      double descOriginal = original.isNotEmpty
+          ? (original['descuento'] ?? 0).toDouble()
+          : 0.0;
+      double descAMostrar = descOriginal > 0
+          ? descOriginal
+          : (item['descuento'] ?? 0).toDouble();
 
       String id = item['cart_id']?.toString() ?? "sin_id";
       _cantCtrls[id] = TextEditingController(text: "${item['cantidad']}");
-      _pctCtrls[id] = TextEditingController(text: descAMostrar > 0 ? descAMostrar.toStringAsFixed(0) : "");
+      _valCtrls[id] = TextEditingController(text: _fmtExact(descAMostrar));
+      _modoDineroInd[id] = false; // Por defecto inicia en porcentaje
     }
   }
+
   @override
   void dispose() {
     _globalCtrl.dispose();
     for (var c in _cantCtrls.values) c.dispose();
-    for (var c in _pctCtrls.values) c.dispose();
+    for (var c in _valCtrls.values) c.dispose();
     super.dispose();
   }
+
+  double _obtenerPctEfectivo(Map<String, dynamic> item, String id) {
+    double inputVal = double.tryParse(_valCtrls[id]?.text ?? "0") ?? 0;
+    if (inputVal <= 0) return 0.0;
+    if (_modoDineroInd[id] == true) {
+      double pVenta = (item['precio_venta'] as num).toDouble();
+      return pVenta > 0 ? (inputVal / pVenta) * 100 : 0.0;
+    }
+    return inputVal;
+  }
+
   bool _generaPerdida(Map<String, dynamic> item, double pctDesc) {
     double costo = (item['precio_compra'] ?? 0).toDouble();
     double ventaBase = (item['precio_venta'] ?? 0).toDouble();
@@ -6657,126 +6895,299 @@ class _DialogoDescuentoCartState extends State<_DialogoDescuentoCart> {
   Widget build(BuildContext context) {
     final bool isOscuro = Theme.of(context).brightness == Brightness.dark;
     bool perdidaGlobal = false;
+
     if (_globalActivo) {
-      double pctG = double.tryParse(_globalCtrl.text) ?? 0;
-      perdidaGlobal = widget.carritoActual.any((item) => item['es_domicilio'] != true && _generaPerdida(item, pctG));
+      double rawInput = double.tryParse(_globalCtrl.text) ?? 0;
+      perdidaGlobal = widget.carritoActual.any((item) {
+        if (item['es_domicilio'] == true) return false;
+        double pVenta = (item['precio_venta'] as num).toDouble();
+        double pctG = _modoDineroGlobal
+            ? (pVenta > 0 ? (rawInput / pVenta) * 100 : 0.0)
+            : rawInput;
+        return _generaPerdida(item, pctG);
+      });
     }
+
     return Container(
       decoration: BoxDecoration(
-        color: Theme.of(context).cardColor, 
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(30))
+        color: Theme.of(context).cardColor,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(30)),
       ),
-      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom + 20, left: 20, right: 20, top: 20),
+      padding: EdgeInsets.only(
+        bottom: MediaQuery.of(context).viewInsets.bottom + 20,
+        left: 20,
+        right: 20,
+        top: 20,
+      ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Container(width: 50, height: 5, decoration: BoxDecoration(color: isOscuro ? Colors.white24 : Colors.grey[600], borderRadius: BorderRadius.circular(10))),
-          const SizedBox(height: 20),
-          Text("GESTIONAR DESCUENTOS", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: isOscuro ? Colors.white : Colors.black)),
+          Container(
+            width: 50,
+            height: 5,
+            decoration: BoxDecoration(
+              color: isOscuro ? Colors.white24 : Colors.grey[600],
+              borderRadius: BorderRadius.circular(10),
+            ),
+          ),
+          const SizedBox(height: 15),
+          Text(
+            "GESTIONAR DESCUENTOS",
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
+              color: isOscuro ? Colors.white : Colors.black,
+            ),
+          ),
           SwitchListTile(
-            title: Text("Descuento Global", style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: isOscuro ? Colors.white : Colors.black)),
+            title: Text(
+              "Descuento Global",
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.bold,
+                color: isOscuro ? Colors.white : Colors.black,
+              ),
+            ),
             value: _globalActivo,
             activeColor: Colors.orangeAccent,
             onChanged: (v) => setState(() => _globalActivo = v),
           ),
           if (_globalActivo) ...[
-            TextField(
-              controller: _globalCtrl,
-              onChanged: (v) => setState(() {}),
-              keyboardType: TextInputType.number,
-              style: TextStyle(color: isOscuro ? Colors.white : Colors.black),
-              decoration: InputDecoration(
-                labelText: "% Descuento Global", 
-                labelStyle: TextStyle(color: isOscuro ? Colors.white70 : Colors.black54),
-                border: const OutlineInputBorder(), 
-                suffixText: "%",
-                suffixStyle: TextStyle(color: isOscuro ? Colors.white70 : Colors.black54),
-              ),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _globalCtrl,
+                    onChanged: (v) => setState(() {}),
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    style: TextStyle(
+                      color: isOscuro ? Colors.white : Colors.black,
+                    ),
+                    decoration: InputDecoration(
+                      labelText: _modoDineroGlobal
+                          ? "Monto a descontar (\$)"
+                          : "Porcentaje a descontar (%)",
+                      labelStyle: TextStyle(
+                        color: isOscuro ? Colors.white70 : Colors.black54,
+                      ),
+                      border: const OutlineInputBorder(),
+                      prefixText: _modoDineroGlobal ? "\$ " : null,
+                      suffixText: !_modoDineroGlobal ? "%" : null,
+                      suffixStyle: TextStyle(
+                        color: isOscuro ? Colors.white70 : Colors.black54,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                ChoiceChip(
+                  label: const Text("%"),
+                  selected: !_modoDineroGlobal,
+                  onSelected: (v) => setState(() => _modoDineroGlobal = !v),
+                ),
+                const SizedBox(width: 5),
+                ChoiceChip(
+                  label: const Text("\$"),
+                  selected: _modoDineroGlobal,
+                  onSelected: (v) => setState(() => _modoDineroGlobal = v),
+                ),
+              ],
             ),
             if (perdidaGlobal)
               const Padding(
                 padding: EdgeInsets.only(top: 8),
-                child: Text("⚠️ Este descuento genera pérdidas.", style: TextStyle(color: Colors.redAccent, fontSize: 11, fontWeight: FontWeight.bold)),
+                child: Text(
+                  "⚠️ Este descuento genera pérdidas en uno o más productos.",
+                  style: TextStyle(
+                    color: Colors.redAccent,
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
               ),
           ] else
             Flexible(
               child: ListView(
                 shrinkWrap: true,
-                children: widget.carritoActual.where((i) => i['es_domicilio'] != true).map((item) {
+                children: widget.carritoActual.where((i) => i['es_domicilio'] != true).map((
+                  item,
+                ) {
                   String id = item['cart_id']?.toString() ?? "sin_id";
-                  
-                  // 🔥 Comparamos contra el inventario original de SQLite
+
                   var original = widget.productosOriginales.firstWhere(
-                    (p) => p['id'] == item['id'], 
-                    orElse: () => <String, dynamic>{}
+                    (p) => p['id'] == item['id'],
+                    orElse: () => <String, dynamic>{},
                   );
-                  double descOriginal = original.isNotEmpty ? (original['descuento'] ?? 0).toDouble() : 0.0;
-                  bool tieneDescDeInventario = descOriginal > 0;
+                  double descOriginal = original.isNotEmpty
+                      ? (original['descuento'] ?? 0).toDouble()
+                      : 0.0;
+                  bool tieneDescInventario = descOriginal > 0;
 
                   double precioVenta = (item['precio_venta'] as num).toDouble();
-                  double pctInput = double.tryParse(_pctCtrls[id]?.text ?? "0") ?? 0;
-                  double precioCalculado = precioVenta - (precioVenta * (pctInput / 100));
-                  bool perdidaInd = _generaPerdida(item, pctInput);
+                  double pctCalculado = tieneDescInventario
+                      ? descOriginal
+                      : _obtenerPctEfectivo(item, id);
+                  double precioCalculado =
+                      precioVenta - (precioVenta * (pctCalculado / 100));
+                  bool perdidaInd = _generaPerdida(item, pctCalculado);
+
                   return Card(
-                    color: isOscuro 
-                      ? (tieneDescDeInventario ? Colors.white.withOpacity(0.05) : Colors.white.withOpacity(0.08))
-                      : (tieneDescDeInventario ? Colors.grey.shade100 : Colors.white),
+                    color: isOscuro
+                        ? (tieneDescInventario
+                              ? Colors.white.withOpacity(0.04)
+                              : Colors.white.withOpacity(0.08))
+                        : (tieneDescInventario
+                              ? Colors.grey.shade100
+                              : Colors.white),
                     elevation: isOscuro ? 0 : 2,
                     margin: const EdgeInsets.symmetric(vertical: 6),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),
-                      side: BorderSide(color: isOscuro ? Colors.white10 : Colors.transparent)
+                      side: BorderSide(
+                        color: isOscuro ? Colors.white10 : Colors.transparent,
+                      ),
                     ),
                     child: ListTile(
                       contentPadding: const EdgeInsets.all(12),
-                      title: Text(item['nombre'], 
-                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: isOscuro ? Colors.white : Colors.black87)),
-                      subtitle: tieneDescDeInventario 
-                        ? const Padding(
-                            padding: EdgeInsets.only(top: 8),
-                            child: Text("Ya tiene descuento de inventario.", 
-                              style: TextStyle(color: Colors.orangeAccent, fontSize: 10, fontWeight: FontWeight.bold)),
-                          )
-                        : Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                      title: Text(
+                        item['nombre'],
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                          color: isOscuro ? Colors.white : Colors.black87,
+                        ),
+                      ),
+                      subtitle: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const SizedBox(height: 8),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
-                              const SizedBox(height: 10),
-                              Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                children: [
-                                  Text("Antes: \$${precioVenta.toStringAsFixed(0)}", 
-                                    style: TextStyle(fontSize: 11, color: isOscuro ? Colors.white38 : Colors.grey, decoration: TextDecoration.lineThrough)),
-                                  Text("Ahora: \$${precioCalculado.toStringAsFixed(0)}", 
-                                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w900, color: isOscuro ? Colors.cyanAccent : const Color(0xFF0D47A1))),
-                                ],
+                              Text(
+                                "Precio base: \$${precioVenta.toStringAsFixed(0)}",
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: isOscuro
+                                      ? Colors.white38
+                                      : Colors.grey,
+                                  decoration: pctCalculado > 0
+                                      ? TextDecoration.lineThrough
+                                      : null,
+                                ),
                               ),
-                              const Divider(height: 20),
-                              Row(children: [
-                                Expanded(child: _miniInput(_cantCtrls[id]!, "Cant", isOscuro)),
-                                const SizedBox(width: 15),
-                                Expanded(
-                                  child: _miniInput(
-                                    _pctCtrls[id]!, 
-                                    "% Desc", 
-                                    isOscuro, 
-                                    onChanged: (v) => setState((){}) // Esto refresca el precio al escribir
-                                  ),
+                              Text(
+                                "Cobro: \$${precioCalculado.toStringAsFixed(0)}",
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w900,
+                                  color: isOscuro
+                                      ? Colors.cyanAccent
+                                      : const Color(0xFF0D47A1),
                                 ),
-                              ]),
-                              if (perdidaInd)
-                                Padding(
-                                  padding: const EdgeInsets.only(top: 8),
-                                  child: Row(
-                                    children: [
-                                      const Icon(Icons.warning_amber_rounded, color: Colors.redAccent, size: 14),
-                                      const SizedBox(width: 4),
-                                      const Text("Genera pérdida", 
-                                        style: TextStyle(color: Colors.redAccent, fontSize: 10, fontWeight: FontWeight.bold)),
-                                    ],
-                                  ),
-                                ),
+                              ),
                             ],
                           ),
+                          const Divider(height: 16),
+                          if (tieneDescInventario)
+                            Container(
+                              padding: const EdgeInsets.all(6),
+                              decoration: BoxDecoration(
+                                color: Colors.orange.withOpacity(0.1),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                "🏷️ Descuento fijado desde inventario: ${_fmtExact(descOriginal)}%",
+                                style: const TextStyle(
+                                  color: Colors.orangeAccent,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            )
+                          else
+                            Row(
+                              children: [
+                                SizedBox(
+                                  width: 60,
+                                  child: _miniInput(
+                                    _cantCtrls[id]!,
+                                    "Cant",
+                                    isOscuro,
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: _miniInput(
+                                    _valCtrls[id]!,
+                                    _modoDineroInd[id] == true
+                                        ? "Monto (\$)"
+                                        : "Desc (%)",
+                                    isOscuro,
+                                    onChanged: (v) => setState(() {}),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                ToggleButtons(
+                                  isSelected: [
+                                    !(_modoDineroInd[id] ?? false),
+                                    _modoDineroInd[id] ?? false,
+                                  ],
+                                  onPressed: (index) {
+                                    setState(() {
+                                      _modoDineroInd[id] = index == 1;
+                                    });
+                                  },
+                                  borderRadius: BorderRadius.circular(8),
+                                  constraints: const BoxConstraints(
+                                    minWidth: 32,
+                                    minHeight: 32,
+                                  ),
+                                  children: const [
+                                    Text(
+                                      "%",
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                    Text(
+                                      "\$",
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          if (perdidaInd)
+                            const Padding(
+                              padding: EdgeInsets.only(top: 6),
+                              child: Row(
+                                children: [
+                                  Icon(
+                                    Icons.warning_amber_rounded,
+                                    color: Colors.redAccent,
+                                    size: 14,
+                                  ),
+                                  SizedBox(width: 4),
+                                  Text(
+                                    "Genera pérdida",
+                                    style: TextStyle(
+                                      color: Colors.redAccent,
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                        ],
+                      ),
                     ),
                   );
                 }).toList(),
@@ -6785,55 +7196,107 @@ class _DialogoDescuentoCartState extends State<_DialogoDescuentoCart> {
           const SizedBox(height: 20),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
-              backgroundColor: perdidaGlobal ? Colors.red : (isOscuro ? Colors.cyanAccent.shade700 : const Color(0xFF0D47A1)), 
-              minimumSize: const Size(double.infinity, 50), shape: const StadiumBorder()
+              backgroundColor: perdidaGlobal
+                  ? Colors.red
+                  : (isOscuro
+                        ? Colors.cyanAccent.shade700
+                        : const Color(0xFF0D47A1)),
+              minimumSize: const Size(double.infinity, 50),
+              shape: const StadiumBorder(),
             ),
             onPressed: () {
               List<Map<String, dynamic>> resIndividuales = [];
-              double pctGlobal = double.tryParse(_globalCtrl.text) ?? 0;
-              if (!_globalActivo) {
+              double pctGlobalFinal = 0.0;
+
+              if (_globalActivo) {
+                double rawInput = double.tryParse(_globalCtrl.text) ?? 0;
+                if (_modoDineroGlobal) {
+                  // Si fue en dinero, calculamos el porcentaje promedio representativo
+                  double totalBruto = widget.carritoActual
+                      .where((i) => i['es_domicilio'] != true)
+                      .fold(
+                        0.0,
+                        (sum, i) =>
+                            sum +
+                            ((i['precio_venta'] as num).toDouble() *
+                                (i['cantidad'] as num).toDouble()),
+                      );
+                  pctGlobalFinal = totalBruto > 0
+                      ? (rawInput / totalBruto) * 100
+                      : 0.0;
+                } else {
+                  pctGlobalFinal = rawInput;
+                }
+              } else {
                 for (var item in widget.carritoActual) {
                   String id = item['cart_id']?.toString() ?? "sin_id";
                   if (item['es_domicilio'] == true) continue;
 
-                  // 🔥 Si el producto originalmente tiene descuento en inventario, no se reporta como manual del carrito
                   var original = widget.productosOriginales.firstWhere(
-                    (p) => p['id'] == item['id'], 
-                    orElse: () => <String, dynamic>{}
+                    (p) => p['id'] == item['id'],
+                    orElse: () => <String, dynamic>{},
                   );
-                  double descOriginal = original.isNotEmpty ? (original['descuento'] ?? 0).toDouble() : 0.0;
-                  if (descOriginal > 0) continue;
+                  double descOriginal = original.isNotEmpty
+                      ? (original['descuento'] ?? 0).toDouble()
+                      : 0.0;
+                  if (descOriginal > 0)
+                    continue; // Si ya tiene de inventario, se respeta intacto
 
                   int c = int.tryParse(_cantCtrls[id]?.text ?? "0") ?? 0;
-                  double p = double.tryParse(_pctCtrls[id]?.text ?? "0") ?? 0;
-                  if (c > 0 && p > 0) resIndividuales.add({'cart_id': id, 'qty': c, 'desc': p});
+                  double pctEquivalente = _obtenerPctEfectivo(item, id);
+
+                  if (c > 0 && pctEquivalente > 0) {
+                    resIndividuales.add({
+                      'cart_id': id,
+                      'qty': c,
+                      'desc': pctEquivalente,
+                    });
+                  }
                 }
               }
-              widget.onAplicar(resIndividuales, _globalActivo, pctGlobal);
+              widget.onAplicar(resIndividuales, _globalActivo, pctGlobalFinal);
               Navigator.pop(context);
-            }, 
+            },
             child: Text(
-              perdidaGlobal ? "GUARDAR CON PÉRDIDAS" : "CONFIRMAR", 
-              style: TextStyle(color: isOscuro ? Colors.black : Colors.white, fontWeight: FontWeight.bold)
-            )
+              perdidaGlobal ? "GUARDAR CON PÉRDIDAS" : "CONFIRMAR",
+              style: TextStyle(
+                color: isOscuro ? Colors.black : Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _miniInput(TextEditingController ctrl, String label, bool isOscuro, {Function(String)? onChanged}) {
+  Widget _miniInput(
+    TextEditingController ctrl,
+    String label,
+    bool isOscuro, {
+    Function(String)? onChanged,
+  }) {
     return TextField(
       controller: ctrl,
       onChanged: onChanged,
-      keyboardType: TextInputType.number,
-      style: TextStyle(fontSize: 14, color: isOscuro ? Colors.white : Colors.black),
+      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+      style: TextStyle(
+        fontSize: 14,
+        color: isOscuro ? Colors.white : Colors.black,
+      ),
       decoration: InputDecoration(
         labelText: label,
-        labelStyle: TextStyle(fontSize: 12, color: isOscuro ? Colors.white60 : Colors.black54),
+        labelStyle: TextStyle(
+          fontSize: 12,
+          color: isOscuro ? Colors.white60 : Colors.black54,
+        ),
         isDense: true,
         contentPadding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10),
-        enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: isOscuro ? Colors.white24 : Colors.black12)),
+        enabledBorder: UnderlineInputBorder(
+          borderSide: BorderSide(
+            color: isOscuro ? Colors.white24 : Colors.black12,
+          ),
+        ),
       ),
     );
   }
@@ -7048,5 +7511,69 @@ class _AnuncioNativoWidgetState extends State<AnuncioNativoWidget> {
         ],
       ),
     );
+  }
+}
+
+double obtenerDescuentoVigente(dynamic descVal, dynamic fechaFinVal) {
+  double desc = (descVal as num?)?.toDouble() ?? 0.0;
+  if (desc <= 0) return 0.0;
+  if (fechaFinVal != null && fechaFinVal.toString().trim().isNotEmpty && fechaFinVal.toString() != "null") {
+    try {
+      DateTime fin = DateTime.parse(fechaFinVal.toString());
+      if (DateTime.now().isAfter(fin)) {
+        return 0.0; // Descuento expirado
+      }
+    } catch (_) {}
+  }
+  return desc;
+}
+
+String? formatearVencimientoDescuento(
+  dynamic fechaFinStr, {
+  bool corto = false,
+}) {
+  if (fechaFinStr == null ||
+      fechaFinStr.toString().trim().isEmpty ||
+      fechaFinStr.toString() == "null") {
+    return null;
+  }
+  try {
+    DateTime fin = DateTime.parse(fechaFinStr.toString());
+    DateTime now = DateTime.now();
+    DateTime hoy = DateTime(now.year, now.month, now.day);
+    DateTime finDia = DateTime(fin.year, fin.month, fin.day);
+
+    if (now.isAfter(fin)) return null; // Descuento vencido
+
+    const meses = [
+      '',
+      'Ene',
+      'Feb',
+      'Mar',
+      'Abr',
+      'May',
+      'Jun',
+      'Jul',
+      'Ago',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dic',
+    ];
+
+    if (corto) {
+      if (hoy.isAtSameMomentAs(finDia)) return "hasta hoy";
+      int dias = finDia.difference(hoy).inDays;
+      if (dias == 1) return "hasta mañana";
+      return "hasta ${fin.day} ${meses[fin.month]}";
+    } else {
+      // Formato largo para el ojito (detalle completo)
+      if (hoy.isAtSameMomentAs(finDia)) return "hasta hoy a las 11:59 PM";
+      int dias = finDia.difference(hoy).inDays;
+      if (dias == 1) return "hasta mañana a las 11:59 PM";
+      return "hasta el ${fin.day} de ${meses[fin.month]} a las 11:59 PM";
+    }
+  } catch (_) {
+    return null;
   }
 }

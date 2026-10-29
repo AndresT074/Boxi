@@ -577,7 +577,6 @@ class ServicioRespaldo {
         }
       }
 
-      // Borrar pedidos clonados y sus detalles
       Batch batchPedidos = db.batch();
       for (int pedId in pedidosABorrar) {
         batchPedidos.delete('pedidos', where: 'id = ?', whereArgs: [pedId]);
@@ -590,10 +589,10 @@ class ServicioRespaldo {
       await batchPedidos.commit(noResult: true);
 
       // =========================================================================
-      // 2. DESDUPLICAR DETALLES CON JOIN A PRODUCTOS (Resuelve nombres nulos)
+      // 2. DESDUPLICAR DETALLES RESPETANDO LAS VARIANTES (INCLUYE SIEMPRE EL NOMBRE)
       // =========================================================================
       final todosDetalles = await db.rawQuery('''
-        SELECT d.id, d.pedido_id, d.producto_id, d.cantidad, d.precio_unitario,
+        SELECT d.id, d.pedido_id, d.producto_id, d.cantidad, d.precio_unitario, d.descuento,
                LOWER(TRIM(COALESCE(NULLIF(d.nombre_snapshot, ''), NULLIF(p.nombre, ''), 'prod'))) as nombre_resuelto
         FROM detalle_pedidos d
         LEFT JOIN productos p ON d.producto_id = p.id
@@ -610,14 +609,12 @@ class ServicioRespaldo {
         String nom = d['nombre_resuelto'].toString();
         int cant = (d['cantidad'] as num?)?.toInt() ?? 1;
 
-        // Si tiene producto_id válido usamos el id del producto; si no, el nombre resuelto
-        String idOIdentificador = prodId > 0 ? "prod_$prodId" : nom;
-        String claveDetalle = "${pedId}_${idOIdentificador}_$cant";
+        // 🔥 CORRECCIÓN: La clave incluye SIEMPRE el nombre de la variante (nom).
+        // Si el nombre de la variante es diferente, NUNCA se considerará duplicado.
+        String claveDetalle = "${pedId}_${prodId}_${nom}_$cant";
 
         if (detallesVistos.contains(claveDetalle)) {
-          detallesABorrar.add(
-            id,
-          ); // Es clon exacto dentro del mismo pedido -> borrar
+          detallesABorrar.add(id);
         } else {
           detallesVistos.add(claveDetalle);
         }
@@ -641,20 +638,36 @@ class ServicioRespaldo {
       );
 
       // =========================================================================
-      // 4. RESTABLECER PRECIO UNITARIO Y ELIMINAR EL FALSO DESCUENTO (-50%)
+      // 4. RECALCULAR TOTALES DE PEDIDOS (CONSERVA LOS DESCUENTOS REALES)
       // =========================================================================
-      // Ponemos descuento = 0 y recalculamos subtotal para que coincida exactamente
-      await db.rawUpdate('''
-        UPDATE detalle_pedidos 
-        SET descuento = 0,
-            subtotal = (precio_unitario * cantidad)
-        WHERE pedido_id IN (
-          SELECT p.id FROM pedidos p
-          JOIN detalle_pedidos d ON p.id = d.pedido_id
-          GROUP BY p.id
-          HAVING COUNT(d.id) = 1
-        )
-      ''');
+      final pedidos = await db.query(
+        'pedidos',
+        columns: ['id', 'valor_domicilio'],
+      );
+      for (var p in pedidos) {
+        int pedId = p['id'] as int;
+        double domi = (p['valor_domicilio'] as num?)?.toDouble() ?? 0.0;
+
+        var res = await db.rawQuery(
+          '''
+          SELECT SUM(subtotal) as total_prods,
+                 SUM(subtotal - (cantidad * COALESCE((SELECT precio_compra FROM productos WHERE id = producto_id), 0))) as ganancia
+          FROM detalle_pedidos WHERE pedido_id = ?
+        ''',
+          [pedId],
+        );
+
+        double tProds = (res.first['total_prods'] as num?)?.toDouble() ?? 0.0;
+        double g = (res.first['ganancia'] as num?)?.toDouble() ?? 0.0;
+        double totalFinal = tProds + domi;
+
+        await db.update(
+          'pedidos',
+          {'total_venta': totalFinal, 'ganancia_total': g},
+          where: 'id = ?',
+          whereArgs: [pedId],
+        );
+      }
 
       // =========================================================================
       // 5. SINCRONIZAR A REALTIME DATABASE
